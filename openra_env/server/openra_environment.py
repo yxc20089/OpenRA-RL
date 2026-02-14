@@ -5,6 +5,7 @@ translates between the OpenEnv API and the gRPC bridge protocol,
 and computes rewards.
 """
 
+import asyncio
 import logging
 import uuid
 from typing import Any, Optional
@@ -48,7 +49,7 @@ class OpenRAEnvironment(Environment):
         self,
         openra_path: Optional[str] = None,
         mod: str = "ra",
-        map_name: str = "",
+        map_name: str = "singles.oramap",
         grpc_port: int = 9999,
         bot_type: str = "normal",
         reward_weights: Optional[RewardWeights] = None,
@@ -65,6 +66,9 @@ class OpenRAEnvironment(Environment):
         self._bridge = BridgeClient(port=grpc_port)
         self._reward_fn = OpenRARewardFunction(weights=reward_weights)
         self._state = OpenRAState()
+        # Persistent event loop for async gRPC bridge operations.
+        # The gRPC streaming state must stay within the same loop.
+        self._loop = asyncio.new_event_loop()
 
     def reset(
         self,
@@ -79,13 +83,7 @@ class OpenRAEnvironment(Environment):
         3. Connect gRPC bridge
         4. Return initial observation
         """
-        import asyncio
-
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(self._async_reset(seed, episode_id, **kwargs))
-        finally:
-            loop.close()
+        return self._loop.run_until_complete(self._async_reset(seed, episode_id, **kwargs))
 
     async def _async_reset(
         self,
@@ -113,11 +111,18 @@ class OpenRAEnvironment(Environment):
             self._config.seed = seed
 
         # Launch OpenRA
+        logger.info(f"Launching OpenRA: map={self._config.map_name}, mod={self._config.mod}")
         self._process.launch()
+        logger.info(f"OpenRA process launched (PID={self._process.pid})")
 
         # Wait for gRPC server to be ready
-        ready = await self._bridge.wait_for_ready(max_retries=30, retry_interval=1.0)
+        # Software rendering (llvmpipe in Docker) can take 60-120s to start
+        logger.info("Waiting for gRPC bridge to become ready...")
+        ready = await self._bridge.wait_for_ready(max_retries=120, retry_interval=2.0)
         if not ready:
+            # Log process status for debugging
+            alive = self._process.is_alive()
+            logger.error(f"Bridge failed to start. Process alive={alive}")
             raise RuntimeError("OpenRA gRPC bridge failed to start")
 
         # Start streaming session and get initial observation
@@ -136,13 +141,7 @@ class OpenRAEnvironment(Environment):
         **kwargs: Any,
     ) -> OpenRAObservation:
         """Execute an action and return the next observation."""
-        import asyncio
-
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(self._async_step(action))
-        finally:
-            loop.close()
+        return self._loop.run_until_complete(self._async_step(action))
 
     async def _async_step(self, action: OpenRAAction) -> OpenRAObservation:
         self._state.step_count += 1
@@ -186,15 +185,15 @@ class OpenRAEnvironment(Environment):
 
     def close(self) -> None:
         """Clean up resources."""
-        import asyncio
-
         try:
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(self._bridge.close())
-            loop.close()
+            self._loop.run_until_complete(self._bridge.close())
         except Exception:
             pass
         self._process.kill()
+        try:
+            self._loop.close()
+        except Exception:
+            pass
 
     def __del__(self):
         try:

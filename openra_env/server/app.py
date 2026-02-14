@@ -19,7 +19,13 @@ app = create_app(
 def main():
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        ws_ping_interval=None,
+        ws_ping_timeout=None,
+    )
 
 
 if __name__ == "__main__":

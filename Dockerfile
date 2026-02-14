@@ -1,0 +1,121 @@
+# ==============================================================================
+# Stage 1: Build OpenRA from source (C#/.NET 8.0)
+# ==============================================================================
+FROM mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim AS openra-build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    make \
+    git \
+    libsdl2-dev \
+    libopenal-dev \
+    libfreetype-dev \
+    liblua5.1-0-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY OpenRA /src/openra
+WORKDIR /src/openra
+
+# Build with system libraries (unix-generic avoids bundled native binaries)
+# SKIP_PROTOC=true uses pre-generated protobuf C# files (avoids protoc arm64 crash in Docker)
+ENV SKIP_PROTOC=true
+RUN make TARGETPLATFORM=unix-generic CONFIGURATION=Release
+
+# Verify critical output (includes Null platform for headless RL operation)
+RUN test -f bin/OpenRA.dll && \
+    test -f bin/OpenRA.Game.dll && \
+    test -f bin/OpenRA.Mods.Common.dll && \
+    test -f bin/OpenRA.Platforms.Null.dll
+
+# ==============================================================================
+# Stage 2: Install Python dependencies
+# ==============================================================================
+FROM python:3.11-slim-bookworm AS python-build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY pyproject.toml /app/
+COPY openra_env/ /app/openra_env/
+COPY proto/ /app/proto/
+COPY README.md /app/
+
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir .
+
+# ==============================================================================
+# Stage 3: Runtime image
+# ==============================================================================
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-bookworm-slim AS dotnet-runtime
+
+FROM python:3.11-slim-bookworm
+
+LABEL maintainer="OpenRA-RL"
+LABEL description="OpenRA RL Environment - headless game engine with gRPC bridge + OpenEnv API"
+
+# Copy ASP.NET Core runtime from official Microsoft image
+COPY --from=dotnet-runtime /usr/share/dotnet /usr/share/dotnet
+RUN ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xvfb \
+    libgl1-mesa-dri \
+    libgl1-mesa-glx \
+    libegl-mesa0 \
+    libsdl2-2.0-0 \
+    libopenal1 \
+    libfreetype6 \
+    liblua5.1-0 \
+    libicu72 \
+    curl procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy Python packages from builder
+COPY --from=python-build /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=python-build /usr/local/bin /usr/local/bin
+
+# Copy built OpenRA (bin, mods, and glsl shaders needed at runtime)
+COPY --from=openra-build /src/openra/bin /opt/openra/bin
+COPY --from=openra-build /src/openra/mods /opt/openra/mods
+COPY --from=openra-build /src/openra/glsl /opt/openra/glsl
+
+# Create native library symlinks that OpenRA expects
+# (configure-system-libraries.sh points these to system lib paths)
+RUN LIBDIR=$( [ "$(dpkg --print-architecture)" = "arm64" ] && echo "/usr/lib/aarch64-linux-gnu" || echo "/usr/lib/x86_64-linux-gnu" ) && \
+    ln -sf "$LIBDIR/libSDL2-2.0.so.0" /opt/openra/bin/SDL2.so && \
+    ln -sf "$LIBDIR/libopenal.so.1" /opt/openra/bin/soft_oal.so && \
+    ln -sf "$LIBDIR/libfreetype.so.6" /opt/openra/bin/freetype6.so && \
+    ln -sf "$LIBDIR/liblua5.1.so.0" /opt/openra/bin/lua51.so
+
+# Copy Python application code
+COPY openra_env/ /app/openra_env/
+COPY proto/ /app/proto/
+COPY pyproject.toml /app/
+
+# Create OpenRA support directory
+RUN mkdir -p /root/.config/openra
+
+# Copy entrypoint
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Environment
+ENV OPENRA_PATH=/opt/openra
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+ENV DISPLAY=:99
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
+ENV DOTNET_ROLL_FORWARD=LatestMajor
+ENV LIBGL_ALWAYS_SOFTWARE=1
+ENV MESA_GL_VERSION_OVERRIDE=3.3
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["python", "-m", "openra_env.server.app"]

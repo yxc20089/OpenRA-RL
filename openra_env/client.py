@@ -4,10 +4,12 @@ Provides the EnvClient subclass for connecting to the OpenRA-RL
 environment server over WebSocket.
 """
 
+import os
 from typing import Any, Dict
 
 from openenv.core.client_types import StepResult
 from openenv.core.env_client import EnvClient
+from websockets.asyncio.client import connect as ws_connect
 
 from openra_env.models import (
     BuildingInfoModel,
@@ -32,6 +34,47 @@ class OpenRAEnv(EnvClient[OpenRAAction, OpenRAObservation, OpenRAState]):
                 action = OpenRAAction(commands=[...])
                 result = await env.step(action)
     """
+
+    async def connect(self) -> "OpenRAEnv":
+        """Connect with ping keepalive disabled.
+
+        OpenRA operations (especially reset) can take 60-120+ seconds
+        with software rendering. The default websockets ping_interval=20s
+        would kill the connection before the server responds.
+        """
+        if self._ws is not None:
+            return self
+
+        ws_url_lower = self._ws_url.lower()
+        is_localhost = "localhost" in ws_url_lower or "127.0.0.1" in ws_url_lower
+
+        old_no_proxy = os.environ.get("NO_PROXY")
+        if is_localhost:
+            current_no_proxy = old_no_proxy or ""
+            if "localhost" not in current_no_proxy.lower():
+                os.environ["NO_PROXY"] = (
+                    f"{current_no_proxy},localhost,127.0.0.1"
+                    if current_no_proxy
+                    else "localhost,127.0.0.1"
+                )
+
+        try:
+            self._ws = await ws_connect(
+                self._ws_url,
+                open_timeout=self._connect_timeout,
+                max_size=self._max_message_size,
+                ping_interval=None,
+            )
+        except Exception as e:
+            raise ConnectionError(f"Failed to connect to {self._ws_url}: {e}") from e
+        finally:
+            if is_localhost:
+                if old_no_proxy is None:
+                    os.environ.pop("NO_PROXY", None)
+                else:
+                    os.environ["NO_PROXY"] = old_no_proxy
+
+        return self
 
     def _step_payload(self, action: OpenRAAction) -> Dict[str, Any]:
         """Convert action to JSON for WebSocket transport."""

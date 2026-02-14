@@ -32,6 +32,7 @@ class OpenRAConfig:
     rl_slot: str = "Multi1"
     ai_slot: str = ""
     seed: Optional[int] = None
+    headless: bool = True  # Use Null renderer (no GPU needed)
     extra_args: dict = field(default_factory=dict)
 
 
@@ -113,6 +114,10 @@ class OpenRAProcessManager:
             f"Launch.Map={self.config.map_name}",
             f"Launch.Bots={bots}",
         ]
+
+        # Use Null renderer for headless operation (no GPU/OpenGL needed)
+        if self.config.headless:
+            args.append("Game.Platform=Null")
 
         for key, value in self.config.extra_args.items():
             args.append(f"{key}={value}")

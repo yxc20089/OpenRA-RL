@@ -1,0 +1,24 @@
+# Docker Compose for OpenRA-RL development
+#
+# Usage:
+#   First build: OPENRA_DIR=/path/to/OpenRA ./docker/build.sh
+#   Then:        docker compose up
+
+services:
+  openra-rl:
+    image: openra-rl
+    ports:
+      - "8000:8000"   # OpenEnv HTTP API
+      - "9999:9999"   # gRPC bridge (direct access)
+    environment:
+      - OPENRA_PATH=/opt/openra
+      - DISPLAY=:99
+      - LIBGL_ALWAYS_SOFTWARE=1
+      - MESA_GL_VERSION_OVERRIDE=3.3
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 4G
+    shm_size: 256m
+    restart: unless-stopped

@@ -1,0 +1,23 @@
+.git
+.github
+.pytest_cache
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.eggs
+dist
+build
+.mypy_cache
+.ruff_cache
+.venv
+venv
+documents/
+tests/
+docs/
+*.pdf
+.claude/
+# OpenRA build artifacts (we build from source in Docker)
+OpenRA/.git
+OpenRA/bin
+OpenRA/*/obj
