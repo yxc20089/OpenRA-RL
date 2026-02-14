@@ -1,0 +1,151 @@
+syntax = "proto3";
+
+package openra.rl;
+
+option csharp_namespace = "OpenRA.Mods.Common.RL";
+
+// The RL Bridge service allows an external agent to interact with OpenRA
+// via bidirectional streaming (lock-step) or unary state queries.
+service RLBridge {
+  // Bidirectional streaming: game sends observations, agent sends actions.
+  // Each observation waits for an action before advancing to the next tick.
+  rpc GameSession(stream AgentAction) returns (stream GameObservation);
+
+  // Unary: query current game state on demand.
+  rpc GetState(StateRequest) returns (GameState);
+}
+
+// ─── Observations (Game → Agent) ────────────────────────────────────────────
+
+message GameObservation {
+  int32 tick = 1;
+  string episode_id = 2;
+
+  // Structured observations
+  RlEconomy economy = 3;
+  RlMilitary military = 4;
+  repeated RlUnitInfo units = 5;
+  repeated RlBuildingInfo buildings = 6;
+  repeated RlProductionInfo production = 7;
+  repeated RlUnitInfo visible_enemies = 8;
+  RlMapInfo map_info = 9;
+
+  // Binary-encoded spatial tensor (e.g. terrain, unit density, fog)
+  // Format: flat array of floats, shape described by map_info.width x map_info.height x channels
+  bytes spatial_map = 10;
+  int32 spatial_channels = 11;
+
+  // Episode signals
+  bool done = 12;
+  float reward = 13;
+  string result = 14; // "win", "lose", "draw", ""
+
+  // Available actions context
+  repeated string available_production = 15;
+}
+
+message RlEconomy {
+  int32 cash = 1;
+  int32 ore = 2;
+  int32 power_provided = 3;
+  int32 power_drained = 4;
+  int32 resource_capacity = 5;
+  int32 harvester_count = 6;
+}
+
+message RlMilitary {
+  int32 units_killed = 1;
+  int32 units_lost = 2;
+  int32 buildings_killed = 3;
+  int32 buildings_lost = 4;
+  int32 army_value = 5;
+  int32 active_unit_count = 6;
+}
+
+message RlUnitInfo {
+  uint32 actor_id = 1;
+  string type = 2;          // e.g. "e1", "1tnk", "harv"
+  int32 pos_x = 3;          // WPos X
+  int32 pos_y = 4;          // WPos Y
+  int32 cell_x = 5;         // CPos X (grid)
+  int32 cell_y = 6;         // CPos Y (grid)
+  float hp_percent = 7;     // 0.0 - 1.0
+  bool is_idle = 8;
+  string current_activity = 9;
+  string owner = 10;        // Player internal name
+  int32 ammo = 11;          // -1 if not applicable
+  bool can_attack = 12;
+}
+
+message RlBuildingInfo {
+  uint32 actor_id = 1;
+  string type = 2;          // e.g. "powr", "barr", "weap"
+  int32 pos_x = 3;
+  int32 pos_y = 4;
+  float hp_percent = 5;
+  string owner = 6;
+  bool is_producing = 7;
+  float production_progress = 8; // 0.0 - 1.0 if producing
+  string producing_item = 9;
+  bool is_powered = 10;
+}
+
+message RlProductionInfo {
+  string queue_type = 1;    // "Building", "Infantry", "Vehicle", "Aircraft"
+  string item = 2;          // Actor type being produced
+  float progress = 3;       // 0.0 - 1.0
+  int32 remaining_ticks = 4;
+  int32 remaining_cost = 5;
+  bool paused = 6;
+}
+
+message RlMapInfo {
+  int32 width = 1;          // Map width in cells
+  int32 height = 2;         // Map height in cells
+  string map_name = 3;
+}
+
+// ─── Actions (Agent → Game) ──────────────────────────────────────────────────
+
+message AgentAction {
+  repeated Command commands = 1;
+}
+
+message Command {
+  ActionType action = 1;
+  uint32 actor_id = 2;        // Subject actor (for unit commands)
+  uint32 target_actor_id = 3; // Target actor (for attack, enter, etc.)
+  int32 target_x = 4;         // Target CPos X (for move, deploy, etc.)
+  int32 target_y = 5;         // Target CPos Y
+  string item_type = 6;       // For build/train: actor type to produce
+  bool queued = 7;             // Queue after current activity vs interrupt
+}
+
+enum ActionType {
+  NO_OP = 0;
+  MOVE = 1;
+  ATTACK_MOVE = 2;
+  ATTACK = 3;
+  STOP = 4;
+  HARVEST = 5;
+  BUILD = 6;         // Start production of a building
+  TRAIN = 7;         // Start production of a unit
+  DEPLOY = 8;        // Deploy MCV, unpack
+  SELL = 9;          // Sell building
+  REPAIR = 10;       // Repair building
+  PLACE_BUILDING = 11; // Place a completed building at target location
+  CANCEL_PRODUCTION = 12;
+  SET_RALLY_POINT = 13;
+}
+
+// ─── State Query ─────────────────────────────────────────────────────────────
+
+message GameState {
+  string episode_id = 1;
+  int32 tick = 2;
+  string phase = 3;           // "waiting", "playing", "game_over"
+  string winner = 4;          // Player internal name, empty if ongoing
+  int32 player_count = 5;
+}
+
+message StateRequest {}

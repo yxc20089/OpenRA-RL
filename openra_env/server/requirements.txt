@@ -1,0 +1,7 @@
+openenv-core>=0.2.0
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+protobuf>=4.25.0
+pydantic>=2.0.0
+fastapi>=0.100.0
+uvicorn>=0.20.0

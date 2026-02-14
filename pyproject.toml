@@ -1,0 +1,43 @@
+[project]
+name = "openra-env"
+version = "0.1.0"
+description = "OpenRA Reinforcement Learning Environment - Gymnasium-style RL environment for the OpenRA RTS engine"
+readme = "README.md"
+license = {text = "GPL-3.0"}
+requires-python = ">=3.10"
+dependencies = [
+    "openenv-core>=0.2.0",
+    "grpcio>=1.60.0",
+    "grpcio-tools>=1.60.0",
+    "protobuf>=4.25.0",
+    "pydantic>=2.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.1.0",
+]
+training = [
+    "trl>=0.7.0",
+    "torch>=2.0.0",
+    "transformers>=4.30.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["openra_env"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
