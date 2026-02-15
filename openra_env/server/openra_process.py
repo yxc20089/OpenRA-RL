@@ -33,6 +33,7 @@ class OpenRAConfig:
     ai_slot: str = ""
     seed: Optional[int] = None
     headless: bool = True  # Use Null renderer (no GPU needed)
+    record_replays: bool = False  # Enable .orarep replay recording
     extra_args: dict = field(default_factory=dict)
 
 
@@ -118,6 +119,9 @@ class OpenRAProcessManager:
         # Use Null renderer for headless operation (no GPU/OpenGL needed)
         if self.config.headless:
             args.append("Game.Platform=Null")
+
+        if self.config.record_replays:
+            args.append("Server.RecordReplays=True")
 
         for key, value in self.config.extra_args.items():
             args.append(f"{key}={value}")

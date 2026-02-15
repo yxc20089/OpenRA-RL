@@ -303,6 +303,8 @@ def commands_to_proto(commands: list[dict]) -> rl_bridge_pb2.AgentAction:
         "set_stance": rl_bridge_pb2.SET_STANCE,
         "enter_transport": rl_bridge_pb2.ENTER_TRANSPORT,
         "unload": rl_bridge_pb2.UNLOAD,
+        "power_down": rl_bridge_pb2.POWER_DOWN,
+        "set_primary": rl_bridge_pb2.SET_PRIMARY,
     }
 
     proto_commands = []

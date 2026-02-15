@@ -163,6 +163,8 @@ enum ActionType {
   SET_STANCE = 15;      // Set unit stance (target_x: 0=HoldFire, 1=ReturnFire, 2=Defend, 3=AttackAnything)
   ENTER_TRANSPORT = 16; // Load into transport (target_actor_id)
   UNLOAD = 17;          // Unload all passengers at current location
+  POWER_DOWN = 18;      // Toggle building power on/off (actor_id = building)
+  SET_PRIMARY = 19;     // Set primary production building (actor_id = building)
 }
 
 // ─── State Query ─────────────────────────────────────────────────────────────
@@ -173,6 +175,8 @@ message GameState {
   string phase = 3;           // "waiting", "playing", "game_over"
   string winner = 4;          // Player internal name, empty if ongoing
   int32 player_count = 5;
+  string player_faction = 6;  // Player faction internal name (e.g. "england", "ukraine")
+  string enemy_faction = 7;   // Opponent faction internal name (if known)
 }
 
 message StateRequest {}

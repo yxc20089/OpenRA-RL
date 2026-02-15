@@ -36,6 +36,8 @@ class ActionType(str, Enum):
     SET_STANCE = "set_stance"
     ENTER_TRANSPORT = "enter_transport"
     UNLOAD = "unload"
+    POWER_DOWN = "power_down"
+    SET_PRIMARY = "set_primary"
 
 
 class CommandModel(Action):
