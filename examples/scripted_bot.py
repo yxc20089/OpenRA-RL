@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Scripted Red Alert bot that plays a full game via the OpenEnv client API.
 
-Exercises ALL Sprint 4 observation fields and action types:
+Exercises ALL Sprint 4+5 observation fields and action types:
   - Observations: spatial_map, visible_enemy_buildings, unit facing/stance/speed/
     attack_range/experience/passengers, building cell coords/can_produce/power/
     rally/repair/sell_value
-  - Actions: all 18 types including GUARD, SET_STANCE, ENTER_TRANSPORT, UNLOAD,
-    SET_RALLY_POINT, REPAIR, SELL
+  - Actions: all 20 types including GUARD, SET_STANCE, ENTER_TRANSPORT, UNLOAD,
+    SET_RALLY_POINT, REPAIR, SELL, POWER_DOWN, SET_PRIMARY
 
 Usage:
     docker run -p 8000:8000 openra-rl
@@ -80,6 +80,8 @@ class ScriptedBot:
         self._apc_loaded = False
         self._repair_issued: set[int] = set()  # building actor IDs being repaired
         self._sold: set[int] = set()  # building actor IDs sold
+        self._powered_down: set[int] = set()  # building actor IDs powered down
+        self._primary_set: set[int] = set()  # building actor IDs set as primary
 
     def decide(self, obs: OpenRAObservation) -> OpenRAAction:
         """Given current observation, return commands for this tick."""
@@ -99,25 +101,31 @@ class ScriptedBot:
         # Priority 3: Set rally points on production buildings
         commands.extend(self._handle_rally_points(obs))
 
-        # Priority 4: Repair damaged buildings
+        # Priority 4: Power management (power down buildings if power negative)
+        commands.extend(self._handle_power_management(obs))
+
+        # Priority 5: Set primary production buildings
+        commands.extend(self._handle_set_primary(obs))
+
+        # Priority 6: Repair damaged buildings
         commands.extend(self._handle_repairs(obs))
 
-        # Priority 5: Queue production (buildings + units)
+        # Priority 7: Queue production (buildings + units)
         commands.extend(self._handle_production(obs))
 
-        # Priority 6: Set stances on new units
+        # Priority 8: Set stances on new units
         commands.extend(self._handle_stances(obs))
 
-        # Priority 7: Assign guards to CY
+        # Priority 9: Assign guards to CY
         commands.extend(self._handle_guards(obs))
 
-        # Priority 8: Load infantry into APC
+        # Priority 10: Load infantry into APC
         commands.extend(self._handle_transport(obs))
 
-        # Priority 9: Combat — attack + unload
+        # Priority 11: Combat — attack + unload
         commands.extend(self._handle_combat(obs))
 
-        # Priority 10: Sell heavily damaged buildings
+        # Priority 12: Sell heavily damaged buildings
         commands.extend(self._handle_sell(obs))
 
         if not commands:
@@ -217,6 +225,41 @@ class ScriptedBot:
                     target_y=rally_y,
                 ))
                 self._rally_set.add(b.actor_id)
+        return commands
+
+    # ── Power management (Sprint 5 action) ─────────────────────────
+
+    def _handle_power_management(self, obs: OpenRAObservation) -> List[CommandModel]:
+        """Power down non-essential buildings when power balance is negative."""
+        commands = []
+        power_balance = obs.economy.power_provided - obs.economy.power_drained
+        if power_balance >= 0:
+            return commands
+
+        # Power down radar/tech buildings first (keep production running)
+        POWER_DOWN_PRIORITY = ["dome", "spen", "syrd", "hpad", "afld", "fix"]
+        for btype in POWER_DOWN_PRIORITY:
+            for b in obs.buildings:
+                if b.type == btype and b.is_powered and b.actor_id not in self._powered_down:
+                    commands.append(CommandModel(action=ActionType.POWER_DOWN, actor_id=b.actor_id))
+                    self._powered_down.add(b.actor_id)
+                    self._log(f"Powering down {b.type} (actor {b.actor_id}) — power balance: {power_balance}")
+                    return commands  # one at a time
+        return commands
+
+    # ── Set primary building (Sprint 5 action) ───────────────────
+
+    def _handle_set_primary(self, obs: OpenRAObservation) -> List[CommandModel]:
+        """Set primary on newest production building of each type."""
+        commands = []
+        for btype_set in [self.BARRACKS_TYPES, self.WAR_FACTORY_TYPES]:
+            buildings_of_type = [b for b in obs.buildings if b.type in btype_set]
+            if len(buildings_of_type) >= 2:
+                newest = max(buildings_of_type, key=lambda b: b.actor_id)
+                if newest.actor_id not in self._primary_set:
+                    commands.append(CommandModel(action=ActionType.SET_PRIMARY, actor_id=newest.actor_id))
+                    self._primary_set.add(newest.actor_id)
+                    self._log(f"Setting primary: {newest.type} (actor {newest.actor_id})")
         return commands
 
     # ── Repair damaged buildings (Sprint 4 observation + existing action) ──

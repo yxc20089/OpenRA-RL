@@ -481,3 +481,163 @@ class TestReplayConfig:
         manager = OpenRAProcessManager(config)
         cmd = manager._build_command()
         assert "Server.RecordReplays=True" not in cmd
+
+
+# ─── MCP Bot Pattern Tests ──────────────────────────────────────────────────
+
+
+class TestMCPBotPatterns:
+    """Test patterns used by the MCP bot and LLM agent."""
+
+    def test_tool_schema_to_openai_conversion(self):
+        """MCP tool schemas convert to valid OpenAI function calling format."""
+        from examples.llm_agent import mcp_tools_to_openai
+
+        # Simulate MCP Tool objects
+        class FakeTool:
+            def __init__(self, name, description, input_schema):
+                self.name = name
+                self.description = description
+                self.input_schema = input_schema
+
+        tools = [
+            FakeTool("get_game_state", "Get game state", {"type": "object", "properties": {}}),
+            FakeTool(
+                "move_units",
+                "Move units to position",
+                {
+                    "type": "object",
+                    "properties": {
+                        "unit_ids": {"type": "array", "items": {"type": "integer"}},
+                        "target_x": {"type": "integer"},
+                        "target_y": {"type": "integer"},
+                    },
+                    "required": ["unit_ids", "target_x", "target_y"],
+                },
+            ),
+        ]
+
+        result = mcp_tools_to_openai(tools)
+        assert len(result) == 2
+        assert result[0]["type"] == "function"
+        assert result[0]["function"]["name"] == "get_game_state"
+        assert result[1]["function"]["name"] == "move_units"
+        assert "properties" in result[1]["function"]["parameters"]
+        assert "unit_ids" in result[1]["function"]["parameters"]["properties"]
+
+    def test_openai_schema_has_required_fields(self):
+        """Each converted tool has type, function.name, function.description, function.parameters."""
+        from examples.llm_agent import mcp_tools_to_openai
+
+        class FakeTool:
+            def __init__(self):
+                self.name = "test_tool"
+                self.description = "A test tool"
+                self.input_schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
+
+        result = mcp_tools_to_openai([FakeTool()])
+        tool = result[0]
+        assert tool["type"] == "function"
+        assert "name" in tool["function"]
+        assert "description" in tool["function"]
+        assert "parameters" in tool["function"]
+
+    def test_compress_history_keeps_system_prompt(self):
+        """History compression preserves the system prompt."""
+        from examples.llm_agent import compress_history
+
+        messages = [
+            {"role": "system", "content": "You are a bot"},
+            *[{"role": "user", "content": f"msg {i}"} for i in range(100)],
+        ]
+
+        compressed = compress_history(messages, keep_last=10)
+        assert compressed[0]["role"] == "system"
+        assert compressed[0]["content"] == "You are a bot"
+        assert len(compressed) == 12  # system + summary + 10 recent
+
+    def test_compress_history_noop_when_short(self):
+        """History compression is a no-op when messages are short."""
+        from examples.llm_agent import compress_history
+
+        messages = [
+            {"role": "system", "content": "You are a bot"},
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"},
+        ]
+
+        compressed = compress_history(messages, keep_last=10)
+        assert len(compressed) == 3  # unchanged
+
+
+class TestScriptedBotNewActions:
+    """Test that the scripted bot has the new Sprint 5 action handlers."""
+
+    def test_power_management_handler_exists(self):
+        from examples.scripted_bot import ScriptedBot
+        bot = ScriptedBot()
+        assert hasattr(bot, "_handle_power_management")
+        assert hasattr(bot, "_powered_down")
+
+    def test_set_primary_handler_exists(self):
+        from examples.scripted_bot import ScriptedBot
+        bot = ScriptedBot()
+        assert hasattr(bot, "_handle_set_primary")
+        assert hasattr(bot, "_primary_set")
+
+    def test_power_management_no_action_when_positive(self):
+        """No power down when power balance is positive."""
+        from examples.scripted_bot import ScriptedBot
+        from openra_env.models import OpenRAObservation, EconomyInfo, BuildingInfoModel
+
+        bot = ScriptedBot()
+        obs = OpenRAObservation(
+            economy=EconomyInfo(power_provided=200, power_drained=80),
+            buildings=[BuildingInfoModel(actor_id=1, type="dome", is_powered=True)],
+        )
+        commands = bot._handle_power_management(obs)
+        assert len(commands) == 0
+
+    def test_power_management_powers_down_when_negative(self):
+        """Powers down non-essential building when power balance is negative."""
+        from examples.scripted_bot import ScriptedBot
+        from openra_env.models import OpenRAObservation, EconomyInfo, BuildingInfoModel
+
+        bot = ScriptedBot()
+        obs = OpenRAObservation(
+            economy=EconomyInfo(power_provided=50, power_drained=100),
+            buildings=[BuildingInfoModel(actor_id=1, type="dome", is_powered=True)],
+        )
+        commands = bot._handle_power_management(obs)
+        assert len(commands) == 1
+        assert commands[0].action == ActionType.POWER_DOWN
+        assert commands[0].actor_id == 1
+
+    def test_set_primary_with_multiple_barracks(self):
+        """Sets primary on newest barracks when 2+ exist."""
+        from examples.scripted_bot import ScriptedBot
+        from openra_env.models import OpenRAObservation, BuildingInfoModel
+
+        bot = ScriptedBot()
+        obs = OpenRAObservation(
+            buildings=[
+                BuildingInfoModel(actor_id=10, type="tent"),
+                BuildingInfoModel(actor_id=20, type="tent"),
+            ],
+        )
+        commands = bot._handle_set_primary(obs)
+        assert len(commands) == 1
+        assert commands[0].action == ActionType.SET_PRIMARY
+        assert commands[0].actor_id == 20  # newest
+
+    def test_set_primary_not_with_single_barracks(self):
+        """No set_primary when only one barracks exists."""
+        from examples.scripted_bot import ScriptedBot
+        from openra_env.models import OpenRAObservation, BuildingInfoModel
+
+        bot = ScriptedBot()
+        obs = OpenRAObservation(
+            buildings=[BuildingInfoModel(actor_id=10, type="tent")],
+        )
+        commands = bot._handle_set_primary(obs)
+        assert len(commands) == 0

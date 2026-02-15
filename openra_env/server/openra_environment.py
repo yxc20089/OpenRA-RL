@@ -8,6 +8,7 @@ computes rewards, and exposes MCP tools for LLM agents.
 import asyncio
 import logging
 import sys
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, Optional
@@ -86,7 +87,13 @@ class OpenRAEnvironment(MCPEnvironment):
         self._state = OpenRAState()
         self._last_obs: Optional[dict] = None
         # Persistent event loop for async gRPC bridge operations.
+        # Runs in a background thread so it doesn't conflict with
+        # FastAPI/uvicorn's event loop when MCP tools call it.
         self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(
+            target=self._loop.run_forever, daemon=True, name="openra-bridge-loop"
+        )
+        self._loop_thread.start()
 
     def _register_tools(self, mcp: FastMCP) -> None:
         """Register all MCP tools for LLM agent interaction."""
@@ -98,6 +105,7 @@ class OpenRAEnvironment(MCPEnvironment):
         def get_game_state() -> dict:
             """Get a full summary of the current game state including economy,
             military stats, unit counts, building counts, and enemy visibility."""
+            env._refresh_obs()
             obs = env._last_obs
             if obs is None:
                 return {"error": "No observation available. Call advance() or reset first."}
@@ -119,6 +127,7 @@ class OpenRAEnvironment(MCPEnvironment):
         @mcp.tool()
         def get_economy() -> dict:
             """Get current economic state: cash, ore, power, harvesters."""
+            env._refresh_obs()
             obs = env._last_obs
             if obs is None:
                 return {"error": "No observation available."}
@@ -127,6 +136,7 @@ class OpenRAEnvironment(MCPEnvironment):
         @mcp.tool()
         def get_units() -> list[dict]:
             """Get list of own units with id, type, position, hp, activity, stance."""
+            env._refresh_obs()
             obs = env._last_obs
             if obs is None:
                 return []
@@ -149,6 +159,7 @@ class OpenRAEnvironment(MCPEnvironment):
         @mcp.tool()
         def get_buildings() -> list[dict]:
             """Get list of own buildings with id, type, position, hp, production status, power."""
+            env._refresh_obs()
             obs = env._last_obs
             if obs is None:
                 return []
@@ -175,6 +186,7 @@ class OpenRAEnvironment(MCPEnvironment):
         @mcp.tool()
         def get_enemies() -> dict:
             """Get visible enemy units and buildings."""
+            env._refresh_obs()
             obs = env._last_obs
             if obs is None:
                 return {"units": [], "buildings": []}
@@ -207,6 +219,7 @@ class OpenRAEnvironment(MCPEnvironment):
         @mcp.tool()
         def get_production() -> dict:
             """Get production queue items and available buildable types."""
+            env._refresh_obs()
             obs = env._last_obs
             if obs is None:
                 return {"queue": [], "available": []}
@@ -227,6 +240,7 @@ class OpenRAEnvironment(MCPEnvironment):
         @mcp.tool()
         def get_map_info() -> dict:
             """Get map dimensions and name."""
+            env._refresh_obs()
             obs = env._last_obs
             if obs is None:
                 return {"error": "No observation available."}
@@ -273,10 +287,27 @@ class OpenRAEnvironment(MCPEnvironment):
 
         @mcp.tool()
         def advance(ticks: int = 1) -> dict:
-            """Advance the game by sending a no-op action. Use to let the game
-            progress without issuing commands. Returns updated game summary."""
-            commands = [CommandModel(action=ActionType.NO_OP)]
-            return env._execute_commands(commands)
+            """Wait for the game to advance by the specified number of ticks.
+            The game runs at normal speed (~25 ticks/sec). Use this to let
+            time pass without issuing commands (e.g., while waiting for
+            production to complete). Returns updated game summary."""
+            ticks = max(1, min(ticks, 500))  # clamp to [1, 500]
+            future = asyncio.run_coroutine_threadsafe(
+                env._bridge.wait_ticks(ticks), env._loop
+            )
+            proto_obs = future.result(timeout=300)
+            obs_dict = observation_to_dict(proto_obs)
+            env._last_obs = obs_dict
+            env._state.game_tick = obs_dict["tick"]
+            return {
+                "tick": obs_dict["tick"],
+                "done": obs_dict["done"],
+                "result": obs_dict.get("result", ""),
+                "economy": obs_dict["economy"],
+                "own_units": len(obs_dict["units"]),
+                "own_buildings": len(obs_dict["buildings"]),
+                "visible_enemies": len(obs_dict["visible_enemies"]),
+            }
 
         @mcp.tool()
         def move_units(unit_ids: list[int], target_x: int, target_y: int, queued: bool = False) -> dict:
@@ -419,10 +450,30 @@ class OpenRAEnvironment(MCPEnvironment):
 
     # ── Internal helpers ─────────────────────────────────────────────────
 
+    def _refresh_obs(self) -> None:
+        """Update _last_obs from the bridge's background observation reader.
+
+        In real-time mode, the game runs continuously. This fetches the
+        latest cached observation so read tools return fresh state.
+        """
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._bridge.observe(), self._loop
+            )
+            proto_obs = future.result(timeout=5)
+            if proto_obs is not None:
+                self._last_obs = observation_to_dict(proto_obs)
+                self._state.game_tick = self._last_obs["tick"]
+        except Exception:
+            pass  # Keep existing _last_obs if refresh fails
+
     def _execute_commands(self, commands: list[CommandModel]) -> dict:
         """Send commands, step the game, update cache, return summary."""
         action = OpenRAAction(commands=commands)
-        obs_dict = self._loop.run_until_complete(self._async_step_internal(action))
+        future = asyncio.run_coroutine_threadsafe(
+            self._async_step_internal(action), self._loop
+        )
+        obs_dict = future.result(timeout=300)
         self._last_obs = obs_dict
         return {
             "tick": obs_dict["tick"],
@@ -464,7 +515,10 @@ class OpenRAEnvironment(MCPEnvironment):
         **kwargs: Any,
     ) -> OpenRAObservation:
         """Reset the environment for a new episode."""
-        return self._loop.run_until_complete(self._async_reset(seed, episode_id, **kwargs))
+        future = asyncio.run_coroutine_threadsafe(
+            self._async_reset(seed, episode_id, **kwargs), self._loop
+        )
+        return future.result(timeout=300)
 
     async def _async_reset(
         self,
@@ -523,7 +577,10 @@ class OpenRAEnvironment(MCPEnvironment):
     ) -> Observation:
         """Handle non-MCP actions (OpenRAAction for backward compat)."""
         if isinstance(action, OpenRAAction):
-            obs_dict = self._loop.run_until_complete(self._async_step_internal(action))
+            future = asyncio.run_coroutine_threadsafe(
+                self._async_step_internal(action), self._loop
+            )
+            obs_dict = future.result(timeout=300)
             self._last_obs = obs_dict
             reward = self._reward_fn.compute(obs_dict)
             return self._build_observation(obs_dict, reward)
@@ -561,11 +618,16 @@ class OpenRAEnvironment(MCPEnvironment):
     def close(self) -> None:
         """Clean up resources."""
         try:
-            self._loop.run_until_complete(self._bridge.close())
+            future = asyncio.run_coroutine_threadsafe(
+                self._bridge.close(), self._loop
+            )
+            future.result(timeout=10)
         except Exception:
             pass
         self._process.kill()
         try:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._loop_thread.join(timeout=5)
             self._loop.close()
         except Exception:
             pass

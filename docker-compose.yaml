@@ -1,8 +1,12 @@
 # Docker Compose for OpenRA-RL development
 #
 # Usage:
-#   First build: OPENRA_DIR=/path/to/OpenRA ./docker/build.sh
-#   Then:        docker compose up
+#   Game server only:  docker compose up openra-rl
+#   With LLM agent:    docker compose up agent
+#   With MCP bot:      docker compose run mcp-bot
+#
+# Build:
+#   docker compose build
 
 services:
   openra-rl:
@@ -22,3 +26,43 @@ services:
           memory: 4G
     shm_size: 256m
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-anthropic/claude-sonnet-4-20250514}
+      - OPENRA_URL=http://openra-rl:8000
+    command: >
+      python examples/llm_agent.py
+      --url http://openra-rl:8000
+      --max-turns ${MAX_TURNS:-200}
+      --verbose
+    depends_on:
+      openra-rl:
+        condition: service_healthy
+
+  mcp-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    environment:
+      - OPENRA_URL=http://openra-rl:8000
+    command: >
+      python examples/mcp_bot.py
+      --url http://openra-rl:8000
+      --max-turns ${MAX_TURNS:-3000}
+      --verbose
+    depends_on:
+      openra-rl:
+        condition: service_healthy
+    profiles:
+      - bot
