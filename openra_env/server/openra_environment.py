@@ -301,12 +301,20 @@ class OpenRAEnvironment(MCPEnvironment):
             time pass without issuing commands (e.g., while waiting for
             production to complete). Returns updated game summary."""
             ticks = max(1, min(ticks, 500))  # clamp to [1, 500]
-            future = asyncio.run_coroutine_threadsafe(
-                env._bridge.wait_ticks(ticks), env._loop
-            )
-            proto_obs = future.result(timeout=300)
-            obs_dict = observation_to_dict(proto_obs)
-            env._last_obs = obs_dict
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    env._bridge.wait_ticks(ticks), env._loop
+                )
+                proto_obs = future.result(timeout=300)
+                obs_dict = observation_to_dict(proto_obs)
+                env._last_obs = obs_dict
+            except Exception:
+                # Connection lost — check if game ended while waiting
+                env._refresh_obs()
+                obs_dict = env._last_obs
+                if obs_dict is None or not obs_dict.get("done"):
+                    raise
+
             env._state.game_tick = obs_dict["tick"]
             return {
                 "tick": obs_dict["tick"],
@@ -479,11 +487,21 @@ class OpenRAEnvironment(MCPEnvironment):
     def _execute_commands(self, commands: list[CommandModel]) -> dict:
         """Send commands, step the game, update cache, return summary."""
         action = OpenRAAction(commands=commands)
-        future = asyncio.run_coroutine_threadsafe(
-            self._async_step_internal(action), self._loop
-        )
-        obs_dict = future.result(timeout=300)
-        self._last_obs = obs_dict
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._async_step_internal(action), self._loop
+            )
+            obs_dict = future.result(timeout=300)
+            self._last_obs = obs_dict
+        except Exception:
+            # Connection lost — check if game ended while we weren't looking
+            self._refresh_obs()
+            obs_dict = self._last_obs
+            if obs_dict is None:
+                raise
+            if not obs_dict.get("done"):
+                raise
+
         return {
             "tick": obs_dict["tick"],
             "done": obs_dict["done"],

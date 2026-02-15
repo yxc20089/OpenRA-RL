@@ -141,6 +141,14 @@ class BridgeClient:
         except asyncio.CancelledError:
             logger.debug("Background observation reader cancelled")
 
+    def _check_reader_alive(self):
+        """Raise if the background observation reader has exited (game died)."""
+        if self._obs_reader_task is not None and self._obs_reader_task.done():
+            exc = self._obs_reader_task.exception()
+            if exc:
+                raise ConnectionError(f"Game connection lost: {exc}") from exc
+            raise ConnectionError("Game connection lost (observation stream ended)")
+
     async def step(self, action: rl_bridge_pb2.AgentAction) -> rl_bridge_pb2.GameObservation:
         """Send an action and wait for the next observation.
 
@@ -156,6 +164,7 @@ class BridgeClient:
 
         # Wait for an observation newer than when we sent the action
         while self._obs_tick <= current_tick:
+            self._check_reader_alive()
             self._obs_event.clear()
             await asyncio.wait_for(self._obs_event.wait(), timeout=self.timeout_s)
 
@@ -169,6 +178,7 @@ class BridgeClient:
         """
         target_tick = self._obs_tick + n
         while self._obs_tick < target_tick:
+            self._check_reader_alive()
             self._obs_event.clear()
             await asyncio.wait_for(self._obs_event.wait(), timeout=self.timeout_s)
             if self._latest_obs and self._latest_obs.done:

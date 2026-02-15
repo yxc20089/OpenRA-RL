@@ -26,6 +26,7 @@ Usage:
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
 import time
@@ -33,6 +34,11 @@ from typing import Any, Optional
 
 import httpx
 from openra_env.mcp_ws_client import OpenRAMCPClient
+
+# Line-buffered stdout so output is observable in real time
+sys.stdout.reconfigure(line_buffering=True)
+
+logger = logging.getLogger("llm_agent")
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514"
@@ -247,6 +253,8 @@ async def run_agent(
         total_api_calls = 0
         start_time = time.time()
         game_done = False
+        consecutive_errors = 0
+        MAX_CONSECUTIVE_ERRORS = 3
 
         for turn in range(max_turns):
             # Compress history periodically
@@ -307,8 +315,16 @@ async def run_agent(
 
                 try:
                     result = await env.call_tool(fn_name, **fn_args)
+                    consecutive_errors = 0
                 except Exception as e:
                     result = {"error": str(e)}
+
+                # Detect game connection lost
+                if isinstance(result, dict) and "connection lost" in str(result.get("error", "")).lower():
+                    consecutive_errors += 1
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                        print(f"\n  GAME CRASHED: {consecutive_errors} consecutive connection errors. Stopping.")
+                        game_done = True
 
                 # Format result for message
                 result_str = json.dumps(result) if not isinstance(result, str) else result
@@ -417,7 +433,26 @@ def main():
         action="store_true",
         help="Print detailed LLM reasoning and tool calls",
     )
+    parser.add_argument(
+        "--log-file",
+        default=os.environ.get("LLM_AGENT_LOG", ""),
+        help="Write all output to this log file in addition to stdout (default: $LLM_AGENT_LOG)",
+    )
     args = parser.parse_args()
+
+    # Set up logging to file if requested — tee all print() to both stdout and file
+    if args.log_file:
+        import builtins
+        _builtin_print = builtins.print
+        _log_fh = open(args.log_file, "w")
+
+        def _tee_print(*pargs, **kwargs):
+            _builtin_print(*pargs, **kwargs)
+            kwargs.pop("file", None)
+            _builtin_print(*pargs, file=_log_fh, **kwargs)
+            _log_fh.flush()
+
+        builtins.print = _tee_print
 
     if not args.api_key:
         print("Error: OpenRouter API key required.")
