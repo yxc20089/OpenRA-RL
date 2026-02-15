@@ -7,6 +7,7 @@ computes rewards, and exposes MCP tools for LLM agents.
 
 import asyncio
 import logging
+import os
 import sys
 import threading
 import uuid
@@ -65,6 +66,7 @@ class OpenRAEnvironment(MCPEnvironment):
         map_name: str = "singles.oramap",
         grpc_port: int = 9999,
         bot_type: str = "normal",
+        ai_slot: str = "",
         reward_weights: Optional[RewardWeights] = None,
         record_replays: bool = False,
     ):
@@ -73,12 +75,19 @@ class OpenRAEnvironment(MCPEnvironment):
         self._register_tools(mcp)
         super().__init__(mcp)
 
+        # Allow environment variables to override defaults
+        bot_type = os.environ.get("BOT_TYPE", bot_type)
+        ai_slot = os.environ.get("AI_SLOT", ai_slot)
+        if os.environ.get("RECORD_REPLAYS", "").lower() in ("true", "1", "yes"):
+            record_replays = True
+
         self._config = OpenRAConfig(
             openra_path=openra_path or OpenRAConfig.openra_path,
             mod=mod,
             map_name=map_name,
             grpc_port=grpc_port,
             bot_type=bot_type,
+            ai_slot=ai_slot,
             record_replays=record_replays,
         )
         self._process = OpenRAProcessManager(self._config)
@@ -499,12 +508,35 @@ class OpenRAEnvironment(MCPEnvironment):
         return obs_dict
 
     def _get_replay_dir(self) -> Path:
-        """Get the OpenRA replays directory for current mod."""
+        """Get the OpenRA replays directory for current mod.
+
+        OpenRA stores replays at {SupportDir}/Replays/{mod}/{version}/.
+        On macOS: ~/Library/Application Support/OpenRA/
+        On Linux: ~/.config/openra/ (modern) or ~/.openra/ (legacy)
+        Also checks {EngineDir}/Support/ (local override).
+        """
+        candidates = []
+
+        # Local Support dir (takes priority if it exists)
+        engine_support = Path(self._config.openra_path) / "Support"
+        if engine_support.exists():
+            candidates.append(engine_support / "Replays" / self._config.mod)
+
         if sys.platform == "darwin":
-            base = Path.home() / "Library/Application Support/OpenRA"
+            candidates.append(Path.home() / "Library/Application Support/OpenRA/Replays" / self._config.mod)
         else:
-            base = Path.home() / ".openra"
-        return base / "Replays" / self._config.mod
+            # Modern path (XDG_CONFIG_HOME or ~/.config/openra)
+            xdg = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+            candidates.append(Path(xdg) / "openra/Replays" / self._config.mod)
+            # Legacy path
+            candidates.append(Path.home() / ".openra/Replays" / self._config.mod)
+
+        for base in candidates:
+            if base.exists():
+                return base
+
+        # Fallback: return first candidate (will be created if needed)
+        return candidates[0]
 
     # ── OpenEnv Interface ────────────────────────────────────────────────
 
