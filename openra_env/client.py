@@ -92,11 +92,14 @@ class OpenRAEnv(EnvClient[OpenRAAction, OpenRAObservation, OpenRAState]):
             buildings=[BuildingInfoModel(**b) for b in obs_data.get("buildings", [])],
             production=[ProductionInfoModel(**p) for p in obs_data.get("production", [])],
             visible_enemies=[UnitInfoModel(**u) for u in obs_data.get("visible_enemies", [])],
+            visible_enemy_buildings=[BuildingInfoModel(**b) for b in obs_data.get("visible_enemy_buildings", [])],
             map_info=MapInfoModel(**obs_data.get("map_info", {})),
             available_production=obs_data.get("available_production", []),
             done=obs_data.get("done", False),
             reward=obs_data.get("reward"),
             result=obs_data.get("result", ""),
+            spatial_map=obs_data.get("spatial_map", ""),
+            spatial_channels=obs_data.get("spatial_channels", 0),
         )
 
         return StepResult(

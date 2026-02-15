@@ -30,8 +30,9 @@ message GameObservation {
   repeated RlUnitInfo visible_enemies = 8;
   RlMapInfo map_info = 9;
 
-  // Binary-encoded spatial tensor (e.g. terrain, unit density, fog)
-  // Format: flat array of floats, shape described by map_info.width x map_info.height x channels
+  // Binary-encoded spatial tensor (terrain, unit density, fog, etc.)
+  // Format: flat float32 array, row-major channels-last
+  // Shape: map_info.height × map_info.width × spatial_channels
   bytes spatial_map = 10;
   int32 spatial_channels = 11;
 
@@ -42,6 +43,9 @@ message GameObservation {
 
   // Available actions context
   repeated string available_production = 15;
+
+  // Visible enemy buildings (separate from visible_enemies which only has units)
+  repeated RlBuildingInfo visible_enemy_buildings = 16;
 }
 
 message RlEconomy {
@@ -75,6 +79,15 @@ message RlUnitInfo {
   string owner = 10;        // Player internal name
   int32 ammo = 11;          // -1 if not applicable
   bool can_attack = 12;
+
+  // Sprint 4: enriched unit data
+  int32 facing = 13;           // WAngle 0-1023 (direction unit faces)
+  int32 experience_level = 14; // Veterancy level (0 = none)
+  int32 stance = 15;           // 0=HoldFire, 1=ReturnFire, 2=Defend, 3=AttackAnything
+  int32 speed = 16;            // Current movement speed (with modifiers)
+  int32 attack_range = 17;     // Max attack range in WDist units
+  int32 passenger_count = 18;  // Cargo count (0 if not transport, -1 if N/A)
+  bool is_building = 19;       // false for units (helps distinguish in visible_enemies)
 }
 
 message RlBuildingInfo {
@@ -88,6 +101,16 @@ message RlBuildingInfo {
   float production_progress = 8; // 0.0 - 1.0 if producing
   string producing_item = 9;
   bool is_powered = 10;
+
+  // Sprint 4: enriched building data
+  bool is_repairing = 11;          // Actively being repaired
+  int32 sell_value = 12;           // Refund amount if sold
+  int32 rally_x = 13;             // Rally point cell X (-1 if none)
+  int32 rally_y = 14;             // Rally point cell Y (-1 if none)
+  int32 power_amount = 15;        // Power provided (positive) or consumed (negative)
+  repeated string can_produce = 16; // Items this building can produce
+  int32 cell_x = 17;              // Cell position X
+  int32 cell_y = 18;              // Cell position Y
 }
 
 message RlProductionInfo {
@@ -136,6 +159,10 @@ enum ActionType {
   PLACE_BUILDING = 11; // Place a completed building at target location
   CANCEL_PRODUCTION = 12;
   SET_RALLY_POINT = 13;
+  GUARD = 14;           // Guard another actor (target_actor_id)
+  SET_STANCE = 15;      // Set unit stance (target_x: 0=HoldFire, 1=ReturnFire, 2=Defend, 3=AttackAnything)
+  ENTER_TRANSPORT = 16; // Load into transport (target_actor_id)
+  UNLOAD = 17;          // Unload all passengers at current location
 }
 
 // ─── State Query ─────────────────────────────────────────────────────────────

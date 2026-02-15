@@ -176,11 +176,14 @@ class OpenRAEnvironment(Environment):
             buildings=[BuildingInfoModel(**b) for b in obs_dict["buildings"]],
             production=[ProductionInfoModel(**p) for p in obs_dict["production"]],
             visible_enemies=[UnitInfoModel(**u) for u in obs_dict["visible_enemies"]],
+            visible_enemy_buildings=[BuildingInfoModel(**b) for b in obs_dict.get("visible_enemy_buildings", [])],
             map_info=MapInfoModel(**obs_dict["map_info"]),
             available_production=obs_dict.get("available_production", []),
             done=obs_dict["done"],
             reward=reward,
             result=obs_dict.get("result", ""),
+            spatial_map=obs_dict.get("spatial_map", ""),
+            spatial_channels=obs_dict.get("spatial_channels", 0),
         )
 
     def close(self) -> None:

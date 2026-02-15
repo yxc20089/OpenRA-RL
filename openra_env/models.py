@@ -32,6 +32,10 @@ class ActionType(str, Enum):
     PLACE_BUILDING = "place_building"
     CANCEL_PRODUCTION = "cancel_production"
     SET_RALLY_POINT = "set_rally_point"
+    GUARD = "guard"
+    SET_STANCE = "set_stance"
+    ENTER_TRANSPORT = "enter_transport"
+    UNLOAD = "unload"
 
 
 class CommandModel(Action):
@@ -98,6 +102,15 @@ class UnitInfoModel(Action):
     owner: str = Field(default="", description="Owner player internal name")
     can_attack: bool = Field(default=False, description="Whether the unit can attack")
 
+    # Sprint 4: enriched unit data
+    facing: int = Field(default=0, description="WAngle 0-1023 direction unit faces")
+    experience_level: int = Field(default=0, description="Veterancy level (0=none)")
+    stance: int = Field(default=0, description="0=HoldFire, 1=ReturnFire, 2=Defend, 3=AttackAnything")
+    speed: int = Field(default=0, description="Base movement speed")
+    attack_range: int = Field(default=0, description="Max attack range in WDist units")
+    passenger_count: int = Field(default=-1, description="Cargo count (0 if transport empty, -1 if N/A)")
+    is_building: bool = Field(default=False, description="False for units, helps distinguish in visible_enemies")
+
 
 class BuildingInfoModel(Action):
     """Information about a single building."""
@@ -112,6 +125,16 @@ class BuildingInfoModel(Action):
     production_progress: float = Field(default=0.0, description="Production progress 0.0-1.0")
     producing_item: str = Field(default="", description="Item currently being produced")
     is_powered: bool = Field(default=True, description="Whether powered")
+
+    # Sprint 4: enriched building data
+    is_repairing: bool = Field(default=False, description="Actively being repaired")
+    sell_value: int = Field(default=0, description="Refund amount if sold")
+    rally_x: int = Field(default=-1, description="Rally point cell X (-1 if none)")
+    rally_y: int = Field(default=-1, description="Rally point cell Y (-1 if none)")
+    power_amount: int = Field(default=0, description="Power provided (+) or consumed (-)")
+    can_produce: List[str] = Field(default_factory=list, description="Items this building can produce")
+    cell_x: int = Field(default=0, description="Cell position X")
+    cell_y: int = Field(default=0, description="Cell position Y")
 
 
 class ProductionInfoModel(Action):
@@ -146,11 +169,18 @@ class OpenRAObservation(Observation):
     buildings: List[BuildingInfoModel] = Field(default_factory=list, description="Own buildings")
     production: List[ProductionInfoModel] = Field(default_factory=list, description="Active production queues")
     visible_enemies: List[UnitInfoModel] = Field(default_factory=list, description="Visible enemy units")
+    visible_enemy_buildings: List[BuildingInfoModel] = Field(
+        default_factory=list, description="Visible enemy buildings"
+    )
     map_info: MapInfoModel = Field(default_factory=MapInfoModel, description="Map metadata")
     available_production: List[str] = Field(
         default_factory=list, description="Actor types available for production"
     )
     result: str = Field(default="", description="Game result: 'win', 'lose', 'draw', or ''")
+
+    # Spatial map tensor (base64-encoded float32 array for JSON transport)
+    spatial_map: str = Field(default="", description="Base64-encoded spatial tensor: H×W×C float32 array")
+    spatial_channels: int = Field(default=0, description="Number of spatial channels")
 
     # Inherited from Observation:
     # done: bool = False

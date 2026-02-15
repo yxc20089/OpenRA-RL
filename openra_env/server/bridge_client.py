@@ -10,6 +10,7 @@ Protocol:
 """
 
 import asyncio
+import base64
 import logging
 from typing import AsyncIterator, Optional
 
@@ -177,6 +178,13 @@ def observation_to_dict(obs: rl_bridge_pb2.GameObservation) -> dict:
                 "current_activity": u.current_activity,
                 "owner": u.owner,
                 "can_attack": u.can_attack,
+                "facing": u.facing,
+                "experience_level": u.experience_level,
+                "stance": u.stance,
+                "speed": u.speed,
+                "attack_range": u.attack_range,
+                "passenger_count": u.passenger_count,
+                "is_building": u.is_building,
             }
             for u in obs.units
         ],
@@ -192,6 +200,14 @@ def observation_to_dict(obs: rl_bridge_pb2.GameObservation) -> dict:
                 "production_progress": b.production_progress,
                 "producing_item": b.producing_item,
                 "is_powered": b.is_powered,
+                "is_repairing": b.is_repairing,
+                "sell_value": b.sell_value,
+                "rally_x": b.rally_x,
+                "rally_y": b.rally_y,
+                "power_amount": b.power_amount,
+                "can_produce": list(b.can_produce),
+                "cell_x": b.cell_x,
+                "cell_y": b.cell_y,
             }
             for b in obs.buildings
         ],
@@ -219,8 +235,38 @@ def observation_to_dict(obs: rl_bridge_pb2.GameObservation) -> dict:
                 "current_activity": u.current_activity,
                 "owner": u.owner,
                 "can_attack": u.can_attack,
+                "facing": u.facing,
+                "experience_level": u.experience_level,
+                "stance": u.stance,
+                "speed": u.speed,
+                "attack_range": u.attack_range,
+                "passenger_count": u.passenger_count,
+                "is_building": u.is_building,
             }
             for u in obs.visible_enemies
+        ],
+        "visible_enemy_buildings": [
+            {
+                "actor_id": b.actor_id,
+                "type": b.type,
+                "pos_x": b.pos_x,
+                "pos_y": b.pos_y,
+                "hp_percent": b.hp_percent,
+                "owner": b.owner,
+                "is_producing": b.is_producing,
+                "production_progress": b.production_progress,
+                "producing_item": b.producing_item,
+                "is_powered": b.is_powered,
+                "is_repairing": b.is_repairing,
+                "sell_value": b.sell_value,
+                "rally_x": b.rally_x,
+                "rally_y": b.rally_y,
+                "power_amount": b.power_amount,
+                "can_produce": list(b.can_produce),
+                "cell_x": b.cell_x,
+                "cell_y": b.cell_y,
+            }
+            for b in obs.visible_enemy_buildings
         ],
         "map_info": {
             "width": obs.map_info.width,
@@ -231,6 +277,8 @@ def observation_to_dict(obs: rl_bridge_pb2.GameObservation) -> dict:
         "done": obs.done,
         "reward": obs.reward,
         "result": obs.result,
+        "spatial_map": base64.b64encode(bytes(obs.spatial_map)).decode("ascii"),
+        "spatial_channels": obs.spatial_channels,
     }
 
 
@@ -251,6 +299,10 @@ def commands_to_proto(commands: list[dict]) -> rl_bridge_pb2.AgentAction:
         "place_building": rl_bridge_pb2.PLACE_BUILDING,
         "cancel_production": rl_bridge_pb2.CANCEL_PRODUCTION,
         "set_rally_point": rl_bridge_pb2.SET_RALLY_POINT,
+        "guard": rl_bridge_pb2.GUARD,
+        "set_stance": rl_bridge_pb2.SET_STANCE,
+        "enter_transport": rl_bridge_pb2.ENTER_TRANSPORT,
+        "unload": rl_bridge_pb2.UNLOAD,
     }
 
     proto_commands = []
