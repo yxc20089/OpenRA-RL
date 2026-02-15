@@ -1,0 +1,32 @@
+# ==============================================================================
+# Lightweight agent container for OpenRA-RL
+#
+# Runs the LLM agent (or MCP bot) that connects to the OpenRA-RL game server.
+# Does NOT include the game engine — only the Python client and agent code.
+#
+# Usage:
+#   docker build -f Dockerfile.agent -t openra-rl-agent .
+#   docker run -e OPENROUTER_API_KEY=sk-or-... openra-rl-agent
+# ==============================================================================
+FROM python:3.11-slim-bookworm
+
+LABEL description="OpenRA-RL Agent - LLM/MCP bot that plays Red Alert"
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY pyproject.toml README.md /app/
+COPY openra_env/ /app/openra_env/
+COPY proto/ /app/proto/
+
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir . httpx
+
+# Copy agent scripts
+COPY examples/ /app/examples/
+
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+# Default: run LLM agent
+CMD ["python", "examples/llm_agent.py"]
