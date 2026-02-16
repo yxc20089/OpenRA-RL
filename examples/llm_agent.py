@@ -58,24 +58,20 @@ USE these coordinates — DO NOT guess positions.
 ## Tools — batch() vs plan() vs advance()
 
 **batch(actions)** — Send multiple commands that all execute AT THE SAME TIME.
-Use when you want to do several things at once (no ordering dependency).
 batch([
+  {"tool": "build_unit", "unit_type": "3tnk", "count": 2},
   {"tool": "build_unit", "unit_type": "e1", "count": 3},
-  {"tool": "set_stance", "unit_ids": "all_combat", "stance": "attack_anything"},
-  {"tool": "attack_move", "unit_ids": [155], "target_x": 50, "target_y": 30}
+  {"tool": "set_stance", "unit_ids": "all_combat", "stance": "attack_anything"}
 ])
 
-**plan(steps)** — Execute steps ONE AFTER ANOTHER. Each step sends commands, \
-then refreshes the game state before the next step. Use conditions to gate steps.
+**plan(steps)** — Execute steps ONE AFTER ANOTHER with state refresh between.
 plan([
   {"actions": [{"tool": "deploy_unit", "unit_id": 120}]},
-  {"actions": [{"tool": "build_structure", "building_type": "powr"}]},
-  {"condition": "building_ready",
-   "actions": [{"tool": "place_building", "building_type": "powr"}]}
+  {"actions": [{"tool": "build_and_place", "building_type": "powr"}]},
+  {"actions": [{"tool": "build_and_place", "building_type": "tent"}]}
 ])
 
-**advance(ticks)** — Wait for the game to advance. Use when you need to let \
-time pass (e.g., waiting for production to finish).
+**advance(ticks)** — Wait for game to advance (e.g., waiting for production).
 
 Conditions: "enemies_visible", "no_enemies_visible", "under_attack", \
 "building_ready", "cash_above:2000", "cash_below:500"
@@ -84,15 +80,21 @@ Special unit selectors: "all_combat", "all_idle", or group names.
 
 CRITICAL RULES:
 - A TURN BRIEFING with full state is injected automatically before each turn
-- EVERY briefing includes coordinates for units, buildings, and enemies
+- Briefings include coordinates, production queue, AND "Can build:" list
 - React to ALERTS immediately (especially UNDER ATTACK)
 - Use batch() for concurrent actions, plan() for sequential actions
-- Use advance() only when you need to wait for something
 
 ## Building — use build_and_place()
 build_and_place("powr") — queues construction AND auto-places when done.
-Coordinates optional: build_and_place("barr", cell_x=10, cell_y=15).
 Build order: powr → barr/tent → proc → weap → 2nd powr if low power
+
+## Tech Progression — CRITICAL
+- Early (0-2 buildings): powr → barr/tent, train e1 for scouting
+- Mid (barr + proc built): build_and_place("weap"), keep training e1 + harv
+- Late (weap ready): SWITCH to tanks (3tnk/2tnk) — 10x stronger than e1!
+- Check "Can build:" in every briefing — it shows what you can train NOW
+- If weap exists but you only train e1, you are wasting resources
+- Tanks beat infantry. Once you can build them, ALWAYS prefer tanks.
 
 ## Economy Rules
 - IDLE CASH (> $2000): build_unit("harv") or build_and_place("proc")
@@ -102,13 +104,11 @@ Build order: powr → barr/tent → proc → weap → 2nd powr if low power
 ## Coordinates & Scouting
 - Set rally points NEAR your base (within ~5 cells), not at map edges
 - Scout toward the enemy spawn estimate early with 1-2 cheap units
-- Use get_enemies() to find actual enemy positions before attacking
 - attack_move toward KNOWN enemy positions, not random coordinates
-- Turn briefings show unit/building positions — use them
 
 ## Combat
 - Set ALL combat units to "attack_anything" stance
-- Send 1-2 scouts toward enemy spawn estimate early
+- Send 1-2 e1 scouts toward enemy spawn estimate early
 - Attack with 5+ units using attack_move toward known enemy positions
 - When UNDER ATTACK: rally all idle units to defend
 """
@@ -243,9 +243,15 @@ def format_state_briefing(state: dict) -> str:
     else:
         parts.append(f"Units: {state.get('own_units', '?')}")
 
-    # Compact building summary with IDs and positions
+    # Compact building summary with IDs, positions, and production category
+    _BLDG_CATEGORY = {"tent": "infantry", "barr": "infantry", "weap": "vehicle",
+                       "hpad": "aircraft", "afld": "aircraft", "syrd": "ship", "spen": "ship"}
     if buildings:
-        bldg_parts = [f"{b['type']}({b['id']})@({b['cell_x']},{b['cell_y']})" for b in buildings]
+        bldg_parts = []
+        for b in buildings:
+            cat = _BLDG_CATEGORY.get(b["type"], "")
+            cat_str = f"[{cat}]" if cat else ""
+            bldg_parts.append(f"{b['type']}({b['id']})@({b['cell_x']},{b['cell_y']}){cat_str}")
         parts.append(f"Buildings: {' '.join(bldg_parts)}")
     else:
         parts.append(f"Buildings: {state.get('own_buildings', '?')} ({', '.join(state.get('building_types', []))})")
@@ -270,6 +276,10 @@ def format_state_briefing(state: dict) -> str:
 
     prod = state.get("production_items", [])
     parts.append(f"Production: {', '.join(prod) if prod else 'IDLE'}")
+
+    available = state.get("available_production", [])
+    if available:
+        parts.append(f"Can build: {', '.join(available)}")
 
     alerts = state.get("alerts", [])
     if alerts:
