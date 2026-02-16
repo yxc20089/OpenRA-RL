@@ -30,6 +30,9 @@ import logging
 import os
 import sys
 import time
+
+from dotenv import load_dotenv
+load_dotenv()
 from collections import defaultdict
 from typing import Any, Optional
 
@@ -87,6 +90,9 @@ CRITICAL RULES:
 ## Building — use build_and_place()
 build_and_place("powr") — queues construction AND auto-places when done.
 Build order: powr → barr/tent → proc → weap → 2nd powr if low power
+- NEVER build spen/syrd (naval buildings) on land maps — they need water!
+- If "PLACEMENT FAILED" alert appears, the building was auto-cancelled
+- If production is stuck, use cancel_production("item_type") to clear queue
 
 ## Tech Progression — CRITICAL
 - Early (0-2 buildings): powr → barr/tent, train e1 for scouting
@@ -97,7 +103,8 @@ Build order: powr → barr/tent → proc → weap → 2nd powr if low power
 - Tanks beat infantry. Once you can build them, ALWAYS prefer tanks.
 
 ## Economy Rules
-- IDLE CASH (> $2000): build_unit("harv") or build_and_place("proc")
+- FUNDS = cash + ore. Both are spendable! Check "Funds:" in briefing, NOT just cash.
+- IDLE FUNDS (> $2000): build_unit("harv") or build_and_place("proc")
 - LOW POWER: build_and_place("powr") immediately
 - IDLE PRODUCTION: always queue something — idle production loses games
 
@@ -210,10 +217,13 @@ def format_state_briefing(state: dict) -> str:
 
     eco = state.get("economy", {})
     tick = state["tick"]
+    cash = eco.get("cash", 0)
+    ore = eco.get("ore", 0)
+    funds = cash + ore
 
     parts = [
         f"--- TURN BRIEFING (tick {tick}) ---",
-        f"Cash: ${eco.get('cash', 0)} | Power: {state.get('power_balance', 0):+d} | Harvesters: {eco.get('harvester_count', 0)}",
+        f"Funds: ${funds} (cash=${cash} + ore=${ore}) | Power: {state.get('power_balance', 0):+d} | Harvesters: {eco.get('harvester_count', 0)}",
     ]
 
     # Base center from buildings
@@ -358,10 +368,13 @@ async def chat_completion(
             error_text = response.text[:500]
             raise RuntimeError(f"OpenRouter API error {response.status_code}: {error_text}")
 
-        data = response.json()
+        try:
+            data = response.json()
+        except (json.JSONDecodeError, ValueError) as e:
+            raise RuntimeError(f"OpenRouter API error 502: invalid JSON response ({e})")
 
         if "error" in data:
-            raise RuntimeError(f"OpenRouter error: {data['error']}")
+            raise RuntimeError(f"OpenRouter error 500: {data['error']}")
 
         if verbose:
             usage = data.get("usage", {})
@@ -525,18 +538,25 @@ async def run_agent(
                 except Exception:
                     pass
 
-            # Call LLM
-            try:
-                response = await chat_completion(messages, openai_tools, api_key, model, verbose)
-            except RuntimeError as e:
-                print(f"\n  [ERROR] API call failed: {e}")
-                # Wait and retry once
-                await asyncio.sleep(5)
+            # Call LLM with retry for rate limits
+            response = None
+            for attempt in range(4):
                 try:
                     response = await chat_completion(messages, openai_tools, api_key, model, verbose)
-                except RuntimeError as e2:
-                    print(f"  [ERROR] Retry failed: {e2}")
                     break
+                except RuntimeError as e:
+                    err_str = str(e)
+                    retriable = any(code in err_str for code in ("429", "500", "502", "503", "504"))
+                    if retriable and attempt < 3:
+                        wait = 10 * (attempt + 1)
+                        print(f"\n  [RETRY] Provider error, waiting {wait}s ({attempt + 1}/4)...")
+                        await asyncio.sleep(wait)
+                    else:
+                        print(f"\n  [ERROR] API call failed: {e}")
+                        break
+            if response is None:
+                print("  [ERROR] All retries exhausted, stopping.")
+                break
 
             total_api_calls += 1
             choice = response["choices"][0]

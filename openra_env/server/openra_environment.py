@@ -97,6 +97,7 @@ class OpenRAEnvironment(MCPEnvironment):
         self._last_obs: Optional[dict] = None
         self._unit_groups: dict[str, list[int]] = {}  # named groups of unit IDs
         self._pending_placements: dict[str, dict] = {}  # building_type → {cell_x, cell_y}
+        self._attempted_placements: dict[str, int] = {}  # building_type → attempt_count (for failure detection)
         self._placement_results: list[str] = []  # alerts from auto-placement attempts
         self._player_faction: str = ""
         self._enemy_faction: str = ""
@@ -151,9 +152,10 @@ class OpenRAEnvironment(MCPEnvironment):
             if power_balance < 0:
                 alerts.append(f"LOW POWER: {power_balance:+d} — build powr immediately")
 
-            # Idle cash with few harvesters
-            if eco["cash"] > 2000 and eco["harvester_count"] < 2:
-                alerts.append(f"IDLE CASH: ${eco['cash']} with {eco['harvester_count']} harvester(s) — build refinery or harvester")
+            # Idle funds with few harvesters
+            total_funds = eco["cash"] + eco.get("ore", 0)
+            if total_funds > 2000 and eco["harvester_count"] < 2:
+                alerts.append(f"IDLE FUNDS: ${total_funds} with {eco['harvester_count']} harvester(s) — build refinery or harvester")
 
             # Nothing being produced
             if not obs["production"] and len(obs["buildings"]) >= 3:
@@ -342,6 +344,44 @@ class OpenRAEnvironment(MCPEnvironment):
             if obs is None:
                 return {"error": "No observation available."}
             return obs["map_info"]
+
+        @mcp.tool()
+        def get_terrain_at(cell_x: int, cell_y: int) -> dict:
+            """Check terrain at a map cell. Returns passability and whether it's
+            water. Useful before placing buildings (spen/syrd need water)."""
+            env._refresh_obs()
+            obs = env._last_obs
+            if obs is None:
+                return {"error": "No observation available"}
+
+            spatial = obs.get("spatial_map", "")
+            map_info = obs.get("map_info", {})
+            w = map_info.get("width", 0)
+            h = map_info.get("height", 0)
+            channels = obs.get("spatial_channels", 0)
+
+            if not spatial or w == 0 or channels == 0:
+                return {"error": "No spatial map data available"}
+            if cell_x < 0 or cell_x >= w or cell_y < 0 or cell_y >= h:
+                return {"error": f"Out of bounds: ({cell_x},{cell_y}), map is {w}x{h}"}
+
+            import base64
+            import struct
+            try:
+                raw = base64.b64decode(spatial)
+                # Row-major channels-last: index = (y * w + x) * channels + ch
+                base_idx = (cell_y * w + cell_x) * channels
+                terrain_idx = struct.unpack_from("f", raw, base_idx * 4)[0]
+                passable = struct.unpack_from("f", raw, (base_idx + 3) * 4)[0]
+                return {
+                    "cell_x": cell_x,
+                    "cell_y": cell_y,
+                    "terrain_index": int(terrain_idx),
+                    "passable": passable > 0.5,
+                    "note": "Water cells are impassable to land units. spen/syrd require water.",
+                }
+            except Exception as e:
+                return {"error": f"Failed to decode terrain: {e}"}
 
         # ── Game Knowledge Tools (static mod data) ───────────────────────
 
@@ -821,7 +861,8 @@ class OpenRAEnvironment(MCPEnvironment):
               condition: optional — only execute if condition is met, else skip
 
             Conditions: "enemies_visible", "no_enemies_visible", "under_attack",
-              "building_ready", "cash_above:2000", "cash_below:500"
+              "building_ready", "funds_above:2000", "funds_below:500"
+              (funds = cash + ore; "cash_above"/"cash_below" also work)
 
             Example — deploy then build:
             [
@@ -917,12 +958,14 @@ class OpenRAEnvironment(MCPEnvironment):
                 p["queue_type"] == "Building" and p["progress"] >= 0.99
                 for p in obs.get("production", [])
             )
-        elif condition.startswith("cash_above:"):
+        elif condition.startswith("cash_above:") or condition.startswith("funds_above:"):
             threshold = int(condition.split(":")[1])
-            return obs.get("economy", {}).get("cash", 0) > threshold
-        elif condition.startswith("cash_below:"):
+            eco = obs.get("economy", {})
+            return eco.get("cash", 0) + eco.get("ore", 0) > threshold
+        elif condition.startswith("cash_below:") or condition.startswith("funds_below:"):
             threshold = int(condition.split(":")[1])
-            return obs.get("economy", {}).get("cash", 0) < threshold
+            eco = obs.get("economy", {})
+            return eco.get("cash", 0) + eco.get("ore", 0) < threshold
         return True  # unknown condition → proceed
 
     def _resolve_unit_ids(self, selector, obs: dict) -> list[int]:
@@ -994,6 +1037,10 @@ class OpenRAEnvironment(MCPEnvironment):
             return [CommandModel(action=ActionType.HARVEST, actor_id=action["unit_id"],
                                 target_x=action.get("cell_x", 0),
                                 target_y=action.get("cell_y", 0))]
+        elif tool == "cancel_production":
+            return [CommandModel(action=ActionType.CANCEL_PRODUCTION, item_type=action["item_type"])]
+        elif tool == "surrender":
+            return [CommandModel(action=ActionType.SURRENDER)]
         else:
             return []
 
@@ -1015,13 +1062,65 @@ class OpenRAEnvironment(MCPEnvironment):
             pass  # Keep existing _last_obs if refresh fails
         self._process_pending_placements()
 
+    # Naval buildings that require water tiles
+    _WATER_BUILDINGS = {"spen", "syrd"}
+
     def _process_pending_placements(self) -> None:
-        """Auto-place buildings that finished construction via build_and_place."""
-        if not getattr(self, "_pending_placements", None) or not self._last_obs:
+        """Auto-place buildings that finished construction via build_and_place.
+
+        Uses a two-phase approach:
+        1. When a building is ready, send PLACE_BUILDING and mark as "attempted"
+        2. On next call, check if the building is still in queue — if so, placement failed
+        """
+        if not self._last_obs:
             return
         production = self._last_obs.get("production", [])
-        placed = []
+        attempted = getattr(self, "_attempted_placements", {})
+
+        # Phase 2: Check previously attempted placements for failure
+        failed = []
+        for btype, attempts in list(attempted.items()):
+            still_in_queue = any(
+                p["queue_type"] == "Building" and p["item"] == btype and p["progress"] >= 0.99
+                for p in production
+            )
+            if still_in_queue:
+                # Building is still in queue → placement failed
+                if attempts >= 2:
+                    # Multiple attempts failed — report and auto-cancel
+                    if btype in self._WATER_BUILDINGS:
+                        reason = f"{btype} requires water tiles — must be placed on water, not land"
+                    else:
+                        reason = "no valid placement found near base"
+                    self._placement_results.append(
+                        f"PLACEMENT FAILED: {btype} — {reason}. "
+                        f"Auto-cancelling. Use cancel_production(\"{btype}\") if stuck."
+                    )
+                    # Auto-cancel the stuck production
+                    try:
+                        cancel_cmd = [CommandModel(action=ActionType.CANCEL_PRODUCTION, item_type=btype)]
+                        self._execute_commands(cancel_cmd)
+                    except Exception:
+                        pass
+                    failed.append(btype)
+                else:
+                    # Retry once with different offset
+                    attempted[btype] = attempts + 1
+            else:
+                # Building no longer in queue → placement succeeded
+                self._placement_results.append(f"AUTO-PLACED: {btype}")
+                failed.append(btype)  # remove from attempted tracking
+
+        for btype in failed:
+            attempted.pop(btype, None)
+            self._pending_placements.pop(btype, None)
+
+        # Phase 1: Send placement commands for newly ready buildings
+        if not getattr(self, "_pending_placements", None):
+            return
         for btype, coords in list(self._pending_placements.items()):
+            if btype in attempted:
+                continue  # already being tracked
             ready = any(
                 p["queue_type"] == "Building" and p["item"] == btype and p["progress"] >= 0.99
                 for p in production
@@ -1036,14 +1135,13 @@ class OpenRAEnvironment(MCPEnvironment):
                     target_y=coords["cell_y"],
                 )]
                 self._execute_commands(commands)
-                self._placement_results.append(f"AUTO-PLACED: {btype}")
+                attempted[btype] = 1
             except Exception:
                 self._placement_results.append(
-                    f"PLACEMENT FAILED: {btype} — call place_building() with different coordinates"
+                    f"PLACEMENT FAILED: {btype} — command error. "
+                    f"Use cancel_production(\"{btype}\") to clear queue."
                 )
-            placed.append(btype)
-        for btype in placed:
-            self._pending_placements.pop(btype, None)
+                self._pending_placements.pop(btype, None)
 
     def _execute_commands(self, commands: list[CommandModel]) -> dict:
         """Send commands, step the game, update cache, return summary."""
@@ -1154,6 +1252,7 @@ class OpenRAEnvironment(MCPEnvironment):
         self._last_obs = None
         self._unit_groups.clear()
         self._pending_placements.clear()
+        self._attempted_placements.clear()
         self._placement_results.clear()
 
         # Update seed if provided

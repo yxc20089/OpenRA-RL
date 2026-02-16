@@ -647,7 +647,8 @@ RA_BUILDINGS: dict[str, dict] = {
         "side": "soviet",
         "prerequisites": ["powr"],
         "produces": ["Ship"],
-        "description": "Soviet naval production. Repairs ships.",
+        "terrain": "water",
+        "description": "Soviet naval production. Repairs ships. REQUIRES WATER — cannot build on land maps.",
     },
     "syrd": {
         "name": "Naval Yard",
@@ -657,7 +658,8 @@ RA_BUILDINGS: dict[str, dict] = {
         "side": "allied",
         "prerequisites": ["powr"],
         "produces": ["Ship"],
-        "description": "Allied naval production. Repairs ships.",
+        "terrain": "water",
+        "description": "Allied naval production. Repairs ships. REQUIRES WATER — cannot build on land maps.",
     },
     "silo": {
         "name": "Ore Silo",

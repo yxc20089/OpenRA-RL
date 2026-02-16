@@ -245,8 +245,8 @@ class TestMCPToolRegistration:
         _, mcp = env
         if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
             count = len(mcp._tool_manager._tools)
-            # 7 read + 4 knowledge + 27 action + 1 replay = 39
-            assert count == 39, f"Expected 39 tools, got {count}"
+            # 7 read + 1 terrain + 4 knowledge + 27 action + 1 replay = 40
+            assert count == 40, f"Expected 40 tools, got {count}"
 
 
 class TestMCPReadTools:
