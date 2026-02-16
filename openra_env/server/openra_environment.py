@@ -95,6 +95,7 @@ class OpenRAEnvironment(MCPEnvironment):
         self._reward_fn = OpenRARewardFunction(weights=reward_weights)
         self._state = OpenRAState()
         self._last_obs: Optional[dict] = None
+        self._unit_groups: dict[str, list[int]] = {}  # named groups of unit IDs
         # Persistent event loop for async gRPC bridge operations.
         # Runs in a background thread so it doesn't conflict with
         # FastAPI/uvicorn's event loop when MCP tools call it.
@@ -113,23 +114,97 @@ class OpenRAEnvironment(MCPEnvironment):
         @mcp.tool()
         def get_game_state() -> dict:
             """Get a full summary of the current game state including economy,
-            military stats, unit counts, building counts, and enemy visibility."""
+            military stats, unit counts, building counts, enemy visibility, and alerts."""
             env._refresh_obs()
             obs = env._last_obs
             if obs is None:
                 return {"error": "No observation available. Call advance() or reset first."}
+
+            eco = obs["economy"]
+            power_balance = eco["power_provided"] - eco["power_drained"]
+
+            # Compute alerts
+            alerts = []
+
+            # Under attack: enemy units near our buildings
+            for enemy in obs["visible_enemies"]:
+                for bldg in obs["buildings"]:
+                    dx = abs(enemy.get("cell_x", 0) - bldg.get("cell_x", 0))
+                    dy = abs(enemy.get("cell_y", 0) - bldg.get("cell_y", 0))
+                    if dx + dy < 12:
+                        alerts.append(
+                            f"UNDER ATTACK: enemy {enemy['type']} id={enemy['actor_id']} "
+                            f"near your {bldg['type']} at ({bldg['cell_x']},{bldg['cell_y']})"
+                        )
+                        break
+
+            # Damaged buildings
+            for bldg in obs["buildings"]:
+                if bldg["hp_percent"] < 0.5:
+                    alerts.append(f"DAMAGED: {bldg['type']} at {bldg['hp_percent']:.0%} HP — repair_building({bldg['actor_id']})")
+
+            # Power crisis
+            if power_balance < 0:
+                alerts.append(f"LOW POWER: {power_balance:+d} — build powr immediately")
+
+            # Idle cash with few harvesters
+            if eco["cash"] > 2000 and eco["harvester_count"] < 2:
+                alerts.append(f"IDLE CASH: ${eco['cash']} with {eco['harvester_count']} harvester(s) — build refinery or harvester")
+
+            # Nothing being produced
+            if not obs["production"] and len(obs["buildings"]) >= 3:
+                alerts.append("IDLE PRODUCTION: nothing being built or trained — queue something")
+
+            # Building ready to place
+            for p in obs["production"]:
+                if p["queue_type"] == "Building" and p["progress"] >= 0.99:
+                    alerts.append(f"READY TO PLACE: {p['item']} — call place_building()")
+
+            # Combat units on default ReturnFire stance
+            returnfire_count = sum(
+                1 for u in obs["units"]
+                if u.get("can_attack") and u.get("stance", 1) == 1
+            )
+            if returnfire_count > 0:
+                alerts.append(f"STANCE WARNING: {returnfire_count} combat unit(s) on ReturnFire — set to attack_anything")
+
+            # Compact summaries with actor IDs for planning
+            units_summary = [
+                {"id": u["actor_id"], "type": u["type"], "idle": u["is_idle"],
+                 "can_attack": u["can_attack"], "stance": u["stance"],
+                 "cell_x": u["cell_x"], "cell_y": u["cell_y"]}
+                for u in obs["units"]
+            ]
+            buildings_summary = [
+                {"id": b["actor_id"], "type": b["type"],
+                 "cell_x": b["cell_x"], "cell_y": b["cell_y"]}
+                for b in obs["buildings"]
+            ]
+            enemy_summary = [
+                {"id": e["actor_id"], "type": e["type"],
+                 "cell_x": e["cell_x"], "cell_y": e["cell_y"]}
+                for e in obs["visible_enemies"]
+            ]
+
             return {
                 "tick": obs["tick"],
                 "done": obs["done"],
                 "result": obs.get("result", ""),
                 "economy": obs["economy"],
+                "power_balance": power_balance,
                 "military": obs["military"],
                 "own_units": len(obs["units"]),
                 "own_buildings": len(obs["buildings"]),
+                "building_types": list(set(b["type"] for b in obs["buildings"])),
                 "visible_enemy_units": len(obs["visible_enemies"]),
                 "visible_enemy_buildings": len(obs.get("visible_enemy_buildings", [])),
                 "production_queues": len(obs["production"]),
+                "production_items": [f"{p['item']}@{p['progress']:.0%}" for p in obs["production"]],
                 "available_production": obs.get("available_production", []),
+                "units_summary": units_summary,
+                "buildings_summary": buildings_summary,
+                "enemy_summary": enemy_summary,
+                "alerts": alerts,
                 "map": obs["map_info"],
             }
 
@@ -360,10 +435,13 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @mcp.tool()
-        def build_unit(unit_type: str) -> dict:
-            """Start training a unit (infantry, vehicle, aircraft, ship).
-            The unit_type is the internal name (e.g., 'e1', '3tnk', 'mig')."""
-            commands = [CommandModel(action=ActionType.TRAIN, item_type=unit_type)]
+        def build_unit(unit_type: str, count: int = 1) -> dict:
+            """Start training units (infantry, vehicle, aircraft, ship).
+            The unit_type is the internal name (e.g., 'e1', '3tnk', 'mig').
+            Use count > 1 to queue multiple of the same type."""
+            count = max(1, min(count, 10))
+            commands = [CommandModel(action=ActionType.TRAIN, item_type=unit_type)
+                        for _ in range(count)]
             return env._execute_commands(commands)
 
         @mcp.tool()
@@ -375,10 +453,26 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @mcp.tool()
-        def place_building(building_type: str, cell_x: int, cell_y: int) -> dict:
+        def place_building(building_type: str, cell_x: int = 0, cell_y: int = 0) -> dict:
             """Place a completed building at the specified cell position.
-            Call after build_structure() completes (check production progress)."""
-            commands = [CommandModel(action=ActionType.PLACE_BUILDING, item_type=building_type, target_x=cell_x, target_y=cell_y)]
+            Cell coordinates are optional — the game engine auto-finds the best
+            valid position near your base if the given position is invalid or omitted."""
+            # Check building is ready in production queue
+            env._refresh_obs()
+            pre_obs = env._last_obs
+            if pre_obs:
+                ready = any(
+                    p["queue_type"] == "Building" and p["item"] == building_type and p["progress"] >= 0.99
+                    for p in pre_obs["production"]
+                )
+                if not ready:
+                    return {
+                        "error": f"'{building_type}' not ready to place. Build with build_structure() first and advance() until done.",
+                        "tick": pre_obs.get("tick", 0),
+                    }
+
+            commands = [CommandModel(action=ActionType.PLACE_BUILDING,
+                                    item_type=building_type, target_x=cell_x, target_y=cell_y)]
             return env._execute_commands(commands)
 
         @mcp.tool()
@@ -454,6 +548,180 @@ class OpenRAEnvironment(MCPEnvironment):
             commands = [CommandModel(action=ActionType.SET_PRIMARY, actor_id=building_id)]
             return env._execute_commands(commands)
 
+        # ── Placement Helper ────────────────────────────────────────────
+
+        # Building footprint sizes (width x height in cells) from RA rules
+        _FOOTPRINTS = {
+            "fact": (3, 4), "proc": (3, 4),
+            "powr": (2, 3), "apwr": (3, 3),
+            "barr": (2, 3), "tent": (2, 3),
+            "weap": (3, 3), "fix": (3, 3), "stek": (3, 3),
+            "dome": (2, 3), "hpad": (2, 3), "afld": (3, 2),
+            "iron": (2, 2), "pdox": (2, 2),
+            "mslo": (2, 1), "sam": (2, 1),
+            "spen": (3, 3), "syrd": (3, 3), "atek": (2, 3),
+        }
+
+        @mcp.tool()
+        def get_valid_placements(building_type: str, max_results: int = 8) -> dict:
+            """Get suggested placement positions for a building near your base.
+            Returns positions sorted by distance from Construction Yard.
+            Use the first position with place_building(). If it fails, try the next."""
+            env._refresh_obs()
+            obs = env._last_obs
+            if obs is None:
+                return {"error": "No observation available"}
+
+            # Find Construction Yard
+            cy = None
+            for b in obs["buildings"]:
+                if b["type"] == "fact":
+                    cy = b
+                    break
+            if cy is None:
+                return {"error": "No Construction Yard found — deploy MCV first"}
+
+            cx, cy_y = cy["cell_x"], cy["cell_y"]
+            bw, bh = _FOOTPRINTS.get(building_type, (2, 2))
+
+            # Mark occupied cells from all existing buildings (with 1-cell padding)
+            occupied = set()
+            for b in obs["buildings"]:
+                fw, fh = _FOOTPRINTS.get(b["type"], (2, 2))
+                bx, by = b["cell_x"], b["cell_y"]
+                for dx in range(-1, fw + 1):
+                    for dy in range(-1, fh + 1):
+                        occupied.add((bx + dx, by + dy))
+
+            # Map bounds
+            map_info = obs.get("map_info", {})
+            map_w = map_info.get("width", 128)
+            map_h = map_info.get("height", 128)
+
+            # Generate candidates sorted by distance from CY
+            candidates = []
+            max_radius = 12  # RA build radius from CY
+            for dx in range(-max_radius, max_radius + 1):
+                for dy in range(-max_radius, max_radius + 1):
+                    px, py = cx + dx, cy_y + dy
+                    dist = abs(dx) + abs(dy)
+                    if dist < 2 or dist > max_radius:
+                        continue
+
+                    # Check map bounds
+                    if px < 0 or py < 0 or px + bw > map_w or py + bh > map_h:
+                        continue
+
+                    # Check no overlap with occupied cells
+                    overlap = False
+                    for ox in range(bw):
+                        for oy in range(bh):
+                            if (px + ox, py + oy) in occupied:
+                                overlap = True
+                                break
+                        if overlap:
+                            break
+
+                    if not overlap:
+                        candidates.append({"cell_x": px, "cell_y": py, "distance": dist})
+
+            candidates.sort(key=lambda c: c["distance"])
+            suggestions = candidates[:max(1, min(max_results, 15))]
+
+            return {
+                "building_type": building_type,
+                "size": f"{bw}x{bh}",
+                "cy_position": {"cell_x": cx, "cell_y": cy_y},
+                "suggestions": suggestions,
+            }
+
+        # ── Unit Group Tools ────────────────────────────────────────────
+
+        @mcp.tool()
+        def assign_group(group_name: str, unit_ids: list[int]) -> dict:
+            """Assign units to a named group (like Ctrl+1 in-game).
+            Groups persist across turns. Use group names in other commands.
+            Example: assign_group("attackers", [155, 160, 170])"""
+            env._unit_groups[group_name] = list(unit_ids)
+            return {"group": group_name, "unit_count": len(unit_ids), "unit_ids": unit_ids}
+
+        @mcp.tool()
+        def add_to_group(group_name: str, unit_ids: list[int]) -> dict:
+            """Add units to an existing group (like Shift+Ctrl+1)."""
+            existing = env._unit_groups.get(group_name, [])
+            for uid in unit_ids:
+                if uid not in existing:
+                    existing.append(uid)
+            env._unit_groups[group_name] = existing
+            return {"group": group_name, "unit_count": len(existing), "unit_ids": existing}
+
+        @mcp.tool()
+        def get_groups() -> dict:
+            """List all unit groups and their members."""
+            # Prune dead units from groups
+            env._refresh_obs()
+            alive_ids = set()
+            if env._last_obs:
+                alive_ids = {u["actor_id"] for u in env._last_obs.get("units", [])}
+            result = {}
+            for name, ids in env._unit_groups.items():
+                alive = [uid for uid in ids if uid in alive_ids]
+                env._unit_groups[name] = alive  # auto-prune dead units
+                if alive:
+                    result[name] = alive
+            return result
+
+        @mcp.tool()
+        def command_group(
+            group_name: str,
+            command: str,
+            target_x: int = 0,
+            target_y: int = 0,
+            target_actor_id: int = 0,
+            stance: str = "attack_anything",
+        ) -> dict:
+            """Send a command to all units in a named group.
+            command: "attack_move", "move_units", "attack_target", "set_stance", "stop_units"
+            For attack_move/move_units: provide target_x, target_y
+            For attack_target: provide target_actor_id
+            For set_stance: provide stance name"""
+            ids = env._unit_groups.get(group_name, [])
+            if not ids:
+                return {"error": f"Group '{group_name}' not found or empty"}
+
+            # Prune dead units
+            env._refresh_obs()
+            if env._last_obs:
+                alive_ids = {u["actor_id"] for u in env._last_obs.get("units", [])}
+                ids = [uid for uid in ids if uid in alive_ids]
+                env._unit_groups[group_name] = ids
+            if not ids:
+                return {"error": f"All units in group '{group_name}' are dead"}
+
+            if command == "attack_move":
+                commands = [CommandModel(action=ActionType.ATTACK_MOVE, actor_id=uid,
+                                        target_x=target_x, target_y=target_y) for uid in ids]
+            elif command == "move_units":
+                commands = [CommandModel(action=ActionType.MOVE, actor_id=uid,
+                                        target_x=target_x, target_y=target_y) for uid in ids]
+            elif command == "attack_target":
+                commands = [CommandModel(action=ActionType.ATTACK, actor_id=uid,
+                                        target_actor_id=target_actor_id) for uid in ids]
+            elif command == "set_stance":
+                stance_map = {"hold_fire": 0, "return_fire": 1, "defend": 2, "attack_anything": 3}
+                stance_val = stance_map.get(stance.lower(), 3)
+                commands = [CommandModel(action=ActionType.SET_STANCE, actor_id=uid,
+                                        target_x=stance_val) for uid in ids]
+            elif command == "stop_units":
+                commands = [CommandModel(action=ActionType.STOP, actor_id=uid) for uid in ids]
+            else:
+                return {"error": f"Unknown group command '{command}'"}
+
+            result = env._execute_commands(commands)
+            result["group"] = group_name
+            result["units_commanded"] = len(ids)
+            return result
+
         @mcp.tool()
         def get_replay_path() -> dict:
             """Get the path to the most recent replay file from this session."""
@@ -465,7 +733,224 @@ class OpenRAEnvironment(MCPEnvironment):
                 return {"error": "No replay files found"}
             return {"path": str(replays[0]), "size_bytes": replays[0].stat().st_size}
 
+        @mcp.tool()
+        def execute_plan(steps: list[dict]) -> dict:
+            """Execute a temporal plan — multiple steps with delays and conditions.
+
+            Each step is a dict with:
+              actions: list of action dicts to execute
+              wait_ticks: ticks to advance AFTER this step (default: 0)
+              condition: optional — only execute if condition is met
+              abort_on: optional — abort entire plan if condition is true after step
+
+            Actions use same format as individual tools:
+              {"tool": "build_unit", "unit_type": "e1", "count": 3}
+              {"tool": "attack_move", "unit_ids": [155, 160], "target_x": 50, "target_y": 30}
+              {"tool": "set_stance", "unit_ids": "all_combat", "stance": "attack_anything"}
+              {"tool": "deploy_unit", "unit_id": 120}
+
+            Conditions: "enemies_visible", "no_enemies_visible", "under_attack",
+              "building_ready", "cash_above:2000", "cash_below:500"
+
+            Special unit selectors (instead of listing IDs):
+              "all_combat" — all own combat units
+              "all_idle" — all idle combat units
+
+            Returns: final state + execution log of which steps ran/skipped.
+            """
+            execution_log = []
+            start_tick = env._last_obs["tick"] if env._last_obs else 0
+            aborted = False
+
+            for i, step in enumerate(steps):
+                step_num = i + 1
+                # Refresh state for condition checking
+                env._refresh_obs()
+                obs = env._last_obs
+                if obs is None:
+                    execution_log.append(f"Step {step_num}: ERROR no observation")
+                    break
+                if obs.get("done"):
+                    execution_log.append(f"Step {step_num}: game over")
+                    break
+
+                # Check condition
+                condition = step.get("condition")
+                if condition and not env._check_plan_condition(condition, obs):
+                    execution_log.append(f"Step {step_num}: SKIPPED ({condition} = false)")
+                    continue
+
+                # Convert actions to commands
+                actions = step.get("actions", [])
+                all_commands = []
+                action_names = []
+                for action in actions:
+                    cmds = env._action_to_commands(action, obs)
+                    all_commands.extend(cmds)
+                    tool_name = action.get("tool", "?")
+                    action_names.append(tool_name)
+
+                # Execute commands
+                if all_commands:
+                    try:
+                        result = env._execute_commands(all_commands)
+                        if result.get("done"):
+                            execution_log.append(
+                                f"Step {step_num}: {', '.join(action_names)} -> game over"
+                            )
+                            break
+                    except Exception as e:
+                        execution_log.append(
+                            f"Step {step_num}: {', '.join(action_names)} -> ERROR {e}"
+                        )
+                        break
+
+                # Wait ticks
+                wait = step.get("wait_ticks", 0)
+                if wait > 0:
+                    wait = max(1, min(wait, 500))
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            env._bridge.wait_ticks(wait), env._loop
+                        )
+                        proto_obs = future.result(timeout=300)
+                        obs_dict = observation_to_dict(proto_obs)
+                        env._last_obs = obs_dict
+                        env._state.game_tick = obs_dict["tick"]
+                    except Exception:
+                        env._refresh_obs()
+
+                step_summary = f"Step {step_num}: {', '.join(action_names)} OK"
+                if wait > 0:
+                    step_summary += f" +{wait}t"
+                execution_log.append(step_summary)
+
+                # Check abort_on condition
+                abort_on = step.get("abort_on")
+                if abort_on:
+                    env._refresh_obs()
+                    if env._last_obs and env._check_plan_condition(abort_on, env._last_obs):
+                        execution_log.append(f"ABORT: {abort_on} triggered after step {step_num}")
+                        aborted = True
+                        break
+
+            # Final state
+            env._refresh_obs()
+            obs = env._last_obs or {}
+            end_tick = obs.get("tick", start_tick)
+            executed = sum(1 for e in execution_log if "OK" in e)
+            skipped = sum(1 for e in execution_log if "SKIPPED" in e)
+
+            return {
+                "plan_completed": not aborted,
+                "steps_total": len(steps),
+                "steps_executed": executed,
+                "steps_skipped": skipped,
+                "ticks_elapsed": end_tick - start_tick,
+                "tick": end_tick,
+                "done": obs.get("done", False),
+                "result": obs.get("result", ""),
+                "economy": obs.get("economy", {}),
+                "own_units": len(obs.get("units", [])),
+                "own_buildings": len(obs.get("buildings", [])),
+                "visible_enemies": len(obs.get("visible_enemies", [])),
+                "execution_log": execution_log,
+            }
+
     # ── Internal helpers ─────────────────────────────────────────────────
+
+    def _check_plan_condition(self, condition: str, obs: dict) -> bool:
+        """Evaluate a plan condition against current observation."""
+        if condition == "enemies_visible":
+            return len(obs.get("visible_enemies", [])) > 0
+        elif condition == "no_enemies_visible":
+            return len(obs.get("visible_enemies", [])) == 0
+        elif condition == "under_attack":
+            for enemy in obs.get("visible_enemies", []):
+                for bldg in obs.get("buildings", []):
+                    dx = abs(enemy.get("cell_x", 0) - bldg.get("cell_x", 0))
+                    dy = abs(enemy.get("cell_y", 0) - bldg.get("cell_y", 0))
+                    if dx + dy < 12:
+                        return True
+            return False
+        elif condition == "building_ready":
+            return any(
+                p["queue_type"] == "Building" and p["progress"] >= 0.99
+                for p in obs.get("production", [])
+            )
+        elif condition.startswith("cash_above:"):
+            threshold = int(condition.split(":")[1])
+            return obs.get("economy", {}).get("cash", 0) > threshold
+        elif condition.startswith("cash_below:"):
+            threshold = int(condition.split(":")[1])
+            return obs.get("economy", {}).get("cash", 0) < threshold
+        return True  # unknown condition → proceed
+
+    def _resolve_unit_ids(self, selector, obs: dict) -> list[int]:
+        """Resolve unit selectors like 'all_combat', 'all_idle', or group names to actual actor IDs."""
+        if isinstance(selector, list):
+            return selector
+        if selector == "all_combat":
+            return [u["actor_id"] for u in obs.get("units", []) if u.get("can_attack")]
+        if selector == "all_idle":
+            return [u["actor_id"] for u in obs.get("units", [])
+                    if u.get("can_attack") and u.get("is_idle")]
+        # Check named groups
+        if selector in self._unit_groups:
+            return list(self._unit_groups[selector])
+        return []
+
+    def _action_to_commands(self, action: dict, obs: dict) -> list[CommandModel]:
+        """Convert a plan action dict to a list of CommandModel objects."""
+        tool = action.get("tool", "")
+        unit_ids = self._resolve_unit_ids(action.get("unit_ids", []), obs)
+        queued = action.get("queued", False)
+
+        if tool == "build_unit":
+            count = max(1, action.get("count", 1))
+            return [CommandModel(action=ActionType.TRAIN, item_type=action["unit_type"])
+                    for _ in range(count)]
+        elif tool == "build_structure":
+            return [CommandModel(action=ActionType.BUILD, item_type=action["building_type"])]
+        elif tool == "place_building":
+            return [CommandModel(action=ActionType.PLACE_BUILDING,
+                                item_type=action["building_type"],
+                                target_x=action.get("cell_x", 0), target_y=action.get("cell_y", 0))]
+        elif tool == "attack_move":
+            return [CommandModel(action=ActionType.ATTACK_MOVE, actor_id=uid,
+                                target_x=action["target_x"], target_y=action["target_y"],
+                                queued=queued)
+                    for uid in unit_ids]
+        elif tool == "move_units":
+            return [CommandModel(action=ActionType.MOVE, actor_id=uid,
+                                target_x=action["target_x"], target_y=action["target_y"],
+                                queued=queued)
+                    for uid in unit_ids]
+        elif tool == "attack_target":
+            return [CommandModel(action=ActionType.ATTACK, actor_id=uid,
+                                target_actor_id=action["target_actor_id"], queued=queued)
+                    for uid in unit_ids]
+        elif tool == "set_stance":
+            stance_map = {"hold_fire": 0, "return_fire": 1, "defend": 2, "attack_anything": 3}
+            stance_val = stance_map.get(action.get("stance", "attack_anything").lower(), 3)
+            return [CommandModel(action=ActionType.SET_STANCE, actor_id=uid, target_x=stance_val)
+                    for uid in unit_ids]
+        elif tool == "deploy_unit":
+            return [CommandModel(action=ActionType.DEPLOY, actor_id=action["unit_id"])]
+        elif tool == "set_rally_point":
+            return [CommandModel(action=ActionType.SET_RALLY_POINT,
+                                actor_id=action["building_id"],
+                                target_x=action["cell_x"], target_y=action["cell_y"])]
+        elif tool == "repair_building":
+            return [CommandModel(action=ActionType.REPAIR, actor_id=action["building_id"])]
+        elif tool == "stop_units":
+            return [CommandModel(action=ActionType.STOP, actor_id=uid) for uid in unit_ids]
+        elif tool == "harvest":
+            return [CommandModel(action=ActionType.HARVEST, actor_id=action["unit_id"],
+                                target_x=action.get("cell_x", 0),
+                                target_y=action.get("cell_y", 0))]
+        else:
+            return []
 
     def _refresh_obs(self) -> None:
         """Update _last_obs from the bridge's background observation reader.
@@ -591,6 +1076,7 @@ class OpenRAEnvironment(MCPEnvironment):
         )
         self._reward_fn.reset()
         self._last_obs = None
+        self._unit_groups.clear()
 
         # Update seed if provided
         if seed is not None:
