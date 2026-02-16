@@ -617,18 +617,6 @@ class OpenRAEnvironment(MCPEnvironment):
 
         # ── Placement Helper ────────────────────────────────────────────
 
-        # Building footprint sizes (width x height in cells) from RA rules
-        _FOOTPRINTS = {
-            "fact": (3, 4), "proc": (3, 4),
-            "powr": (2, 3), "apwr": (3, 3),
-            "barr": (2, 3), "tent": (2, 3),
-            "weap": (3, 3), "fix": (3, 3), "stek": (3, 3),
-            "dome": (2, 3), "hpad": (2, 3), "afld": (3, 2),
-            "iron": (2, 2), "pdox": (2, 2),
-            "mslo": (2, 1), "sam": (2, 1),
-            "spen": (3, 3), "syrd": (3, 3), "atek": (2, 3),
-        }
-
         @mcp.tool()
         def get_valid_placements(building_type: str, max_results: int = 8) -> dict:
             """Get suggested placement positions for a building near your base.
@@ -639,66 +627,24 @@ class OpenRAEnvironment(MCPEnvironment):
             if obs is None:
                 return {"error": "No observation available"}
 
-            # Find Construction Yard
-            cy = None
-            for b in obs["buildings"]:
-                if b["type"] == "fact":
-                    cy = b
-                    break
-            if cy is None:
+            candidates = env._find_placement_candidates(building_type, obs)
+            if not candidates:
                 return {"error": "No Construction Yard found — deploy MCV first"}
 
-            cx, cy_y = cy["cell_x"], cy["cell_y"]
-            bw, bh = _FOOTPRINTS.get(building_type, (2, 2))
+            bw, bh = env._FOOTPRINTS.get(building_type, (2, 2))
+            # Find CY position for response
+            cy_pos = {"cell_x": 0, "cell_y": 0}
+            for b in obs.get("buildings", []):
+                if b["type"] == "fact":
+                    cy_pos = {"cell_x": b["cell_x"], "cell_y": b["cell_y"]}
+                    break
 
-            # Mark occupied cells from all existing buildings (with 1-cell padding)
-            occupied = set()
-            for b in obs["buildings"]:
-                fw, fh = _FOOTPRINTS.get(b["type"], (2, 2))
-                bx, by = b["cell_x"], b["cell_y"]
-                for dx in range(-1, fw + 1):
-                    for dy in range(-1, fh + 1):
-                        occupied.add((bx + dx, by + dy))
-
-            # Map bounds
-            map_info = obs.get("map_info", {})
-            map_w = map_info.get("width", 128)
-            map_h = map_info.get("height", 128)
-
-            # Generate candidates sorted by distance from CY
-            candidates = []
-            max_radius = 12  # RA build radius from CY
-            for dx in range(-max_radius, max_radius + 1):
-                for dy in range(-max_radius, max_radius + 1):
-                    px, py = cx + dx, cy_y + dy
-                    dist = abs(dx) + abs(dy)
-                    if dist < 2 or dist > max_radius:
-                        continue
-
-                    # Check map bounds
-                    if px < 0 or py < 0 or px + bw > map_w or py + bh > map_h:
-                        continue
-
-                    # Check no overlap with occupied cells
-                    overlap = False
-                    for ox in range(bw):
-                        for oy in range(bh):
-                            if (px + ox, py + oy) in occupied:
-                                overlap = True
-                                break
-                        if overlap:
-                            break
-
-                    if not overlap:
-                        candidates.append({"cell_x": px, "cell_y": py, "distance": dist})
-
-            candidates.sort(key=lambda c: c["distance"])
             suggestions = candidates[:max(1, min(max_results, 15))]
 
             return {
                 "building_type": building_type,
                 "size": f"{bw}x{bh}",
-                "cy_position": {"cell_x": cx, "cell_y": cy_y},
+                "cy_position": cy_pos,
                 "suggestions": suggestions,
             }
 
@@ -1065,12 +1011,88 @@ class OpenRAEnvironment(MCPEnvironment):
     # Naval buildings that require water tiles
     _WATER_BUILDINGS = {"spen", "syrd"}
 
+    # Building footprint sizes (width x height in cells) from RA rules
+    _FOOTPRINTS = {
+        "fact": (3, 4), "proc": (3, 4),
+        "powr": (2, 3), "apwr": (3, 3),
+        "barr": (2, 3), "tent": (2, 3),
+        "weap": (3, 3), "fix": (3, 3), "stek": (3, 3),
+        "dome": (2, 3), "hpad": (2, 3), "afld": (3, 2),
+        "iron": (2, 2), "pdox": (2, 2),
+        "mslo": (2, 1), "sam": (2, 1),
+        "spen": (3, 3), "syrd": (3, 3), "atek": (2, 3),
+    }
+
+    def _find_placement_candidates(self, building_type: str, obs: dict) -> list[dict]:
+        """Find valid placement positions for a building near the Construction Yard.
+
+        Searches the full build radius around the CY, avoiding occupied cells.
+        Returns candidates sorted by distance from CY (closest first).
+        """
+        buildings = obs.get("buildings", [])
+
+        # Find Construction Yard
+        cy = None
+        for b in buildings:
+            if b["type"] == "fact":
+                cy = b
+                break
+        if cy is None:
+            return []
+
+        cx, cy_y = cy["cell_x"], cy["cell_y"]
+        bw, bh = self._FOOTPRINTS.get(building_type, (2, 2))
+
+        # Mark occupied cells from all existing buildings (with 1-cell padding)
+        occupied = set()
+        for b in buildings:
+            fw, fh = self._FOOTPRINTS.get(b["type"], (2, 2))
+            bx, by = b["cell_x"], b["cell_y"]
+            for dx in range(-1, fw + 1):
+                for dy in range(-1, fh + 1):
+                    occupied.add((bx + dx, by + dy))
+
+        # Map bounds
+        map_info = obs.get("map_info", {})
+        map_w = map_info.get("width", 128)
+        map_h = map_info.get("height", 128)
+
+        # Generate candidates sorted by distance from CY
+        candidates = []
+        max_radius = 15  # Full RA build radius
+        for dx in range(-max_radius, max_radius + 1):
+            for dy in range(-max_radius, max_radius + 1):
+                px, py = cx + dx, cy_y + dy
+                dist = abs(dx) + abs(dy)
+                if dist < 2 or dist > max_radius:
+                    continue
+
+                # Check map bounds
+                if px < 0 or py < 0 or px + bw > map_w or py + bh > map_h:
+                    continue
+
+                # Check no overlap with occupied cells
+                overlap = False
+                for ox in range(bw):
+                    for oy in range(bh):
+                        if (px + ox, py + oy) in occupied:
+                            overlap = True
+                            break
+                    if overlap:
+                        break
+
+                if not overlap:
+                    candidates.append({"cell_x": px, "cell_y": py, "distance": dist})
+
+        candidates.sort(key=lambda c: c["distance"])
+        return candidates
+
     def _process_pending_placements(self) -> None:
         """Auto-place buildings that finished construction via build_and_place.
 
-        Uses a two-phase approach:
-        1. When a building is ready, send PLACE_BUILDING and mark as "attempted"
-        2. On next call, check if the building is still in queue — if so, placement failed
+        Uses smart placement: finds valid positions in the full build radius
+        around the Construction Yard, tries them in order, and cycles through
+        candidates on each retry. Only cancels after exhausting all options.
         """
         if not self._last_obs:
             return
@@ -1079,37 +1101,47 @@ class OpenRAEnvironment(MCPEnvironment):
 
         # Phase 2: Check previously attempted placements for failure
         failed = []
-        for btype, attempts in list(attempted.items()):
+        for btype, attempt_idx in list(attempted.items()):
             still_in_queue = any(
                 p["queue_type"] == "Building" and p["item"] == btype and p["progress"] >= 0.99
                 for p in production
             )
             if still_in_queue:
-                # Building is still in queue → placement failed
-                if attempts >= 2:
-                    # Multiple attempts failed — report and auto-cancel
+                # Building is still in queue → last placement failed, try next candidate
+                candidates = self._find_placement_candidates(btype, self._last_obs)
+                if attempt_idx < len(candidates):
+                    # Try the next candidate position
+                    pos = candidates[attempt_idx]
+                    try:
+                        commands = [CommandModel(
+                            action=ActionType.PLACE_BUILDING,
+                            item_type=btype,
+                            target_x=pos["cell_x"],
+                            target_y=pos["cell_y"],
+                        )]
+                        self._execute_commands(commands)
+                        attempted[btype] = attempt_idx + 1
+                    except Exception:
+                        attempted[btype] = attempt_idx + 1
+                else:
+                    # Exhausted all candidates — report failure and cancel
                     if btype in self._WATER_BUILDINGS:
                         reason = f"{btype} requires water tiles — must be placed on water, not land"
                     else:
-                        reason = "no valid placement found near base"
+                        reason = f"no valid position found (tried {attempt_idx} spots)"
                     self._placement_results.append(
-                        f"PLACEMENT FAILED: {btype} — {reason}. "
-                        f"Auto-cancelling. Use cancel_production(\"{btype}\") if stuck."
+                        f"PLACEMENT FAILED: {btype} — {reason}. Auto-cancelling."
                     )
-                    # Auto-cancel the stuck production
                     try:
                         cancel_cmd = [CommandModel(action=ActionType.CANCEL_PRODUCTION, item_type=btype)]
                         self._execute_commands(cancel_cmd)
                     except Exception:
                         pass
                     failed.append(btype)
-                else:
-                    # Retry once with different offset
-                    attempted[btype] = attempts + 1
             else:
                 # Building no longer in queue → placement succeeded
                 self._placement_results.append(f"AUTO-PLACED: {btype}")
-                failed.append(btype)  # remove from attempted tracking
+                failed.append(btype)
 
         for btype in failed:
             attempted.pop(btype, None)
@@ -1127,15 +1159,24 @@ class OpenRAEnvironment(MCPEnvironment):
             )
             if not ready:
                 continue
+
+            # Find best placement position using full CY radius search
+            candidates = self._find_placement_candidates(btype, self._last_obs)
+
+            # Use user-specified coords if provided and valid, otherwise use best candidate
+            cx, cy = coords["cell_x"], coords["cell_y"]
+            if cx == 0 and cy == 0 and candidates:
+                cx, cy = candidates[0]["cell_x"], candidates[0]["cell_y"]
+
             try:
                 commands = [CommandModel(
                     action=ActionType.PLACE_BUILDING,
                     item_type=btype,
-                    target_x=coords["cell_x"],
-                    target_y=coords["cell_y"],
+                    target_x=cx,
+                    target_y=cy,
                 )]
                 self._execute_commands(commands)
-                attempted[btype] = 1
+                attempted[btype] = 1  # start tracking from candidate index 1
             except Exception:
                 self._placement_results.append(
                     f"PLACEMENT FAILED: {btype} — command error. "
