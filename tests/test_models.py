@@ -35,7 +35,7 @@ class TestActionType:
             "harvest", "build", "train", "deploy", "sell",
             "repair", "place_building", "cancel_production", "set_rally_point",
             "guard", "set_stance", "enter_transport", "unload",
-            "power_down", "set_primary",
+            "power_down", "set_primary", "surrender",
         }
         actual = {a.value for a in ActionType}
         assert actual == expected

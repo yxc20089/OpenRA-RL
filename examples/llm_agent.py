@@ -34,6 +34,7 @@ from collections import defaultdict
 from typing import Any, Optional
 
 import httpx
+from openra_env.game_data import get_building_stats, get_faction_info, get_tech_tree, get_unit_stats
 from openra_env.mcp_ws_client import OpenRAMCPClient
 
 # Line-buffered stdout so output is observable in real time
@@ -45,117 +46,165 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514"
 
 SYSTEM_PROMPT = """\
-You are an RTS AI playing Command & Conquer: Red Alert (Soviet faction). \
+You are an RTS AI playing Command & Conquer: Red Alert. \
 You control one side against a Normal AI opponent. The game runs in REAL \
 TIME (~25 ticks/sec). Every second you spend thinking, the enemy is building.
 
-## How to Act — Think in Plans
+## Pre-Game Knowledge
+A STRATEGIC BRIEFING is provided at game start with map, base position, \
+enemy spawn estimate, faction, tech tree, and unit/building stats. \
+USE these coordinates — DO NOT guess positions.
 
-Use execute_plan() to submit multi-step temporal plans. Each step can have \
-a time delay (wait_ticks) and conditions. The game executes your plan over \
-many ticks automatically, then returns results.
+## Tools — batch() vs plan() vs advance()
+
+**batch(actions)** — Send multiple commands that all execute AT THE SAME TIME.
+Use when you want to do several things at once (no ordering dependency).
+batch([
+  {"tool": "build_unit", "unit_type": "e1", "count": 3},
+  {"tool": "set_stance", "unit_ids": "all_combat", "stance": "attack_anything"},
+  {"tool": "attack_move", "unit_ids": [155], "target_x": 50, "target_y": 30}
+])
+
+**plan(steps)** — Execute steps ONE AFTER ANOTHER. Each step sends commands, \
+then refreshes the game state before the next step. Use conditions to gate steps.
+plan([
+  {"actions": [{"tool": "deploy_unit", "unit_id": 120}]},
+  {"actions": [{"tool": "build_structure", "building_type": "powr"}]},
+  {"condition": "building_ready",
+   "actions": [{"tool": "place_building", "building_type": "powr"}]}
+])
+
+**advance(ticks)** — Wait for the game to advance. Use when you need to let \
+time pass (e.g., waiting for production to finish).
+
+Conditions: "enemies_visible", "no_enemies_visible", "under_attack", \
+"building_ready", "cash_above:2000", "cash_below:500"
+
+Special unit selectors: "all_combat", "all_idle", or group names.
 
 CRITICAL RULES:
-- Do NOT call get_game_state/get_economy/get_production/get_buildings — \
-  a TURN BRIEFING with full state, unit IDs, and alerts is injected \
-  automatically before each turn
-- Use execute_plan() for multi-step sequences instead of individual tool calls
+- A TURN BRIEFING with full state is injected automatically before each turn
+- EVERY briefing includes coordinates for units, buildings, and enemies
 - React to ALERTS immediately (especially UNDER ATTACK)
-- Use special selectors: "all_combat", "all_idle" instead of listing IDs
-- You can still use individual tools when appropriate (single quick action)
+- Use batch() for concurrent actions, plan() for sequential actions
+- Use advance() only when you need to wait for something
 
-## Game Mechanics You Should Leverage
-- Production queues: build_unit queues training — it continues while you plan
-- Auto-attack: set stance to "attack_anything" so units fight on their own
-- Auto-pathfinding: one attack_move order sends units across the entire map
-- Economy: game rejects orders you can't afford — just queue what you want
-- Unit groups: assign_group("army", [id1,id2,...]) then use "army" as unit selector
-  in execute_plan or command_group("army", "attack_move", target_x=50, target_y=30)
-
-## Phase 1: Deploy & Build (turns 1-3)
-
-WORKFLOW — Deploy MCV and build:
-1. deploy_unit(<mcv_id>), advance(50) to get CY
-2. build_structure("powr"), advance(120) to build it
-3. place_building("powr") — auto-finds best position near your base
-4. Repeat for barr, proc, weap
-
-You can combine steps in execute_plan:
-execute_plan([
-  {"actions": [{"tool": "deploy_unit", "unit_id": <mcv_id>}], "wait_ticks": 50},
-  {"actions": [{"tool": "build_structure", "building_type": "powr"}], "wait_ticks": 120},
-  {"condition": "building_ready",
-   "actions": [{"tool": "place_building", "building_type": "powr"}]},
-  {"actions": [
-    {"tool": "build_structure", "building_type": "barr"},
-    {"tool": "build_unit", "unit_type": "e1", "count": 2},
-    {"tool": "set_stance", "unit_ids": "all_combat", "stance": "attack_anything"}
-  ], "wait_ticks": 120, "abort_on": "under_attack"}
-])
-
-Build order: powr → barr → proc → weap → 2nd powr if low power
-PLACEMENT: Just call place_building("building_type") — coordinates are optional.
-The engine auto-finds the best valid position near your base.
-
-## Phase 2: Economy & Military (turns 3-8)
-
-- Always queue units: build_unit("e1", count=3) or build_unit("1tnk")
-- Build extra harvester when cash > $2500: build_unit("harv")
-- Set ALL combat units to "attack_anything" stance
-- Send 1 scout (e1) to map center, then opposite corner
-
-EXAMPLE — Produce + scout:
-execute_plan([
-  {"actions": [
-    {"tool": "build_unit", "unit_type": "e1", "count": 3},
-    {"tool": "set_stance", "unit_ids": "all_combat", "stance": "attack_anything"}
-  ], "wait_ticks": 50},
-  {"actions": [{"tool": "attack_move", "unit_ids": [<scout_id>],
-                "target_x": <map_w/2>, "target_y": <map_h/2>}],
-   "wait_ticks": 200},
-  {"condition": "enemies_visible",
-   "actions": [{"tool": "attack_move", "unit_ids": "all_combat",
-                "target_x": <map_w/2>, "target_y": <map_h/2>}]}
-])
-
-## Phase 3: Attack (5+ combat units)
-
-EXAMPLE — All-in push:
-execute_plan([
-  {"actions": [
-    {"tool": "set_stance", "unit_ids": "all_combat", "stance": "attack_anything"},
-    {"tool": "attack_move", "unit_ids": "all_combat",
-     "target_x": <enemy_x>, "target_y": <enemy_y>}
-  ], "wait_ticks": 200, "abort_on": "under_attack"},
-  {"actions": [
-    {"tool": "build_unit", "unit_type": "1tnk", "count": 2},
-    {"tool": "build_unit", "unit_type": "e1", "count": 3}
-  ]}
-])
-
-## Phase 4: Defense (UNDER ATTACK alert)
-
-execute_plan([
-  {"actions": [
-    {"tool": "set_stance", "unit_ids": "all_combat", "stance": "attack_anything"},
-    {"tool": "attack_move", "unit_ids": "all_idle",
-     "target_x": <attack_x>, "target_y": <attack_y>}
-  ]},
-  {"actions": [
-    {"tool": "build_unit", "unit_type": "e1", "count": 3},
-    {"tool": "repair_building", "building_id": <damaged_id>}
-  ]}
-])
+## Building — use build_and_place()
+build_and_place("powr") — queues construction AND auto-places when done.
+Coordinates optional: build_and_place("barr", cell_x=10, cell_y=15).
+Build order: powr → barr/tent → proc → weap → 2nd powr if low power
 
 ## Economy Rules
-- IDLE CASH (> $2000): build_unit("harv") or build_structure("proc")
-- LOW POWER: build_structure("powr") immediately
+- IDLE CASH (> $2000): build_unit("harv") or build_and_place("proc")
+- LOW POWER: build_and_place("powr") immediately
 - IDLE PRODUCTION: always queue something — idle production loses games
+
+## Coordinates & Scouting
+- Set rally points NEAR your base (within ~5 cells), not at map edges
+- Scout toward the enemy spawn estimate early with 1-2 cheap units
+- Use get_enemies() to find actual enemy positions before attacking
+- attack_move toward KNOWN enemy positions, not random coordinates
+- Turn briefings show unit/building positions — use them
+
+## Combat
+- Set ALL combat units to "attack_anything" stance
+- Send 1-2 scouts toward enemy spawn estimate early
+- Attack with 5+ units using attack_move toward known enemy positions
+- When UNDER ATTACK: rally all idle units to defend
 """
 
 
+def compose_pregame_briefing(state: dict) -> str:
+    """Compose a strategic briefing from initial game state + static game data.
+
+    Sent once at game start so the LLM knows map, base position, faction, tech tree,
+    and available units/buildings without needing extra tool calls.
+    """
+    map_info = state.get("map", {})
+    map_w = map_info.get("width", 0)
+    map_h = map_info.get("height", 0)
+    map_name = map_info.get("map_name", "?")
+
+    # Determine base position from buildings/units
+    buildings = state.get("buildings_summary", [])
+    units = state.get("units_summary", [])
+    all_positions = [(b["cell_x"], b["cell_y"]) for b in buildings] + \
+                    [(u["cell_x"], u["cell_y"]) for u in units]
+    if all_positions:
+        base_x = sum(p[0] for p in all_positions) // len(all_positions)
+        base_y = sum(p[1] for p in all_positions) // len(all_positions)
+    else:
+        base_x, base_y = map_w // 2, map_h // 2
+
+    # Estimate enemy spawn — opposite side of map
+    enemy_x = max(2, min(map_w - 2, map_w - base_x))
+    enemy_y = max(2, min(map_h - 2, map_h - base_y))
+
+    # Determine faction and side
+    faction = state.get("faction", "")
+    allied_factions = {"england", "france", "germany"}
+    soviet_factions = {"russia", "ukraine"}
+    if faction in allied_factions:
+        side = "Allied"
+        barracks = "tent"
+    elif faction in soviet_factions:
+        side = "Soviet"
+        barracks = "barr"
+    else:
+        # Infer from available production or buildings
+        avail = state.get("available_production", [])
+        bldg_types = state.get("building_types", [])
+        if "tent" in avail or "tent" in bldg_types:
+            side, barracks = "Allied", "tent"
+        else:
+            side, barracks = "Soviet", "barr"
+
+    # Get tech tree — returns {side: [order]} dict
+    tech = get_tech_tree(side.lower())
+    tech_order = tech.get(side.lower(), tech.get("build_order", []))
+
+    # Get faction info for available units/buildings
+    faction_info = get_faction_info(faction) if faction else get_faction_info(side.lower())
+    avail_units = faction_info.get("available_units", []) if faction_info else []
+    avail_buildings = faction_info.get("available_buildings", []) if faction_info else []
+
+    # Format key units with costs
+    unit_lines = []
+    for utype in avail_units[:12]:  # Cap at 12 to keep concise
+        stats = get_unit_stats(utype)
+        if stats:
+            unit_lines.append(f"  {utype}: {stats['name']} — ${stats['cost']}, {stats.get('category', '?')}")
+
+    # Format key buildings with costs and power
+    bldg_lines = []
+    for btype in avail_buildings[:10]:
+        stats = get_building_stats(btype)
+        if stats:
+            power = stats.get("power", 0)
+            power_str = f", {power:+d} power" if power else ""
+            bldg_lines.append(f"  {btype}: {stats['name']} — ${stats['cost']}{power_str}")
+
+    parts = [
+        f"## Strategic Briefing",
+        f"Map: {map_name} ({map_w}x{map_h})",
+        f"Your faction: {faction or side} ({side})",
+        f"Your base: ({base_x}, {base_y})",
+        f"Enemy likely near: ({enemy_x}, {enemy_y}) — SCOUT to confirm!",
+        f"",
+        f"Tech tree: {' → '.join(tech_order[:8])}{'...' if len(tech_order) > 8 else ''}",
+        f"Barracks type: {barracks}",
+        f"",
+        f"Available units:",
+        *unit_lines,
+        f"",
+        f"Available buildings:",
+        *bldg_lines,
+    ]
+    return "\n".join(parts)
+
+
 def format_state_briefing(state: dict) -> str:
-    """Format game state (from get_game_state tool) into a compact turn briefing with IDs."""
+    """Format game state (from get_game_state tool) into a compact turn briefing with positions."""
     if not isinstance(state, dict) or "tick" not in state:
         return ""
 
@@ -167,19 +216,26 @@ def format_state_briefing(state: dict) -> str:
         f"Cash: ${eco.get('cash', 0)} | Power: {state.get('power_balance', 0):+d} | Harvesters: {eco.get('harvester_count', 0)}",
     ]
 
-    # Compact unit summary grouped by type, with IDs
+    # Base center from buildings
+    buildings = state.get("buildings_summary", [])
+    if buildings:
+        base_x = sum(b["cell_x"] for b in buildings) // len(buildings)
+        base_y = sum(b["cell_y"] for b in buildings) // len(buildings)
+        parts.append(f"Base center: ({base_x},{base_y})")
+
+    # Compact unit summary grouped by type, with IDs and positions
     units = state.get("units_summary", [])
     if units:
         by_type = defaultdict(list)
         idle_ids = []
         for u in units:
-            by_type[u["type"]].append(u["id"])
+            by_type[u["type"]].append(u)
             if u.get("idle") and u.get("can_attack"):
                 idle_ids.append(u["id"])
         unit_parts = []
-        for utype, ids in by_type.items():
-            id_str = ",".join(str(i) for i in ids)
-            unit_parts.append(f"{len(ids)}x{utype}[{id_str}]")
+        for utype, us in by_type.items():
+            entries = ",".join(f"{u['id']}@({u['cell_x']},{u['cell_y']})" for u in us)
+            unit_parts.append(f"{len(us)}x{utype}[{entries}]")
         line = f"Units: {' '.join(unit_parts)}"
         if idle_ids:
             line += f" | Idle: [{','.join(str(i) for i in idle_ids)}]"
@@ -187,10 +243,9 @@ def format_state_briefing(state: dict) -> str:
     else:
         parts.append(f"Units: {state.get('own_units', '?')}")
 
-    # Compact building summary with IDs
-    buildings = state.get("buildings_summary", [])
+    # Compact building summary with IDs and positions
     if buildings:
-        bldg_parts = [f"{b['type']}({b['id']})" for b in buildings]
+        bldg_parts = [f"{b['type']}({b['id']})@({b['cell_x']},{b['cell_y']})" for b in buildings]
         parts.append(f"Buildings: {' '.join(bldg_parts)}")
     else:
         parts.append(f"Buildings: {state.get('own_buildings', '?')} ({', '.join(state.get('building_types', []))})")
@@ -198,18 +253,17 @@ def format_state_briefing(state: dict) -> str:
     # Enemy summary with IDs and positions
     enemies = state.get("enemy_summary", [])
     if enemies:
-        from collections import defaultdict
         eby_type = defaultdict(list)
         for e in enemies:
             eby_type[e["type"]].append(e)
         enemy_parts = []
         for etype, es in eby_type.items():
-            id_str = ",".join(str(e["id"]) for e in es)
-            enemy_parts.append(f"{len(es)}x{etype}[{id_str}]")
+            entries = ",".join(f"{e['id']}@({e['cell_x']},{e['cell_y']})" for e in es)
+            enemy_parts.append(f"{len(es)}x{etype}[{entries}]")
         # Average position
         avg_x = sum(e["cell_x"] for e in enemies) // len(enemies)
         avg_y = sum(e["cell_y"] for e in enemies) // len(enemies)
-        parts.append(f"Enemies: {' '.join(enemy_parts)} near ({avg_x},{avg_y})")
+        parts.append(f"Enemies: {' '.join(enemy_parts)} center ({avg_x},{avg_y})")
     else:
         n_enemy = state.get("visible_enemy_units", 0)
         parts.append(f"Enemies: {'none visible' if n_enemy == 0 else f'{n_enemy} visible'}")
@@ -224,7 +278,6 @@ def format_state_briefing(state: dict) -> str:
             parts.append(f"  ** {a}")
 
     parts.append("---")
-    parts.append("Use execute_plan() for multi-step actions. Do NOT call get_game_state.")
 
     if state.get("done"):
         parts.append(f"GAME OVER: {state.get('result', '?')}")
@@ -272,12 +325,13 @@ async def chat_completion(
     # Support provider routing (e.g., Cerebras for fast inference)
     provider = os.environ.get("OPENROUTER_PROVIDER", "")
     if provider:
-        payload["provider"] = {"only": [provider]}
+        payload["provider"] = {"order": [provider], "allow_fallbacks": False}
 
     async with httpx.AsyncClient() as client:
         if verbose:
             n_msgs = len(messages)
-            print(f"  [LLM] Sending {n_msgs} messages to {model}...")
+            provider_info = f" via {provider}" if provider else ""
+            print(f"  [LLM] Sending {n_msgs} messages to {model}{provider_info}...")
 
         response = await client.post(
             OPENROUTER_URL,
@@ -419,13 +473,14 @@ async def run_agent(
         # Initialize conversation
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        # Get initial state
+        # Get initial state and compose pre-game briefing
         state = await env.call_tool("get_game_state")
+        briefing = compose_pregame_briefing(state)
         messages.append({
             "role": "user",
             "content": (
-                f"Game started! Here's the initial state:\n"
-                f"```json\n{json.dumps(state, indent=2)}\n```\n\n"
+                f"Game started!\n\n{briefing}\n\n"
+                f"## Current State\n```json\n{json.dumps(state, indent=2)}\n```\n\n"
                 f"Deploy your MCV and start building. What's your first move?"
             ),
         })
@@ -565,6 +620,14 @@ async def run_agent(
                     "role": "user",
                     "content": "Continue playing. Use game tools to check state and take actions.",
                 })
+
+        # Surrender so the replay has a proper ending
+        if not game_done:
+            try:
+                await env.call_tool("surrender")
+                print("\n  Surrendered (replay will have proper ending)")
+            except Exception:
+                pass
 
         # Final report
         elapsed = time.time() - start_time

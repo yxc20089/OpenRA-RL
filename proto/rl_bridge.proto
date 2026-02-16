@@ -165,6 +165,7 @@ enum ActionType {
   UNLOAD = 17;          // Unload all passengers at current location
   POWER_DOWN = 18;      // Toggle building power on/off (actor_id = building)
   SET_PRIMARY = 19;     // Set primary production building (actor_id = building)
+  SURRENDER = 20;       // Surrender / resign — ends the game as a loss
 }
 
 // ─── State Query ─────────────────────────────────────────────────────────────
