@@ -455,8 +455,13 @@ class OpenRAEnvironment(MCPEnvironment):
             }
 
         @mcp.tool()
-        def move_units(unit_ids: list[int], target_x: int, target_y: int, queued: bool = False) -> dict:
-            """Move units to a map cell position. Units pathfind automatically."""
+        def move_units(unit_ids: list[int] | str, target_x: int, target_y: int, queued: bool = False) -> dict:
+            """Move units to a map cell position. Units pathfind automatically.
+            unit_ids: list of actor IDs, or "all_combat", "all_idle", or a group name."""
+            env._refresh_obs()
+            unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
+            if not unit_ids:
+                return {"error": "No matching units found"}
             commands = [
                 CommandModel(action=ActionType.MOVE, actor_id=uid, target_x=target_x, target_y=target_y, queued=queued)
                 for uid in unit_ids
@@ -464,8 +469,13 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @mcp.tool()
-        def attack_move(unit_ids: list[int], target_x: int, target_y: int, queued: bool = False) -> dict:
-            """Move units toward a cell, attacking enemies encountered along the way."""
+        def attack_move(unit_ids: list[int] | str, target_x: int, target_y: int, queued: bool = False) -> dict:
+            """Move units toward a cell, attacking enemies encountered along the way.
+            unit_ids: list of actor IDs, or "all_combat", "all_idle", or a group name."""
+            env._refresh_obs()
+            unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
+            if not unit_ids:
+                return {"error": "No matching units found"}
             commands = [
                 CommandModel(action=ActionType.ATTACK_MOVE, actor_id=uid, target_x=target_x, target_y=target_y, queued=queued)
                 for uid in unit_ids
@@ -473,8 +483,13 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @mcp.tool()
-        def attack_target(unit_ids: list[int], target_actor_id: int, queued: bool = False) -> dict:
-            """Order units to attack a specific enemy actor by ID."""
+        def attack_target(unit_ids: list[int] | str, target_actor_id: int, queued: bool = False) -> dict:
+            """Order units to attack a specific enemy actor by ID.
+            unit_ids: list of actor IDs, or "all_combat", "all_idle", or a group name."""
+            env._refresh_obs()
+            unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
+            if not unit_ids:
+                return {"error": "No matching units found"}
             commands = [
                 CommandModel(action=ActionType.ATTACK, actor_id=uid, target_actor_id=target_actor_id, queued=queued)
                 for uid in unit_ids
@@ -482,8 +497,13 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @mcp.tool()
-        def stop_units(unit_ids: list[int]) -> dict:
-            """Stop units from their current activity."""
+        def stop_units(unit_ids: list[int] | str) -> dict:
+            """Stop units from their current activity.
+            unit_ids: list of actor IDs, or "all_combat", "all_idle", or a group name."""
+            env._refresh_obs()
+            unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
+            if not unit_ids:
+                return {"error": "No matching units found"}
             commands = [CommandModel(action=ActionType.STOP, actor_id=uid) for uid in unit_ids]
             return env._execute_commands(commands)
 
@@ -503,6 +523,15 @@ class OpenRAEnvironment(MCPEnvironment):
             when ready using place_building(). building_type is the internal
             name (e.g., 'powr', 'barr', 'weap').
             Prefer build_and_place() which auto-places when done."""
+            # Reject if same building already in production queue
+            env._refresh_obs()
+            if env._last_obs:
+                already = any(
+                    p["queue_type"] == "Building" and p["item"] == building_type
+                    for p in env._last_obs.get("production", [])
+                )
+                if already:
+                    return {"error": f"'{building_type}' is already being built. Wait for it to finish or cancel_production(\"{building_type}\") first."}
             commands = [CommandModel(action=ActionType.BUILD, item_type=building_type)]
             return env._execute_commands(commands)
 
@@ -512,6 +541,15 @@ class OpenRAEnvironment(MCPEnvironment):
             Coordinates are optional — the engine auto-finds a valid position
             near your base if omitted or invalid.
             This is the preferred way to build — no need to call place_building separately."""
+            # Reject if same building already in production queue
+            env._refresh_obs()
+            if env._last_obs:
+                already = any(
+                    p["queue_type"] == "Building" and p["item"] == building_type
+                    for p in env._last_obs.get("production", [])
+                )
+                if already:
+                    return {"error": f"'{building_type}' is already being built. Wait for it to finish or cancel_production(\"{building_type}\") first."}
             commands = [CommandModel(action=ActionType.BUILD, item_type=building_type)]
             result = env._execute_commands(commands)
             if "error" not in result:
@@ -574,8 +612,13 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @mcp.tool()
-        def guard_target(unit_ids: list[int], target_actor_id: int, queued: bool = False) -> dict:
-            """Order units to guard another actor, following and protecting it."""
+        def guard_target(unit_ids: list[int] | str, target_actor_id: int, queued: bool = False) -> dict:
+            """Order units to guard another actor, following and protecting it.
+            unit_ids: list of actor IDs, or "all_combat", "all_idle", or a group name."""
+            env._refresh_obs()
+            unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
+            if not unit_ids:
+                return {"error": "No matching units found"}
             commands = [
                 CommandModel(action=ActionType.GUARD, actor_id=uid, target_actor_id=target_actor_id, queued=queued)
                 for uid in unit_ids
@@ -583,9 +626,14 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @mcp.tool()
-        def set_stance(unit_ids: list[int], stance: str) -> dict:
+        def set_stance(unit_ids: list[int] | str, stance: str) -> dict:
             """Set combat stance for units.
-            Stances: 'hold_fire' (0), 'return_fire' (1), 'defend' (2), 'attack_anything' (3)."""
+            Stances: 'hold_fire' (0), 'return_fire' (1), 'defend' (2), 'attack_anything' (3).
+            unit_ids: list of actor IDs, or "all_combat", "all_idle", or a group name."""
+            env._refresh_obs()
+            unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
+            if not unit_ids:
+                return {"error": "No matching units found"}
             stance_map = {"hold_fire": 0, "return_fire": 1, "defend": 2, "attack_anything": 3}
             stance_val = stance_map.get(stance.lower(), 3)
             commands = [

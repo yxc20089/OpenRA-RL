@@ -46,12 +46,16 @@ sys.stdout.reconfigure(line_buffering=True)
 logger = logging.getLogger("llm_agent")
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514"
+DEFAULT_MODEL = "qwen/qwen3-32b:nitro"
 
 SYSTEM_PROMPT = """\
 You are an RTS AI playing Command & Conquer: Red Alert. \
 You control one side against a Normal AI opponent. The game runs in REAL \
 TIME (~25 ticks/sec). Every second you spend thinking, the enemy is building.
+
+SPEED IS CRITICAL: Respond ONLY with tool calls. No explanations, no reasoning \
+text, no narration. Just call the tools. Every token of text you output is \
+wasted time while the enemy builds units. ACT, don't talk.
 
 ## Pre-Game Knowledge
 A STRATEGIC BRIEFING is provided at game start with map, base position, \
@@ -75,6 +79,10 @@ plan([
 ])
 
 **advance(ticks)** — Wait for game to advance (e.g., waiting for production).
+Game runs at ~25 ticks/sec. advance(250) = 10 seconds, advance(1500) = 1 minute.
+Typical build times: powr ~300 ticks (12s), barr ~500 ticks (20s), weap ~750 ticks (30s).
+WARNING: The enemy acts during advance()! Use short advances (250-500) and check state often.
+Do NOT advance(5000) — you'll miss attacks and waste minutes blind.
 
 Conditions: "enemies_visible", "no_enemies_visible", "under_attack", \
 "building_ready", "cash_above:2000", "cash_below:500"
@@ -222,7 +230,7 @@ def format_state_briefing(state: dict) -> str:
     funds = cash + ore
 
     parts = [
-        f"--- TURN BRIEFING (tick {tick}) ---",
+        f"--- TURN BRIEFING (tick {tick}, ~{tick // 25}s game time) ---",
         f"Funds: ${funds} (cash=${cash} + ore=${ore}) | Power: {state.get('power_balance', 0):+d} | Harvesters: {eco.get('harvester_count', 0)}",
     ]
 
@@ -341,17 +349,15 @@ async def chat_completion(
         "messages": messages,
         "tools": tools,
         "tool_choice": "auto",
+        "max_tokens": 1500,  # Cap output — enough for tool calls, kills long thinking
     }
-    # Support provider routing (e.g., Cerebras for fast inference)
-    provider = os.environ.get("OPENROUTER_PROVIDER", "")
-    if provider:
-        payload["provider"] = {"order": [provider], "allow_fallbacks": False}
+    # Prioritize high-throughput providers for fast inference
+    payload["provider"] = {"sort": "throughput"}
 
     async with httpx.AsyncClient() as client:
         if verbose:
             n_msgs = len(messages)
-            provider_info = f" via {provider}" if provider else ""
-            print(f"  [LLM] Sending {n_msgs} messages to {model}{provider_info}...")
+            print(f"  [LLM] Sending {n_msgs} messages to {model}...")
 
         response = await client.post(
             OPENROUTER_URL,
