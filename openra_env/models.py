@@ -38,6 +38,7 @@ class ActionType(str, Enum):
     UNLOAD = "unload"
     POWER_DOWN = "power_down"
     SET_PRIMARY = "set_primary"
+    SURRENDER = "surrender"
 
 
 class CommandModel(Action):

@@ -96,6 +96,10 @@ class OpenRAEnvironment(MCPEnvironment):
         self._state = OpenRAState()
         self._last_obs: Optional[dict] = None
         self._unit_groups: dict[str, list[int]] = {}  # named groups of unit IDs
+        self._pending_placements: dict[str, dict] = {}  # building_type → {cell_x, cell_y}
+        self._placement_results: list[str] = []  # alerts from auto-placement attempts
+        self._player_faction: str = ""
+        self._enemy_faction: str = ""
         # Persistent event loop for async gRPC bridge operations.
         # Runs in a background thread so it doesn't conflict with
         # FastAPI/uvicorn's event loop when MCP tools call it.
@@ -155,10 +159,18 @@ class OpenRAEnvironment(MCPEnvironment):
             if not obs["production"] and len(obs["buildings"]) >= 3:
                 alerts.append("IDLE PRODUCTION: nothing being built or trained — queue something")
 
-            # Building ready to place
+            # Building ready to place (skip if auto-placement is pending)
+            pending = getattr(env, "_pending_placements", {})
             for p in obs["production"]:
                 if p["queue_type"] == "Building" and p["progress"] >= 0.99:
-                    alerts.append(f"READY TO PLACE: {p['item']} — call place_building()")
+                    if p["item"] not in pending:
+                        alerts.append(f"READY TO PLACE: {p['item']} — call place_building()")
+
+            # Auto-placement results from build_and_place
+            placement_results = getattr(env, "_placement_results", [])
+            if placement_results:
+                alerts.extend(placement_results)
+                placement_results.clear()
 
             # Combat units on default ReturnFire stance
             returnfire_count = sum(
@@ -190,6 +202,7 @@ class OpenRAEnvironment(MCPEnvironment):
                 "tick": obs["tick"],
                 "done": obs["done"],
                 "result": obs.get("result", ""),
+                "faction": getattr(env, "_player_faction", ""),
                 "economy": obs["economy"],
                 "power_balance": power_balance,
                 "military": obs["military"],
@@ -448,9 +461,22 @@ class OpenRAEnvironment(MCPEnvironment):
         def build_structure(building_type: str) -> dict:
             """Start constructing a building. Building will need to be placed
             when ready using place_building(). building_type is the internal
-            name (e.g., 'powr', 'barr', 'weap')."""
+            name (e.g., 'powr', 'barr', 'weap').
+            Prefer build_and_place() which auto-places when done."""
             commands = [CommandModel(action=ActionType.BUILD, item_type=building_type)]
             return env._execute_commands(commands)
+
+        @mcp.tool()
+        def build_and_place(building_type: str, cell_x: int = 0, cell_y: int = 0) -> dict:
+            """Build a structure and auto-place it when construction finishes.
+            Coordinates are optional — the engine auto-finds a valid position
+            near your base if omitted or invalid.
+            This is the preferred way to build — no need to call place_building separately."""
+            commands = [CommandModel(action=ActionType.BUILD, item_type=building_type)]
+            result = env._execute_commands(commands)
+            if "error" not in result:
+                env._pending_placements[building_type] = {"cell_x": cell_x, "cell_y": cell_y}
+            return result
 
         @mcp.tool()
         def place_building(building_type: str, cell_x: int = 0, cell_y: int = 0) -> dict:
@@ -471,6 +497,7 @@ class OpenRAEnvironment(MCPEnvironment):
                         "tick": pre_obs.get("tick", 0),
                     }
 
+            env._pending_placements.pop(building_type, None)
             commands = [CommandModel(action=ActionType.PLACE_BUILDING,
                                     item_type=building_type, target_x=cell_x, target_y=cell_y)]
             return env._execute_commands(commands)
@@ -734,14 +761,15 @@ class OpenRAEnvironment(MCPEnvironment):
             return {"path": str(replays[0]), "size_bytes": replays[0].stat().st_size}
 
         @mcp.tool()
-        def execute_plan(steps: list[dict]) -> dict:
-            """Execute a temporal plan — multiple steps with delays and conditions.
+        def surrender() -> dict:
+            """Surrender / resign the current game. Ends the game as a loss.
+            Use this when you want to concede the match."""
+            commands = [CommandModel(action=ActionType.SURRENDER)]
+            return env._execute_commands(commands)
 
-            Each step is a dict with:
-              actions: list of action dicts to execute
-              wait_ticks: ticks to advance AFTER this step (default: 0)
-              condition: optional — only execute if condition is met
-              abort_on: optional — abort entire plan if condition is true after step
+        @mcp.tool()
+        def batch(actions: list[dict]) -> dict:
+            """Send multiple commands that all execute concurrently (same game tick).
 
             Actions use same format as individual tools:
               {"tool": "build_unit", "unit_type": "e1", "count": 3}
@@ -749,22 +777,67 @@ class OpenRAEnvironment(MCPEnvironment):
               {"tool": "set_stance", "unit_ids": "all_combat", "stance": "attack_anything"}
               {"tool": "deploy_unit", "unit_id": 120}
 
-            Conditions: "enemies_visible", "no_enemies_visible", "under_attack",
-              "building_ready", "cash_above:2000", "cash_below:500"
-
             Special unit selectors (instead of listing IDs):
               "all_combat" — all own combat units
               "all_idle" — all idle combat units
 
-            Returns: final state + execution log of which steps ran/skipped.
+            All commands are sent in a single call. The game resolves any
+            conflicts by its own logic.
+
+            Returns: game state summary after commands are processed.
+            """
+            env._refresh_obs()
+            obs = env._last_obs
+            if obs is None:
+                return {"error": "No observation available"}
+            if obs.get("done"):
+                return {"error": "Game is over", "done": True, "result": obs.get("result", "")}
+
+            all_commands = []
+            action_names = []
+            for action in actions:
+                cmds = env._action_to_commands(action, obs)
+                all_commands.extend(cmds)
+                action_names.append(action.get("tool", "?"))
+
+            if not all_commands:
+                return {"error": "No valid commands generated"}
+
+            try:
+                result = env._execute_commands(all_commands)
+                result["actions"] = action_names
+                return result
+            except Exception as e:
+                return {"error": f"Command execution failed: {e}"}
+
+        @mcp.tool()
+        def plan(steps: list[dict]) -> dict:
+            """Execute steps sequentially. Each step's commands are sent, then
+            the observation is refreshed before the next step. Use conditions
+            to gate steps on game state.
+
+            Each step is a dict with:
+              actions: list of action dicts to execute
+              condition: optional — only execute if condition is met, else skip
+
+            Conditions: "enemies_visible", "no_enemies_visible", "under_attack",
+              "building_ready", "cash_above:2000", "cash_below:500"
+
+            Example — deploy then build:
+            [
+              {"actions": [{"tool": "deploy_unit", "unit_id": 120}]},
+              {"actions": [{"tool": "build_structure", "building_type": "powr"}]},
+              {"condition": "building_ready",
+               "actions": [{"tool": "place_building", "building_type": "powr"}]}
+            ]
+
+            Returns: game state summary + execution log.
             """
             execution_log = []
             start_tick = env._last_obs["tick"] if env._last_obs else 0
-            aborted = False
 
             for i, step in enumerate(steps):
                 step_num = i + 1
-                # Refresh state for condition checking
                 env._refresh_obs()
                 obs = env._last_obs
                 if obs is None:
@@ -774,23 +847,19 @@ class OpenRAEnvironment(MCPEnvironment):
                     execution_log.append(f"Step {step_num}: game over")
                     break
 
-                # Check condition
                 condition = step.get("condition")
                 if condition and not env._check_plan_condition(condition, obs):
                     execution_log.append(f"Step {step_num}: SKIPPED ({condition} = false)")
                     continue
 
-                # Convert actions to commands
                 actions = step.get("actions", [])
                 all_commands = []
                 action_names = []
                 for action in actions:
                     cmds = env._action_to_commands(action, obs)
                     all_commands.extend(cmds)
-                    tool_name = action.get("tool", "?")
-                    action_names.append(tool_name)
+                    action_names.append(action.get("tool", "?"))
 
-                # Execute commands
                 if all_commands:
                     try:
                         result = env._execute_commands(all_commands)
@@ -805,36 +874,8 @@ class OpenRAEnvironment(MCPEnvironment):
                         )
                         break
 
-                # Wait ticks
-                wait = step.get("wait_ticks", 0)
-                if wait > 0:
-                    wait = max(1, min(wait, 500))
-                    try:
-                        future = asyncio.run_coroutine_threadsafe(
-                            env._bridge.wait_ticks(wait), env._loop
-                        )
-                        proto_obs = future.result(timeout=300)
-                        obs_dict = observation_to_dict(proto_obs)
-                        env._last_obs = obs_dict
-                        env._state.game_tick = obs_dict["tick"]
-                    except Exception:
-                        env._refresh_obs()
+                execution_log.append(f"Step {step_num}: {', '.join(action_names)} OK")
 
-                step_summary = f"Step {step_num}: {', '.join(action_names)} OK"
-                if wait > 0:
-                    step_summary += f" +{wait}t"
-                execution_log.append(step_summary)
-
-                # Check abort_on condition
-                abort_on = step.get("abort_on")
-                if abort_on:
-                    env._refresh_obs()
-                    if env._last_obs and env._check_plan_condition(abort_on, env._last_obs):
-                        execution_log.append(f"ABORT: {abort_on} triggered after step {step_num}")
-                        aborted = True
-                        break
-
-            # Final state
             env._refresh_obs()
             obs = env._last_obs or {}
             end_tick = obs.get("tick", start_tick)
@@ -842,11 +883,9 @@ class OpenRAEnvironment(MCPEnvironment):
             skipped = sum(1 for e in execution_log if "SKIPPED" in e)
 
             return {
-                "plan_completed": not aborted,
                 "steps_total": len(steps),
                 "steps_executed": executed,
                 "steps_skipped": skipped,
-                "ticks_elapsed": end_tick - start_tick,
                 "tick": end_tick,
                 "done": obs.get("done", False),
                 "result": obs.get("result", ""),
@@ -912,6 +951,12 @@ class OpenRAEnvironment(MCPEnvironment):
                     for _ in range(count)]
         elif tool == "build_structure":
             return [CommandModel(action=ActionType.BUILD, item_type=action["building_type"])]
+        elif tool == "build_and_place":
+            btype = action["building_type"]
+            self._pending_placements[btype] = {
+                "cell_x": action.get("cell_x", 0), "cell_y": action.get("cell_y", 0)
+            }
+            return [CommandModel(action=ActionType.BUILD, item_type=btype)]
         elif tool == "place_building":
             return [CommandModel(action=ActionType.PLACE_BUILDING,
                                 item_type=action["building_type"],
@@ -968,6 +1013,37 @@ class OpenRAEnvironment(MCPEnvironment):
                 self._state.game_tick = self._last_obs["tick"]
         except Exception:
             pass  # Keep existing _last_obs if refresh fails
+        self._process_pending_placements()
+
+    def _process_pending_placements(self) -> None:
+        """Auto-place buildings that finished construction via build_and_place."""
+        if not getattr(self, "_pending_placements", None) or not self._last_obs:
+            return
+        production = self._last_obs.get("production", [])
+        placed = []
+        for btype, coords in list(self._pending_placements.items()):
+            ready = any(
+                p["queue_type"] == "Building" and p["item"] == btype and p["progress"] >= 0.99
+                for p in production
+            )
+            if not ready:
+                continue
+            try:
+                commands = [CommandModel(
+                    action=ActionType.PLACE_BUILDING,
+                    item_type=btype,
+                    target_x=coords["cell_x"],
+                    target_y=coords["cell_y"],
+                )]
+                self._execute_commands(commands)
+                self._placement_results.append(f"AUTO-PLACED: {btype}")
+            except Exception:
+                self._placement_results.append(
+                    f"PLACEMENT FAILED: {btype} — call place_building() with different coordinates"
+                )
+            placed.append(btype)
+        for btype in placed:
+            self._pending_placements.pop(btype, None)
 
     def _execute_commands(self, commands: list[CommandModel]) -> dict:
         """Send commands, step the game, update cache, return summary."""
@@ -1077,6 +1153,8 @@ class OpenRAEnvironment(MCPEnvironment):
         self._reward_fn.reset()
         self._last_obs = None
         self._unit_groups.clear()
+        self._pending_placements.clear()
+        self._placement_results.clear()
 
         # Update seed if provided
         if seed is not None:
@@ -1094,6 +1172,15 @@ class OpenRAEnvironment(MCPEnvironment):
             alive = self._process.is_alive()
             logger.error(f"Bridge failed to start. Process alive={alive}")
             raise RuntimeError("OpenRA gRPC bridge failed to start")
+
+        # Get faction info from GameState
+        try:
+            game_state = await self._bridge.get_state()
+            self._player_faction = game_state.player_faction or ""
+            self._enemy_faction = game_state.enemy_faction or ""
+        except Exception:
+            self._player_faction = ""
+            self._enemy_faction = ""
 
         # Start streaming session and get initial observation
         proto_obs = await self._bridge.start_session()

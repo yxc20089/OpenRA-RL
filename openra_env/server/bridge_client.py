@@ -385,6 +385,7 @@ def commands_to_proto(commands: list[dict]) -> rl_bridge_pb2.AgentAction:
         "unload": rl_bridge_pb2.UNLOAD,
         "power_down": rl_bridge_pb2.POWER_DOWN,
         "set_primary": rl_bridge_pb2.SET_PRIMARY,
+        "surrender": rl_bridge_pb2.SURRENDER,
     }
 
     proto_commands = []
