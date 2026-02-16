@@ -30,6 +30,7 @@ import logging
 import os
 import sys
 import time
+from collections import defaultdict
 from typing import Any, Optional
 
 import httpx
@@ -44,53 +45,191 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514"
 
 SYSTEM_PROMPT = """\
-You are playing Command & Conquer: Red Alert via game tools. You control \
-one faction against an AI opponent on a randomly generated map.
+You are an RTS AI playing Command & Conquer: Red Alert (Soviet faction). \
+You control one side against a Normal AI opponent. The game runs in REAL \
+TIME (~25 ticks/sec). Every second you spend thinking, the enemy is building.
 
-## Win Condition
-Destroy all enemy buildings and units, or outlast the opponent.
+## How to Act — Think in Plans
 
-## Build Order (follow this!)
-1. Deploy MCV immediately (deploy_unit)
-2. Build Power Plant (build_structure "powr"), then place it (place_building)
-3. Build Barracks (build_structure "tent" or "barr"), place it
-4. Build Ore Refinery (build_structure "proc"), place it
-5. Build War Factory (build_structure "weap"), place it
-6. Build a second Power Plant if power balance < 20
+Use execute_plan() to submit multi-step temporal plans. Each step can have \
+a time delay (wait_ticks) and conditions. The game executes your plan over \
+many ticks automatically, then returns results.
 
-## Economy
-- Keep cash flowing: protect your harvester
-- Build extra refineries if you can afford them ($2000 each)
-- Keep power balance positive (build power plants as needed)
+CRITICAL RULES:
+- Do NOT call get_game_state/get_economy/get_production/get_buildings — \
+  a TURN BRIEFING with full state, unit IDs, and alerts is injected \
+  automatically before each turn
+- Use execute_plan() for multi-step sequences instead of individual tool calls
+- React to ALERTS immediately (especially UNDER ATTACK)
+- Use special selectors: "all_combat", "all_idle" instead of listing IDs
+- You can still use individual tools when appropriate (single quick action)
 
-## Military
-- Train infantry from barracks: "e1" (Rifle, $100), "e3" (Rocket, $300)
-- Train vehicles from war factory: "1tnk" (Light Tank, $700), "2tnk" (Medium Tank, $800)
-- Set rally points on production buildings so units gather near your base
-- Set stance to "attack_anything" on combat units
+## Game Mechanics You Should Leverage
+- Production queues: build_unit queues training — it continues while you plan
+- Auto-attack: set stance to "attack_anything" so units fight on their own
+- Auto-pathfinding: one attack_move order sends units across the entire map
+- Economy: game rejects orders you can't afford — just queue what you want
+- Unit groups: assign_group("army", [id1,id2,...]) then use "army" as unit selector
+  in execute_plan or command_group("army", "attack_move", target_x=50, target_y=30)
 
-## Combat
-- Scout first with cheap units (e1) to find the enemy base
-- Attack with groups of 4+ units using attack_move
-- Focus fire on enemy production buildings (fact, tent/barr, weap)
+## Phase 1: Deploy & Build (turns 1-3)
 
-## Tools
-- Use get_game_state to get an overview (economy, unit counts, enemy visibility)
-- Use get_economy to check cash before building
-- Use get_production to check what's being built and what's available
-- Use lookup_tech_tree to plan your tech progression
-- Use advance() between decisions to let the game progress (100+ ticks)
-- Check production progress with get_production before placing buildings
+WORKFLOW — Deploy MCV and build:
+1. deploy_unit(<mcv_id>), advance(50) to get CY
+2. build_structure("powr"), advance(120) to build it
+3. place_building("powr") — auto-finds best position near your base
+4. Repeat for barr, proc, weap
 
-## Important — Real-Time Game
-- The game runs in REAL TIME at ~25 ticks/sec, regardless of your actions
-- Time passes while you think! Check get_game_state to see the current tick
-- Use advance(ticks=100) to wait for production/building to complete
-- Place buildings at offsets from your Construction Yard (cell coordinates)
-- Building placement: use cell_x, cell_y = (CY_cell_x + offset, CY_cell_y + offset)
-  Offsets like (3,0), (-3,0), (0,3), (0,-3) work well
-- Act quickly — every second of deliberation is a second the enemy is building
+You can combine steps in execute_plan:
+execute_plan([
+  {"actions": [{"tool": "deploy_unit", "unit_id": <mcv_id>}], "wait_ticks": 50},
+  {"actions": [{"tool": "build_structure", "building_type": "powr"}], "wait_ticks": 120},
+  {"condition": "building_ready",
+   "actions": [{"tool": "place_building", "building_type": "powr"}]},
+  {"actions": [
+    {"tool": "build_structure", "building_type": "barr"},
+    {"tool": "build_unit", "unit_type": "e1", "count": 2},
+    {"tool": "set_stance", "unit_ids": "all_combat", "stance": "attack_anything"}
+  ], "wait_ticks": 120, "abort_on": "under_attack"}
+])
+
+Build order: powr → barr → proc → weap → 2nd powr if low power
+PLACEMENT: Just call place_building("building_type") — coordinates are optional.
+The engine auto-finds the best valid position near your base.
+
+## Phase 2: Economy & Military (turns 3-8)
+
+- Always queue units: build_unit("e1", count=3) or build_unit("1tnk")
+- Build extra harvester when cash > $2500: build_unit("harv")
+- Set ALL combat units to "attack_anything" stance
+- Send 1 scout (e1) to map center, then opposite corner
+
+EXAMPLE — Produce + scout:
+execute_plan([
+  {"actions": [
+    {"tool": "build_unit", "unit_type": "e1", "count": 3},
+    {"tool": "set_stance", "unit_ids": "all_combat", "stance": "attack_anything"}
+  ], "wait_ticks": 50},
+  {"actions": [{"tool": "attack_move", "unit_ids": [<scout_id>],
+                "target_x": <map_w/2>, "target_y": <map_h/2>}],
+   "wait_ticks": 200},
+  {"condition": "enemies_visible",
+   "actions": [{"tool": "attack_move", "unit_ids": "all_combat",
+                "target_x": <map_w/2>, "target_y": <map_h/2>}]}
+])
+
+## Phase 3: Attack (5+ combat units)
+
+EXAMPLE — All-in push:
+execute_plan([
+  {"actions": [
+    {"tool": "set_stance", "unit_ids": "all_combat", "stance": "attack_anything"},
+    {"tool": "attack_move", "unit_ids": "all_combat",
+     "target_x": <enemy_x>, "target_y": <enemy_y>}
+  ], "wait_ticks": 200, "abort_on": "under_attack"},
+  {"actions": [
+    {"tool": "build_unit", "unit_type": "1tnk", "count": 2},
+    {"tool": "build_unit", "unit_type": "e1", "count": 3}
+  ]}
+])
+
+## Phase 4: Defense (UNDER ATTACK alert)
+
+execute_plan([
+  {"actions": [
+    {"tool": "set_stance", "unit_ids": "all_combat", "stance": "attack_anything"},
+    {"tool": "attack_move", "unit_ids": "all_idle",
+     "target_x": <attack_x>, "target_y": <attack_y>}
+  ]},
+  {"actions": [
+    {"tool": "build_unit", "unit_type": "e1", "count": 3},
+    {"tool": "repair_building", "building_id": <damaged_id>}
+  ]}
+])
+
+## Economy Rules
+- IDLE CASH (> $2000): build_unit("harv") or build_structure("proc")
+- LOW POWER: build_structure("powr") immediately
+- IDLE PRODUCTION: always queue something — idle production loses games
 """
+
+
+def format_state_briefing(state: dict) -> str:
+    """Format game state (from get_game_state tool) into a compact turn briefing with IDs."""
+    if not isinstance(state, dict) or "tick" not in state:
+        return ""
+
+    eco = state.get("economy", {})
+    tick = state["tick"]
+
+    parts = [
+        f"--- TURN BRIEFING (tick {tick}) ---",
+        f"Cash: ${eco.get('cash', 0)} | Power: {state.get('power_balance', 0):+d} | Harvesters: {eco.get('harvester_count', 0)}",
+    ]
+
+    # Compact unit summary grouped by type, with IDs
+    units = state.get("units_summary", [])
+    if units:
+        by_type = defaultdict(list)
+        idle_ids = []
+        for u in units:
+            by_type[u["type"]].append(u["id"])
+            if u.get("idle") and u.get("can_attack"):
+                idle_ids.append(u["id"])
+        unit_parts = []
+        for utype, ids in by_type.items():
+            id_str = ",".join(str(i) for i in ids)
+            unit_parts.append(f"{len(ids)}x{utype}[{id_str}]")
+        line = f"Units: {' '.join(unit_parts)}"
+        if idle_ids:
+            line += f" | Idle: [{','.join(str(i) for i in idle_ids)}]"
+        parts.append(line)
+    else:
+        parts.append(f"Units: {state.get('own_units', '?')}")
+
+    # Compact building summary with IDs
+    buildings = state.get("buildings_summary", [])
+    if buildings:
+        bldg_parts = [f"{b['type']}({b['id']})" for b in buildings]
+        parts.append(f"Buildings: {' '.join(bldg_parts)}")
+    else:
+        parts.append(f"Buildings: {state.get('own_buildings', '?')} ({', '.join(state.get('building_types', []))})")
+
+    # Enemy summary with IDs and positions
+    enemies = state.get("enemy_summary", [])
+    if enemies:
+        from collections import defaultdict
+        eby_type = defaultdict(list)
+        for e in enemies:
+            eby_type[e["type"]].append(e)
+        enemy_parts = []
+        for etype, es in eby_type.items():
+            id_str = ",".join(str(e["id"]) for e in es)
+            enemy_parts.append(f"{len(es)}x{etype}[{id_str}]")
+        # Average position
+        avg_x = sum(e["cell_x"] for e in enemies) // len(enemies)
+        avg_y = sum(e["cell_y"] for e in enemies) // len(enemies)
+        parts.append(f"Enemies: {' '.join(enemy_parts)} near ({avg_x},{avg_y})")
+    else:
+        n_enemy = state.get("visible_enemy_units", 0)
+        parts.append(f"Enemies: {'none visible' if n_enemy == 0 else f'{n_enemy} visible'}")
+
+    prod = state.get("production_items", [])
+    parts.append(f"Production: {', '.join(prod) if prod else 'IDLE'}")
+
+    alerts = state.get("alerts", [])
+    if alerts:
+        parts.append("ALERTS:")
+        for a in alerts:
+            parts.append(f"  ** {a}")
+
+    parts.append("---")
+    parts.append("Use execute_plan() for multi-step actions. Do NOT call get_game_state.")
+
+    if state.get("done"):
+        parts.append(f"GAME OVER: {state.get('result', '?')}")
+
+    return "\n".join(parts)
 
 
 def mcp_tools_to_openai(tools: list) -> list[dict]:
@@ -130,6 +269,10 @@ async def chat_completion(
         "tools": tools,
         "tool_choice": "auto",
     }
+    # Support provider routing (e.g., Cerebras for fast inference)
+    provider = os.environ.get("OPENROUTER_PROVIDER", "")
+    if provider:
+        payload["provider"] = {"only": [provider]}
 
     async with httpx.AsyncClient() as client:
         if verbose:
@@ -170,43 +313,81 @@ def compress_history(messages: list[dict], keep_last: int = 40) -> list[dict]:
     """Compress message history to stay within context limits.
 
     Keeps the system prompt and the last N messages, replacing
-    earlier messages with a summary.
+    earlier messages with a state-aware summary that preserves
+    critical game context (buildings, economy, errors).
+
+    Ensures tool call/result pairs are never split — the kept
+    window always starts with a user or assistant message (not tool).
     """
     if len(messages) <= keep_last + 1:
         return messages
 
     system = messages[0]
-    old_messages = messages[1:-keep_last]
-    recent = messages[-keep_last:]
+    # Find a clean cut point: recent must not start with tool role
+    cut = len(messages) - keep_last
+    while cut < len(messages) and messages[cut].get("role") == "tool":
+        cut += 1  # move cut forward to skip orphaned tool results
+    if cut >= len(messages) - 2:
+        return messages  # can't compress safely
 
-    # Count tool calls and game events in old messages
-    tool_calls = 0
-    game_events = []
+    old_messages = messages[1:cut]
+    recent = messages[cut:]
+
+    # Extract game state context from old messages
+    last_state = {}
+    building_types = set()
+    errors = []
+
     for msg in old_messages:
-        if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            tool_calls += len(msg["tool_calls"])
-        if msg.get("role") == "tool":
-            try:
-                content = json.loads(msg["content"]) if isinstance(msg["content"], str) else msg["content"]
-                if isinstance(content, dict):
-                    if content.get("done"):
-                        game_events.append(f"Game ended: {content.get('result', '?')}")
-                    elif content.get("tick"):
-                        game_events.append(f"Tick {content['tick']}")
-            except (json.JSONDecodeError, TypeError):
-                pass
+        if msg.get("role") != "tool":
+            continue
+        try:
+            content = json.loads(msg["content"]) if isinstance(msg["content"], str) else msg["content"]
+            if not isinstance(content, dict):
+                continue
 
-    summary = (
-        f"[History compressed: {len(old_messages)} messages, "
-        f"{tool_calls} tool calls. "
-    )
-    if game_events:
-        summary += f"Key events: {', '.join(game_events[-5:])}. "
-    summary += "Continue playing from current state.]"
+            # Track latest state snapshot
+            if "tick" in content and "economy" in content:
+                last_state = content
+
+            # Track buildings built
+            for bt in content.get("building_types", []):
+                building_types.add(bt)
+
+            # Track placement failures and errors
+            if content.get("placement_failed"):
+                errors.append("placement failed")
+            elif "error" in content and isinstance(content["error"], str):
+                err = content["error"]
+                if len(err) < 80:
+                    errors.append(err)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Build summary
+    parts = [f"[History: {len(old_messages)} earlier messages removed]"]
+
+    if last_state:
+        eco = last_state.get("economy", {})
+        parts.append(
+            f"Last state at tick {last_state.get('tick', '?')}: "
+            f"${eco.get('cash', '?')} cash, "
+            f"{last_state.get('own_units', '?')} units, "
+            f"{last_state.get('own_buildings', '?')} buildings"
+        )
+
+    if building_types:
+        parts.append(f"Buildings built so far: {', '.join(sorted(building_types))}")
+
+    if errors:
+        unique = list(dict.fromkeys(errors))[-3:]
+        parts.append(f"Recent issues: {'; '.join(unique)}")
+
+    parts.append("Continue from current state. Check TURN BRIEFING for latest info.")
 
     return [
         system,
-        {"role": "user", "content": summary},
+        {"role": "user", "content": "\n".join(parts)},
         *recent,
     ]
 
@@ -260,6 +441,25 @@ async def run_agent(
             # Compress history periodically
             messages = compress_history(messages, keep_last=40)
 
+            # Inject state briefing before LLM thinks (skip first turn — initial state already provided)
+            if total_api_calls > 0:
+                try:
+                    briefing_state = await env.call_tool("get_game_state")
+                    briefing = format_state_briefing(briefing_state)
+                    if briefing:
+                        messages.append({"role": "user", "content": briefing})
+                        if verbose:
+                            # Print just the alerts
+                            for a in briefing_state.get("alerts", []):
+                                print(f"  [ALERT] {a}")
+                    # Check game over from briefing
+                    if isinstance(briefing_state, dict) and briefing_state.get("done"):
+                        game_done = True
+                        print(f"\n  GAME OVER: {briefing_state.get('result', '?').upper()} at tick {briefing_state.get('tick', '?')}")
+                        break
+                except Exception:
+                    pass
+
             # Call LLM
             try:
                 response = await chat_completion(messages, openai_tools, api_key, model, verbose)
@@ -301,8 +501,8 @@ async def run_agent(
             for tc in tool_calls:
                 fn_name = tc["function"]["name"]
                 try:
-                    fn_args = json.loads(tc["function"]["arguments"])
-                except json.JSONDecodeError:
+                    fn_args = json.loads(tc["function"].get("arguments", "{}"))
+                except (json.JSONDecodeError, TypeError):
                     fn_args = {}
 
                 total_tool_calls += 1
