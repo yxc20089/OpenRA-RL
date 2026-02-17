@@ -148,9 +148,22 @@ class OpenRAEnvironment(MCPEnvironment):
                 if bldg["hp_percent"] < 0.5:
                     alerts.append(f"DAMAGED: {bldg['type']} at {bldg['hp_percent']:.0%} HP — repair_building({bldg['actor_id']})")
 
-            # Power crisis
+            # Power crisis — 1/3 speed is devastating
             if power_balance < 0:
-                alerts.append(f"LOW POWER: {power_balance:+d} — build powr immediately")
+                alerts.append(
+                    f"LOW POWER: {power_balance:+d} — ALL production slowed to 1/3 speed! "
+                    f"Build powr IMMEDIATELY, it is your #1 priority"
+                )
+            elif 0 <= power_balance < 30:
+                building_power = any(
+                    p["item"] in ("powr", "apwr")
+                    for p in obs["production"]
+                )
+                if not building_power:
+                    alerts.append(
+                        f"POWER TIGHT: only {power_balance:+d} surplus — "
+                        f"build powr before adding more buildings"
+                    )
 
             # Idle funds with few harvesters
             total_funds = eco["cash"] + eco.get("ore", 0)
@@ -161,12 +174,16 @@ class OpenRAEnvironment(MCPEnvironment):
             if not obs["production"] and len(obs["buildings"]) >= 3:
                 alerts.append("IDLE PRODUCTION: nothing being built or trained — queue something")
 
-            # Building ready to place (skip if auto-placement is pending)
+            # Building ready to place or stuck in auto-placement
             pending = getattr(env, "_pending_placements", {})
+            attempted = getattr(env, "_attempted_placements", {})
             for p in obs["production"]:
-                if p["queue_type"] == "Building" and p["progress"] >= 0.99:
-                    if p["item"] not in pending:
-                        alerts.append(f"READY TO PLACE: {p['item']} — call place_building()")
+                if p["queue_type"] in env._PLACEABLE_QUEUE_TYPES and p["progress"] >= 0.99:
+                    btype = p["item"]
+                    if btype in attempted:
+                        alerts.append(f"BUILDING STUCK: {btype} placement failing — will auto-cancel, or call cancel_production(\"{btype}\")")
+                    elif btype not in pending:
+                        alerts.append(f"READY TO PLACE: {btype} — call place_building()")
 
             # Auto-placement results from build_and_place
             placement_results = getattr(env, "_placement_results", [])
@@ -181,6 +198,26 @@ class OpenRAEnvironment(MCPEnvironment):
             )
             if returnfire_count > 0:
                 alerts.append(f"STANCE WARNING: {returnfire_count} combat unit(s) on ReturnFire — set to attack_anything")
+
+            # Idle army — nudge to attack or scout
+            idle_combat = [u for u in obs["units"] if u.get("can_attack") and u.get("is_idle")]
+            if len(idle_combat) >= 4:
+                alerts.append(
+                    f"IDLE ARMY: {len(idle_combat)} combat units idle — "
+                    f"attack_move toward enemy or scout unexplored areas"
+                )
+
+            # No defenses — nudge to build turrets
+            _DEFENSE_BUILDINGS = {"gun", "ftur", "tsla", "sam", "agun", "pbox", "hbox"}
+            building_types = {b["type"] for b in obs["buildings"]}
+            if len(obs["buildings"]) >= 4 and not (building_types & _DEFENSE_BUILDINGS):
+                alerts.append("NO DEFENSES: build gun turrets or SAM sites to protect your base")
+
+            # No scouting — nudge to explore
+            if obs["tick"] > 750 and not obs["visible_enemies"] and not obs.get("visible_enemy_buildings"):
+                alerts.append(
+                    "NO SCOUTING: you haven't found the enemy — send a unit to explore the map"
+                )
 
             # Compact summaries with actor IDs for planning
             units_summary = [
@@ -455,9 +492,9 @@ class OpenRAEnvironment(MCPEnvironment):
             }
 
         @mcp.tool()
-        def move_units(unit_ids: list[int] | str, target_x: int, target_y: int, queued: bool = False) -> dict:
+        def move_units(unit_ids: str, target_x: int, target_y: int, queued: bool = False) -> dict:
             """Move units to a map cell position. Units pathfind automatically.
-            unit_ids: list of actor IDs, or "all_combat", "all_idle", or a group name."""
+            unit_ids: comma-separated actor IDs (e.g. "145,146"), "all_combat", "all_idle", or a group name."""
             env._refresh_obs()
             unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not unit_ids:
@@ -469,9 +506,9 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @mcp.tool()
-        def attack_move(unit_ids: list[int] | str, target_x: int, target_y: int, queued: bool = False) -> dict:
+        def attack_move(unit_ids: str, target_x: int, target_y: int, queued: bool = False) -> dict:
             """Move units toward a cell, attacking enemies encountered along the way.
-            unit_ids: list of actor IDs, or "all_combat", "all_idle", or a group name."""
+            unit_ids: comma-separated actor IDs (e.g. "145,146"), "all_combat", "all_idle", or a group name."""
             env._refresh_obs()
             unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not unit_ids:
@@ -483,9 +520,9 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @mcp.tool()
-        def attack_target(unit_ids: list[int] | str, target_actor_id: int, queued: bool = False) -> dict:
+        def attack_target(unit_ids: str, target_actor_id: int, queued: bool = False) -> dict:
             """Order units to attack a specific enemy actor by ID.
-            unit_ids: list of actor IDs, or "all_combat", "all_idle", or a group name."""
+            unit_ids: comma-separated actor IDs (e.g. "145,146"), "all_combat", "all_idle", or a group name."""
             env._refresh_obs()
             unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not unit_ids:
@@ -497,9 +534,9 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @mcp.tool()
-        def stop_units(unit_ids: list[int] | str) -> dict:
+        def stop_units(unit_ids: str) -> dict:
             """Stop units from their current activity.
-            unit_ids: list of actor IDs, or "all_combat", "all_idle", or a group name."""
+            unit_ids: comma-separated actor IDs (e.g. "145,146"), "all_combat", "all_idle", or a group name."""
             env._refresh_obs()
             unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not unit_ids:
@@ -527,13 +564,27 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             if env._last_obs:
                 already = any(
-                    p["queue_type"] == "Building" and p["item"] == building_type
+                    p["queue_type"] in env._PLACEABLE_QUEUE_TYPES and p["item"] == building_type
                     for p in env._last_obs.get("production", [])
                 )
                 if already:
                     return {"error": f"'{building_type}' is already being built. Wait for it to finish or cancel_production(\"{building_type}\") first."}
             commands = [CommandModel(action=ActionType.BUILD, item_type=building_type)]
-            return env._execute_commands(commands)
+            result = env._execute_commands(commands)
+            # Proactive power warning
+            stats = get_building_stats(building_type)
+            if stats and env._last_obs:
+                power_drain = stats.get("power", 0)
+                if power_drain < 0:
+                    eco = env._last_obs.get("economy", {})
+                    current_balance = eco.get("power_provided", 0) - eco.get("power_drained", 0)
+                    if current_balance + power_drain < 0:
+                        result["warning"] = (
+                            f"POWER WARNING: {building_type} drains {abs(power_drain)} power. "
+                            f"Current balance: {current_balance:+d}. "
+                            f"Build powr first or production will slow to 1/3 speed!"
+                        )
+            return result
 
         @mcp.tool()
         def build_and_place(building_type: str, cell_x: int = 0, cell_y: int = 0) -> dict:
@@ -545,15 +596,27 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             if env._last_obs:
                 already = any(
-                    p["queue_type"] == "Building" and p["item"] == building_type
+                    p["queue_type"] in env._PLACEABLE_QUEUE_TYPES and p["item"] == building_type
                     for p in env._last_obs.get("production", [])
                 )
                 if already:
                     return {"error": f"'{building_type}' is already being built. Wait for it to finish or cancel_production(\"{building_type}\") first."}
             commands = [CommandModel(action=ActionType.BUILD, item_type=building_type)]
             result = env._execute_commands(commands)
-            if "error" not in result:
-                env._pending_placements[building_type] = {"cell_x": cell_x, "cell_y": cell_y}
+            env._pending_placements[building_type] = {"cell_x": cell_x, "cell_y": cell_y}
+            # Proactive power warning
+            stats = get_building_stats(building_type)
+            if stats and env._last_obs:
+                power_drain = stats.get("power", 0)
+                if power_drain < 0:
+                    eco = env._last_obs.get("economy", {})
+                    current_balance = eco.get("power_provided", 0) - eco.get("power_drained", 0)
+                    if current_balance + power_drain < 0:
+                        result["warning"] = (
+                            f"POWER WARNING: {building_type} drains {abs(power_drain)} power. "
+                            f"Current balance: {current_balance:+d}. "
+                            f"Build powr first or production will slow to 1/3 speed!"
+                        )
             return result
 
         @mcp.tool()
@@ -566,7 +629,7 @@ class OpenRAEnvironment(MCPEnvironment):
             pre_obs = env._last_obs
             if pre_obs:
                 ready = any(
-                    p["queue_type"] == "Building" and p["item"] == building_type and p["progress"] >= 0.99
+                    p["queue_type"] in env._PLACEABLE_QUEUE_TYPES and p["item"] == building_type and p["progress"] >= 0.99
                     for p in pre_obs["production"]
                 )
                 if not ready:
@@ -612,9 +675,9 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @mcp.tool()
-        def guard_target(unit_ids: list[int] | str, target_actor_id: int, queued: bool = False) -> dict:
+        def guard_target(unit_ids: str, target_actor_id: int, queued: bool = False) -> dict:
             """Order units to guard another actor, following and protecting it.
-            unit_ids: list of actor IDs, or "all_combat", "all_idle", or a group name."""
+            unit_ids: comma-separated actor IDs (e.g. "145,146"), "all_combat", "all_idle", or a group name."""
             env._refresh_obs()
             unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not unit_ids:
@@ -626,10 +689,10 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @mcp.tool()
-        def set_stance(unit_ids: list[int] | str, stance: str) -> dict:
+        def set_stance(unit_ids: str, stance: str) -> dict:
             """Set combat stance for units.
             Stances: 'hold_fire' (0), 'return_fire' (1), 'defend' (2), 'attack_anything' (3).
-            unit_ids: list of actor IDs, or "all_combat", "all_idle", or a group name."""
+            unit_ids: comma-separated actor IDs (e.g. "145,146"), "all_combat", "all_idle", or a group name."""
             env._refresh_obs()
             unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not unit_ids:
@@ -807,13 +870,15 @@ class OpenRAEnvironment(MCPEnvironment):
 
             Actions use same format as individual tools:
               {"tool": "build_unit", "unit_type": "e1", "count": 3}
-              {"tool": "attack_move", "unit_ids": [155, 160], "target_x": 50, "target_y": 30}
+              {"tool": "attack_move", "unit_ids": "155,160", "target_x": 50, "target_y": 30}
               {"tool": "set_stance", "unit_ids": "all_combat", "stance": "attack_anything"}
               {"tool": "deploy_unit", "unit_id": 120}
 
-            Special unit selectors (instead of listing IDs):
+            Unit selectors for unit_ids:
               "all_combat" — all own combat units
               "all_idle" — all idle combat units
+              "155,160" — comma-separated actor IDs
+              group name — a previously assigned group
 
             All commands are sent in a single call. The game resolves any
             conflicts by its own logic.
@@ -949,7 +1014,7 @@ class OpenRAEnvironment(MCPEnvironment):
             return False
         elif condition == "building_ready":
             return any(
-                p["queue_type"] == "Building" and p["progress"] >= 0.99
+                p["queue_type"] in self._PLACEABLE_QUEUE_TYPES and p["progress"] >= 0.99
                 for p in obs.get("production", [])
             )
         elif condition.startswith("cash_above:") or condition.startswith("funds_above:"):
@@ -963,9 +1028,21 @@ class OpenRAEnvironment(MCPEnvironment):
         return True  # unknown condition → proceed
 
     def _resolve_unit_ids(self, selector, obs: dict) -> list[int]:
-        """Resolve unit selectors like 'all_combat', 'all_idle', or group names to actual actor IDs."""
+        """Resolve unit selectors to actual actor IDs.
+
+        Accepts:
+          - list of ints: [145, 146] — returned as-is
+          - "all_combat": all units that can attack
+          - "all_idle": idle units that can attack
+          - group name: units in a named group
+          - comma-separated IDs: "145,146,148"
+          - stringified list: "[145, 146]"
+        """
         if isinstance(selector, list):
             return selector
+        if not isinstance(selector, str):
+            return []
+        selector = selector.strip()
         if selector == "all_combat":
             return [u["actor_id"] for u in obs.get("units", []) if u.get("can_attack")]
         if selector == "all_idle":
@@ -974,6 +1051,13 @@ class OpenRAEnvironment(MCPEnvironment):
         # Check named groups
         if selector in self._unit_groups:
             return list(self._unit_groups[selector])
+        # Parse string-encoded lists: "[145, 146]" or "145,146,148"
+        cleaned = selector.strip("[] ")
+        if cleaned:
+            try:
+                return [int(x.strip()) for x in cleaned.split(",") if x.strip()]
+            except ValueError:
+                pass
         return []
 
     def _action_to_commands(self, action: dict, obs: dict) -> list[CommandModel]:
@@ -1059,6 +1143,9 @@ class OpenRAEnvironment(MCPEnvironment):
     # Naval buildings that require water tiles
     _WATER_BUILDINGS = {"spen", "syrd"}
 
+    # Queue types that produce placeable structures (Building + Defense)
+    _PLACEABLE_QUEUE_TYPES = {"Building", "Defense"}
+
     # Building footprint sizes (width x height in cells) from RA rules
     _FOOTPRINTS = {
         "fact": (3, 4), "proc": (3, 4),
@@ -1069,6 +1156,9 @@ class OpenRAEnvironment(MCPEnvironment):
         "iron": (2, 2), "pdox": (2, 2),
         "mslo": (2, 1), "sam": (2, 1),
         "spen": (3, 3), "syrd": (3, 3), "atek": (2, 3),
+        # Defense buildings (most are 1x1 from ^Defense base)
+        "gun": (1, 1), "ftur": (1, 1), "tsla": (1, 1),
+        "agun": (1, 1), "pbox": (1, 1), "hbox": (1, 1), "gap": (1, 1),
     }
 
     def _find_placement_candidates(self, building_type: str, obs: dict) -> list[dict]:
@@ -1135,12 +1225,14 @@ class OpenRAEnvironment(MCPEnvironment):
         candidates.sort(key=lambda c: c["distance"])
         return candidates
 
+    _MAX_PLACEMENT_ATTEMPTS = 20
+
     def _process_pending_placements(self) -> None:
         """Auto-place buildings that finished construction via build_and_place.
 
         Uses smart placement: finds valid positions in the full build radius
-        around the Construction Yard, tries them in order, and cycles through
-        candidates on each retry. Only cancels after exhausting all options.
+        around the Construction Yard, tries them in order. Cancels after
+        _MAX_PLACEMENT_ATTEMPTS failures to avoid blocking the queue.
         """
         if not self._last_obs:
             return
@@ -1151,13 +1243,13 @@ class OpenRAEnvironment(MCPEnvironment):
         failed = []
         for btype, attempt_idx in list(attempted.items()):
             still_in_queue = any(
-                p["queue_type"] == "Building" and p["item"] == btype and p["progress"] >= 0.99
+                p["queue_type"] in self._PLACEABLE_QUEUE_TYPES and p["item"] == btype and p["progress"] >= 0.99
                 for p in production
             )
             if still_in_queue:
                 # Building is still in queue → last placement failed, try next candidate
                 candidates = self._find_placement_candidates(btype, self._last_obs)
-                if attempt_idx < len(candidates):
+                if attempt_idx < min(len(candidates), self._MAX_PLACEMENT_ATTEMPTS):
                     # Try the next candidate position
                     pos = candidates[attempt_idx]
                     try:
@@ -1202,7 +1294,7 @@ class OpenRAEnvironment(MCPEnvironment):
             if btype in attempted:
                 continue  # already being tracked
             ready = any(
-                p["queue_type"] == "Building" and p["item"] == btype and p["progress"] >= 0.99
+                p["queue_type"] in self._PLACEABLE_QUEUE_TYPES and p["item"] == btype and p["progress"] >= 0.99
                 for p in production
             )
             if not ready:
@@ -1258,6 +1350,7 @@ class OpenRAEnvironment(MCPEnvironment):
             "own_units": len(obs_dict["units"]),
             "own_buildings": len(obs_dict["buildings"]),
             "visible_enemies": len(obs_dict["visible_enemies"]),
+            "production": [f"{p['item']}@{p['progress']:.0%}" for p in obs_dict["production"]],
         }
 
     async def _async_step_internal(self, action: OpenRAAction) -> dict:
