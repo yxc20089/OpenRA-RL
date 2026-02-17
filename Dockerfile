@@ -16,6 +16,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY OpenRA /src/openra
 WORKDIR /src/openra
 
+# Fix Windows CRLF line endings in shell scripts (git autocrlf on Windows adds \r)
+RUN find . -name '*.sh' -exec sed -i 's/\r$//' {} + && \
+    find . -name '*.sh' -exec chmod +x {} +
+
 # Build with system libraries (unix-generic avoids bundled native binaries)
 # SKIP_PROTOC=true uses pre-generated protobuf C# files (avoids protoc arm64 crash in Docker)
 ENV SKIP_PROTOC=true
@@ -98,9 +102,9 @@ COPY pyproject.toml /app/
 # Create OpenRA support directory
 RUN mkdir -p /root/.config/openra
 
-# Copy entrypoint
+# Copy entrypoint (fix Windows CRLF line endings)
 COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 # Environment
 ENV OPENRA_PATH=/opt/openra
