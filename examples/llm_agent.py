@@ -46,86 +46,117 @@ sys.stdout.reconfigure(line_buffering=True)
 logger = logging.getLogger("llm_agent")
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "qwen/qwen3-32b:nitro"
+DEFAULT_MODEL = "qwen/qwen3-coder-next"
 
 SYSTEM_PROMPT = """\
-You are an RTS AI playing Command & Conquer: Red Alert. \
-You control one side against a Normal AI opponent. The game runs in REAL \
-TIME (~25 ticks/sec). Every second you spend thinking, the enemy is building.
+You are playing Command & Conquer: Red Alert as one faction against an AI opponent.
 
-SPEED IS CRITICAL: Respond ONLY with tool calls. No explanations, no reasoning \
-text, no narration. Just call the tools. Every token of text you output is \
-wasted time while the enemy builds units. ACT, don't talk.
+## How the Game Works
+The game runs in real time at ~25 ticks/sec. You interact through tool calls. \
+Between your turns, a TURN BRIEFING is injected showing current state: \
+economy, units, buildings, enemies, production queue, and available builds.
 
-## Pre-Game Knowledge
-A STRATEGIC BRIEFING is provided at game start with map, base position, \
-enemy spawn estimate, faction, tech tree, and unit/building stats. \
-USE these coordinates — DO NOT guess positions.
+A STRATEGIC BRIEFING at game start provides map size, base position, \
+enemy spawn estimate, faction, tech tree, and unit/building stats.
 
-## Tools — batch() vs plan() vs advance()
+## Available Tools
 
-**batch(actions)** — Send multiple commands that all execute AT THE SAME TIME.
-batch([
+**advance(ticks)** — Let game time pass. Nothing happens without this. \
+Production, movement, and combat all require game time to progress. \
+250 ticks ≈ 10 seconds. Typical build times: power plant ~300 ticks, \
+barracks ~500 ticks, war factory ~750 ticks.
+
+**batch(actions)** — Send multiple commands simultaneously in one game tick.
+Example: batch([
   {"tool": "build_unit", "unit_type": "3tnk", "count": 2},
-  {"tool": "build_unit", "unit_type": "e1", "count": 3},
-  {"tool": "set_stance", "unit_ids": "all_combat", "stance": "attack_anything"}
+  {"tool": "attack_move", "unit_ids": "all_combat", "target_x": 50, "target_y": 50}
 ])
 
-**plan(steps)** — Execute steps ONE AFTER ANOTHER with state refresh between.
-plan([
+**plan(steps)** — Execute steps sequentially with state refresh between each.
+Example: plan([
   {"actions": [{"tool": "deploy_unit", "unit_id": 120}]},
-  {"actions": [{"tool": "build_and_place", "building_type": "powr"}]},
-  {"actions": [{"tool": "build_and_place", "building_type": "tent"}]}
+  {"actions": [{"tool": "build_and_place", "building_type": "powr"}]}
 ])
 
-**advance(ticks)** — Wait for game to advance (e.g., waiting for production).
-Game runs at ~25 ticks/sec. advance(250) = 10 seconds, advance(1500) = 1 minute.
-Typical build times: powr ~300 ticks (12s), barr ~500 ticks (20s), weap ~750 ticks (30s).
-WARNING: The enemy acts during advance()! Use short advances (250-500) and check state often.
-Do NOT advance(5000) — you'll miss attacks and waste minutes blind.
+**build_and_place(building_type)** — Queue a building and auto-place when done.
 
-Conditions: "enemies_visible", "no_enemies_visible", "under_attack", \
-"building_ready", "cash_above:2000", "cash_below:500"
+**build_unit(unit_type, count)** — Queue unit training. Requires the right \
+production building (barracks for infantry, war factory for vehicles).
 
-Special unit selectors: "all_combat", "all_idle", or group names.
+**attack_move(unit_ids, target_x, target_y)** — Move units, engaging enemies en route.
 
-CRITICAL RULES:
-- A TURN BRIEFING with full state is injected automatically before each turn
-- Briefings include coordinates, production queue, AND "Can build:" list
-- React to ALERTS immediately (especially UNDER ATTACK)
-- Use batch() for concurrent actions, plan() for sequential actions
+Unit selectors: comma-separated IDs (e.g. "145,146"), "all_combat", "all_idle", or a group name.
 
-## Building — use build_and_place()
-build_and_place("powr") — queues construction AND auto-places when done.
-Build order: powr → barr/tent → proc → weap → 2nd powr if low power
-- NEVER build spen/syrd (naval buildings) on land maps — they need water!
-- If "PLACEMENT FAILED" alert appears, the building was auto-cancelled
-- If production is stuck, use cancel_production("item_type") to clear queue
+## Game Knowledge Tools
+Use these to look up unit stats, building stats, and tech trees at any time:
+- **lookup_unit(unit_type)** — Get cost, HP, speed, armor, prerequisites for any unit (e.g. "3tnk", "e1")
+- **lookup_building(building_type)** — Get cost, HP, power, prerequisites for any building (e.g. "weap", "proc")
+- **lookup_tech_tree(faction)** — Get the full build order and tech tree for "allied" or "soviet"
+- **lookup_faction(faction)** — Get all available units and buildings for a faction
 
-## Tech Progression — CRITICAL
-- Early (0-2 buildings): powr → barr/tent, train e1 for scouting
-- Mid (barr + proc built): build_and_place("weap"), keep training e1 + harv
-- Late (weap ready): SWITCH to tanks (3tnk/2tnk) — 10x stronger than e1!
-- Check "Can build:" in every briefing — it shows what you can train NOW
-- If weap exists but you only train e1, you are wasting resources
-- Tanks beat infantry. Once you can build them, ALWAYS prefer tanks.
+## Game Mechanics
 
-## Economy Rules
-- FUNDS = cash + ore. Both are spendable! Check "Funds:" in briefing, NOT just cash.
-- IDLE FUNDS (> $2000): build_unit("harv") or build_and_place("proc")
-- LOW POWER: build_and_place("powr") immediately
-- IDLE PRODUCTION: always queue something — idle production loses games
+**Economy**: Funds = cash + ore. Harvesters collect ore from the map. \
+Ore refineries (proc) come with one free harvester. More harvesters = faster income.
 
-## Coordinates & Scouting
-- Set rally points NEAR your base (within ~5 cells), not at map edges
-- Scout toward the enemy spawn estimate early with 1-2 cheap units
-- attack_move toward KNOWN enemy positions, not random coordinates
+**Power**: Buildings require power. Power plants (powr) provide +100. \
+When power demand exceeds supply, ALL production slows to 1/3 speed — \
+this is devastating. Always build a power plant BEFORE any building \
+that drains power. Check your power balance in every briefing.
 
-## Combat
-- Set ALL combat units to "attack_anything" stance
-- Send 1-2 e1 scouts toward enemy spawn estimate early
-- Attack with 5+ units using attack_move toward known enemy positions
-- When UNDER ATTACK: rally all idle units to defend
+**Production**: Buildings produce units — barracks/tent → infantry, \
+war factory (weap) → vehicles. Multiple production buildings of the same \
+type speed up production. Queue items and advance() to let them finish.
+
+**Tech tree**: Higher-tier buildings unlock stronger units. \
+A war factory requires an ore refinery. The "Can build:" line in each \
+briefing shows what is currently available to produce.
+
+**Unit strength**: Vehicles (tanks) are much stronger than infantry. \
+e1 costs $100, a heavy tank (3tnk) costs $950 but is far more powerful.
+
+**Building placement**: build_and_place() handles placement automatically. \
+Buildings that need water (spen, syrd) will fail on land maps.
+
+**Defense**: Build turrets to protect your base. Gun turrets (gun/ftur) \
+are cheap ground defense. SAM sites (sam/agun) defend against air. \
+If auto-placement fails, use get_valid_placements(building_type) to find \
+positions, then place_building(building_type, cell_x, cell_y) to place manually.
+
+**Air power**: Build a radar dome (dome), then an airfield (afld) or helipad \
+(hpad) to produce aircraft. MiGs and Hinds are powerful strike units. \
+Air units bypass ground defenses and can hit the enemy base directly.
+
+**Scouting**: Send a cheap unit (e1 or dog) to explore the map early. \
+Knowing the enemy's base location and army composition is critical. \
+Don't wait — scout within the first 500 ticks.
+
+**Expansion**: Build multiple ore refineries (proc) for faster income. \
+Each comes with a free harvester. 2-3 refineries is ideal. Ore patches \
+deplete over time, so expand to new areas.
+
+**Unit variety**: Don't just build one unit type. Mix tanks for armor, \
+rocket soldiers (e3) for anti-air, and engineers (e6) to capture enemy buildings. \
+Soviet players can build attack dogs (fast, cheap scouts) from a kennel.
+
+## Strategy Priorities
+1. Deploy MCV immediately, then power plant
+2. Build barracks, then scout with a cheap unit toward the enemy
+3. Build ore refinery for economy, then a second refinery later
+4. Build 1-2 defense turrets at your base entrance
+5. War factory → mix tanks and rocket soldiers
+6. Radar dome → airfield for air strikes (mid-game)
+7. Attack when you have 4+ tanks — don't hoard units at base
+8. Expand: build a second ore refinery when funds allow
+
+## Briefing Format
+Each turn briefing includes:
+- Funds, power balance, harvester count
+- Your units with IDs and positions
+- Your buildings with IDs and positions
+- Visible enemies with IDs and positions
+- Current production queue and available builds
+- ALERTS for events needing attention (attacks, low power, idle production)
 """
 
 
@@ -263,7 +294,9 @@ def format_state_briefing(state: dict) -> str:
 
     # Compact building summary with IDs, positions, and production category
     _BLDG_CATEGORY = {"tent": "infantry", "barr": "infantry", "weap": "vehicle",
-                       "hpad": "aircraft", "afld": "aircraft", "syrd": "ship", "spen": "ship"}
+                       "hpad": "aircraft", "afld": "aircraft", "syrd": "ship", "spen": "ship",
+                       "gun": "defense", "ftur": "defense", "tsla": "defense",
+                       "sam": "defense", "agun": "defense", "pbox": "defense", "hbox": "defense"}
     if buildings:
         bldg_parts = []
         for b in buildings:
@@ -351,8 +384,7 @@ async def chat_completion(
         "tool_choice": "auto",
         "max_tokens": 1500,  # Cap output — enough for tool calls, kills long thinking
     }
-    # Prioritize high-throughput providers for fast inference
-    payload["provider"] = {"sort": "throughput"}
+    # Let OpenRouter auto-route to the best available provider
 
     async with httpx.AsyncClient() as client:
         if verbose:
@@ -480,6 +512,7 @@ async def run_agent(
     api_key: str,
     model: str,
     max_turns: int,
+    max_time: int,
     verbose: bool,
 ):
     """Connect to OpenRA-RL and play a game using an LLM agent."""
@@ -521,7 +554,17 @@ async def run_agent(
         consecutive_errors = 0
         MAX_CONSECUTIVE_ERRORS = 3
 
-        for turn in range(max_turns):
+        turn = 0
+        while True:
+            # Check limits
+            elapsed = time.time() - start_time
+            if max_time and elapsed >= max_time:
+                print(f"\n  TIME LIMIT reached ({max_time}s). Stopping.")
+                break
+            if max_turns and turn >= max_turns:
+                break
+            turn += 1
+
             # Compress history periodically
             messages = compress_history(messages, keep_last=40)
 
@@ -550,9 +593,10 @@ async def run_agent(
                 try:
                     response = await chat_completion(messages, openai_tools, api_key, model, verbose)
                     break
-                except RuntimeError as e:
+                except (RuntimeError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
                     err_str = str(e)
-                    retriable = any(code in err_str for code in ("429", "500", "502", "503", "504"))
+                    retriable = isinstance(e, (httpx.ReadTimeout, httpx.ConnectTimeout)) or \
+                        any(code in err_str for code in ("429", "500", "502", "503", "504"))
                     if retriable and attempt < 3:
                         wait = 10 * (attempt + 1)
                         print(f"\n  [RETRY] Provider error, waiting {wait}s ({attempt + 1}/4)...")
@@ -633,18 +677,20 @@ async def run_agent(
 
                 if verbose and isinstance(result, dict):
                     result_preview = json.dumps(result)
-                    if len(result_preview) > 120:
-                        result_preview = result_preview[:120] + "..."
+                    if len(result_preview) > 500:
+                        result_preview = result_preview[:500] + "..."
                     print(f"  [Result] {result_preview}")
 
             # Status update
             if total_api_calls % 5 == 0 or game_done:
                 elapsed = time.time() - start_time
+                limit_str = f"/{max_turns}" if max_turns else ""
+                time_str = f"{elapsed:.0f}/{max_time}s" if max_time else f"{elapsed:.0f}s"
                 print(
-                    f"  Turn {turn + 1}/{max_turns} | "
+                    f"  Turn {turn}{limit_str} | "
                     f"API calls: {total_api_calls} | "
                     f"Tool calls: {total_tool_calls} | "
-                    f"Time: {elapsed:.0f}s"
+                    f"Time: {time_str}"
                 )
 
             if game_done:
@@ -724,8 +770,14 @@ def main():
     parser.add_argument(
         "--max-turns",
         type=int,
-        default=200,
-        help="Maximum LLM turns (default: 200)",
+        default=0,
+        help="Maximum LLM turns, 0 = unlimited (default: 0)",
+    )
+    parser.add_argument(
+        "--max-time",
+        type=int,
+        default=int(os.environ.get("MAX_TIME", "1800")),
+        help="Maximum wall-clock time in seconds (default: $MAX_TIME or 1800 = 30min)",
     )
     parser.add_argument(
         "--verbose",
@@ -760,7 +812,7 @@ def main():
         sys.exit(1)
 
     try:
-        asyncio.run(run_agent(args.url, args.api_key, args.model, args.max_turns, args.verbose))
+        asyncio.run(run_agent(args.url, args.api_key, args.model, args.max_turns, args.max_time, args.verbose))
     except KeyboardInterrupt:
         print("\nInterrupted by user")
         sys.exit(0)
