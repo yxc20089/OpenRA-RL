@@ -60,45 +60,105 @@ docker compose build
 > [!TIP]
 > Subsequent rebuilds use Docker layer caching and are much faster. You only need to rebuild the game server image when the `OpenRA` submodule or server code changes.
 
-### 3. Start the game server
+### 3. Run an agent (pick one)
 
-```powershell
-docker compose up openra-rl
-```
-
-The server exposes:
-| Port | Protocol | Description |
-|------|----------|-------------|
-| 8000 | HTTP | OpenEnv REST API |
-| 9999 | gRPC | Direct gRPC bridge |
-
-Wait for the health check to pass — verify at `http://localhost:8000/health`.
-
-### 4. Run an agent (pick one)
-
-Three example agents are included — **choose one** to run. Open a **new PowerShell window** (keep the server running in the first one).
+Three example agents are included. Each option below is self-contained — pick one.
 
 **Option A: Scripted bot** (recommended to test first, no API key needed):
 
+This option runs the Python bot **locally** (outside Docker), so you need to start the game server first:
+
 ```powershell
+# Terminal 1: Start the game server
+docker compose up openra-rl
+# Wait for health check to pass — verify at http://localhost:8000/health
+
+# Terminal 2: Run the bot
 pip install -e .
 python examples/scripted_bot.py --url http://localhost:8000 --verbose
 ```
 
 **Option B: LLM agent** (uses OpenRouter, requires API key):
 
+> [!NOTE]
+> This command auto-starts the `openra-rl` game server via Docker Compose `depends_on` — no need to run it separately.
+
 ```powershell
 $env:OPENROUTER_API_KEY = "sk-or-your-key-here"
+# Optional: customize model and game settings
+$env:OPENROUTER_MODEL = "qwen/qwen3-coder-next"
+# $env:MAX_TURNS = "200"
+# $env:AI_SLOT = "Multi0"
+# $env:BOT_TYPE = "normal"
 docker compose up --build agent
 ```
 
 **Option C: MCP bot** (model-context-protocol bot, no API key needed):
+
+> [!NOTE]
+> Also auto-starts the game server — single command, no separate server needed.
 
 ```powershell
 docker compose run --build mcp-bot
 ```
 
 See [examples/README.md](examples/README.md) for more details on the scripted bot.
+
+### 5. View game replays
+
+Each game session saves a `.orarep` replay inside the Docker container. Copy them to your local machine:
+
+```powershell
+docker cp openra-rl-openra-rl-1:/root/.config/openra/Replays ./replays
+```
+
+> **Tip:** Add a volume mount in `docker-compose.yaml` to auto-export replays automatically:
+> ```yaml
+> volumes:
+>   - ./replays:/root/.config/openra/Replays
+> ```
+
+> [!WARNING]
+> Replays are saved under `{DEV_VERSION}` and **cannot** be opened in the
+> standard [OpenRA](https://www.openra.net/) desktop release (which uses `v2`).
+> You must build the dev version locally to view them.
+
+**Build the dev client & watch replays:**
+
+```powershell
+# Step 1: Install .NET 8 SDK
+winget install Microsoft.DotNet.SDK.8
+
+# Step 2: Refresh PATH so the current terminal can find 'dotnet'
+#   Option A (recommended): Close and reopen your PowerShell window
+#   Option B (no restart): Run the following line to reload PATH:
+$env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH","User")
+
+# Step 3: Verify installation
+dotnet --version   # should print 8.x.xxx
+
+# Step 4: Build the dev client
+cd OpenRA
+powershell -ExecutionPolicy Bypass -File make.ps1 all
+
+# Step 5: Copy replays into the dev client's support directory
+#   The Replay Browser looks in: %APPDATA%\OpenRA\Replays\ra\{DEV_VERSION}\
+New-Item -ItemType Directory -Path "$env:APPDATA\OpenRA\Replays\ra\{DEV_VERSION}" -Force
+Copy-Item ".\replays\Replays\ra\{DEV_VERSION}\*.orarep" "$env:APPDATA\OpenRA\Replays\ra\{DEV_VERSION}\"
+
+# Step 6: Launch the game and open Extras → Replays
+./launch-game.cmd Game.Mod=ra
+```
+
+**Clean up old replays** (run from the project root `OpenRA-RL/`):
+
+```powershell
+# Clear locally exported replays
+Remove-Item -Recurse -Force ".\replays\*"
+
+# Clear replays from the dev client's support directory
+Remove-Item -Recurse -Force "$env:APPDATA\OpenRA\Replays\ra\{DEV_VERSION}\*"
+```
 
 ## Docker Compose Services
 
