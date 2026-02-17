@@ -89,13 +89,13 @@ python examples/scripted_bot.py --url http://localhost:8000 --verbose
 
 ```powershell
 $env:OPENROUTER_API_KEY = "sk-or-your-key-here"
-docker compose up agent
+docker compose up --build agent
 ```
 
 **Option C: MCP bot** (model-context-protocol bot, no API key needed):
 
 ```powershell
-docker compose run mcp-bot
+docker compose run --build mcp-bot
 ```
 
 See [examples/README.md](examples/README.md) for more details on the scripted bot.

@@ -327,7 +327,7 @@ class MCPBot:
             if u["type"] not in self.COMBAT_TYPES:
                 continue
             stance = "defend" if u["actor_id"] in self._guards_assigned else "attack_anything"
-            await self.call("set_stance", unit_ids=[u["actor_id"]], stance=stance)
+            await self.call("set_stance", unit_ids=str(u["actor_id"]), stance=stance)
             self._stances_set.add(u["actor_id"])
 
         # Assign guards to CY
@@ -341,7 +341,7 @@ class MCPBot:
                             and u["is_idle"]
                             and u["actor_id"] not in self._guards_assigned):
                         self._log(f"Assigning {u['type']} (actor {u['actor_id']}) to guard CY")
-                        await self.call("guard_target", unit_ids=[u["actor_id"]], target_actor_id=cy["actor_id"])
+                        await self.call("guard_target", unit_ids=str(u["actor_id"]), target_actor_id=cy["actor_id"])
                         self._guards_assigned.add(u["actor_id"])
 
         # Set primary on multiple production buildings
@@ -374,18 +374,20 @@ class MCPBot:
         # Find attack target
         target_x, target_y = self._find_attack_target(enemies, units)
 
-        unit_ids = [u["actor_id"] for u in idle_fighters]
-        self._log(f"Attacking with {len(unit_ids)} units toward ({target_x}, {target_y})")
-        await self.call("attack_move", unit_ids=unit_ids, target_x=target_x, target_y=target_y)
+        unit_id_list = [u["actor_id"] for u in idle_fighters]
+        ids_str = ",".join(str(i) for i in unit_id_list)
+        self._log(f"Attacking with {len(unit_id_list)} units toward ({target_x}, {target_y})")
+        await self.call("attack_move", unit_ids=ids_str, target_x=target_x, target_y=target_y)
 
         # Attack specific visible enemy if close
         if enemies.get("units"):
             enemy = enemies["units"][0]
             nearby = [u for u in idle_fighters[:3] if u["can_attack"]]
             if nearby:
+                nearby_ids = ",".join(str(u["actor_id"]) for u in nearby)
                 await self.call(
                     "attack_target",
-                    unit_ids=[u["actor_id"] for u in nearby],
+                    unit_ids=nearby_ids,
                     target_actor_id=enemy["actor_id"],
                 )
 
@@ -450,7 +452,7 @@ class MCPBot:
         fleeing = [u for u in units if u["type"] in self.COMBAT_TYPES
                    and u.get("current_activity") == "Flee"]
         if fleeing:
-            await self.call("stop_units", unit_ids=[u["actor_id"] for u in fleeing[:3]])
+            await self.call("stop_units", unit_ids=",".join(str(u["actor_id"]) for u in fleeing[:3]))
 
         # Move scouts
         idle_scouts = [u for u in units
@@ -458,7 +460,7 @@ class MCPBot:
                        and u["actor_id"] not in self._guards_assigned]
         if idle_scouts and len(idle_scouts) > 3:
             scout = idle_scouts[0]
-            await self.call("move_units", unit_ids=[scout["actor_id"]], target_x=64, target_y=64)
+            await self.call("move_units", unit_ids=str(scout["actor_id"]), target_x=64, target_y=64)
 
     # ── Status display ────────────────────────────────────────────
 
