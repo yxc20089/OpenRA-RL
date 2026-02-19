@@ -244,6 +244,11 @@ def observation_to_dict(obs: rl_bridge_pb2.GameObservation) -> dict:
             "buildings_lost": obs.military.buildings_lost,
             "army_value": obs.military.army_value,
             "active_unit_count": obs.military.active_unit_count,
+            "kills_cost": obs.military.kills_cost,
+            "deaths_cost": obs.military.deaths_cost,
+            "assets_value": obs.military.assets_value,
+            "experience": obs.military.experience,
+            "order_count": obs.military.order_count,
         },
         "units": [
             {

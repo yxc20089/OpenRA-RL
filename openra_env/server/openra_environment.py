@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional
@@ -20,12 +21,15 @@ from openenv.core.env_server.types import Action, Observation, State
 
 from openra_env.game_data import (
     get_all_building_types,
+    get_all_buildings_for_side,
     get_all_unit_types,
+    get_all_units_for_side,
     get_building_stats,
     get_faction_info,
     get_tech_tree,
     get_unit_stats,
 )
+from openra_env.opponent_intel import get_opponent_profile, get_opponent_summary
 from openra_env.models import (
     ActionType,
     BuildingInfoModel,
@@ -69,6 +73,9 @@ class OpenRAEnvironment(MCPEnvironment):
         ai_slot: str = "",
         reward_weights: Optional[RewardWeights] = None,
         record_replays: bool = False,
+        planning_enabled: bool = True,
+        planning_max_turns: int = 10,
+        planning_max_time_s: float = 60.0,
     ):
         # Create MCP server and register tools
         mcp = FastMCP("openra")
@@ -101,6 +108,24 @@ class OpenRAEnvironment(MCPEnvironment):
         self._placement_results: list[str] = []  # alerts from auto-placement attempts
         self._player_faction: str = ""
         self._enemy_faction: str = ""
+        self._last_production_progress: dict[str, float] = {}  # item → progress for stall detection
+        self._prev_buildings: dict[int, str] = {}  # actor_id → type for loss detection
+        self._prev_unit_ids: dict[int, str] = {}  # actor_id → type for loss detection
+        self._enemy_ever_seen: bool = False  # suppress NO SCOUTING after first contact
+
+        # Planning phase configuration (env vars override constructor args)
+        planning_env = os.environ.get("PLANNING_ENABLED", "")
+        if planning_env:
+            self._planning_enabled = planning_env.lower() in ("true", "1", "yes")
+        else:
+            self._planning_enabled = planning_enabled
+        self._planning_max_turns = int(os.environ.get("PLANNING_MAX_TURNS", str(planning_max_turns)))
+        self._planning_max_time_s = float(os.environ.get("PLANNING_MAX_TIME", str(planning_max_time_s)))
+        self._planning_active = False
+        self._planning_start_time: float = 0.0
+        self._planning_turns_used: int = 0
+        self._planning_strategy: str = ""
+
         # Persistent event loop for async gRPC bridge operations.
         # Runs in a background thread so it doesn't conflict with
         # FastAPI/uvicorn's event loop when MCP tools call it.
@@ -132,16 +157,25 @@ class OpenRAEnvironment(MCPEnvironment):
             alerts = []
 
             # Under attack: enemy units near our buildings
+            attackers = []  # enemies near base buildings
             for enemy in obs["visible_enemies"]:
                 for bldg in obs["buildings"]:
                     dx = abs(enemy.get("cell_x", 0) - bldg.get("cell_x", 0))
                     dy = abs(enemy.get("cell_y", 0) - bldg.get("cell_y", 0))
                     if dx + dy < 12:
-                        alerts.append(
-                            f"UNDER ATTACK: enemy {enemy['type']} id={enemy['actor_id']} "
-                            f"near your {bldg['type']} at ({bldg['cell_x']},{bldg['cell_y']})"
-                        )
+                        attackers.append(enemy)
                         break
+            if len(attackers) <= 3:
+                for enemy in attackers:
+                    alerts.append(
+                        f"UNDER ATTACK: enemy {enemy['type']} id={enemy['actor_id']} "
+                        f"near base"
+                    )
+            elif attackers:
+                from collections import Counter
+                type_counts = Counter(e["type"] for e in attackers)
+                breakdown = ", ".join(f"{cnt}x {t}" for t, cnt in type_counts.most_common())
+                alerts.append(f"UNDER ATTACK: {len(attackers)} enemies near base ({breakdown})")
 
             # Damaged buildings
             for bldg in obs["buildings"]:
@@ -170,9 +204,34 @@ class OpenRAEnvironment(MCPEnvironment):
             if total_funds > 2000 and eco["harvester_count"] < 2:
                 alerts.append(f"IDLE FUNDS: ${total_funds} with {eco['harvester_count']} harvester(s) — build refinery or harvester")
 
+            # Ore storage near capacity — income is being wasted
+            ore = eco.get("ore", 0)
+            res_cap = eco.get("resource_capacity", 0)
+            if res_cap > 0 and ore >= res_cap * 0.9:
+                alerts.append(
+                    f"ORE FULL: {ore}/{res_cap} storage used — "
+                    f"build silo ($150, +1500 capacity) or refinery to avoid wasting income"
+                )
+
             # Nothing being produced
             if not obs["production"] and len(obs["buildings"]) >= 3:
                 alerts.append("IDLE PRODUCTION: nothing being built or trained — queue something")
+
+            # Production stalled due to $0 funds
+            total_funds = eco["cash"] + eco.get("ore", 0)
+            current_progress = {p["item"]: p["progress"] for p in obs["production"]
+                                if p["progress"] < 0.99}
+            last_progress = getattr(env, "_last_production_progress", {})
+            if total_funds == 0 and current_progress:
+                for item, prog in current_progress.items():
+                    if item in last_progress and abs(prog - last_progress[item]) < 0.01:
+                        alerts.append(
+                            f"STALLED: {item}@{prog:.0%} — $0 funds, "
+                            f"construction pauses without income. "
+                            f"Cancel or build refinery/harvester first."
+                        )
+                        break  # one alert is enough
+            env._last_production_progress = current_progress
 
             # Building ready to place or stuck in auto-placement
             pending = getattr(env, "_pending_placements", {})
@@ -181,7 +240,7 @@ class OpenRAEnvironment(MCPEnvironment):
                 if p["queue_type"] in env._PLACEABLE_QUEUE_TYPES and p["progress"] >= 0.99:
                     btype = p["item"]
                     if btype in attempted:
-                        alerts.append(f"BUILDING STUCK: {btype} placement failing — will auto-cancel, or call cancel_production(\"{btype}\")")
+                        alerts.append(f"BUILDING STUCK: {btype} placement failing — call get_valid_placements(\"{btype}\") or cancel_production(\"{btype}\")")
                     elif btype not in pending:
                         alerts.append(f"READY TO PLACE: {btype} — call place_building()")
 
@@ -213,11 +272,16 @@ class OpenRAEnvironment(MCPEnvironment):
             if len(obs["buildings"]) >= 4 and not (building_types & _DEFENSE_BUILDINGS):
                 alerts.append("NO DEFENSES: build gun turrets or SAM sites to protect your base")
 
-            # No scouting — nudge to explore
+            # Track enemy discovery history
+            if obs.get("visible_enemies") or obs.get("visible_enemy_buildings"):
+                env._enemy_ever_seen = True
+
+            # No scouting — nudge to explore (suppress after first contact)
             if obs["tick"] > 750 and not obs["visible_enemies"] and not obs.get("visible_enemy_buildings"):
-                alerts.append(
-                    "NO SCOUTING: you haven't found the enemy — send a unit to explore the map"
-                )
+                if not getattr(env, "_enemy_ever_seen", False):
+                    alerts.append(
+                        "NO SCOUTING: you haven't found the enemy — send a unit to explore the map"
+                    )
 
             # Compact summaries with actor IDs for planning
             units_summary = [
@@ -237,7 +301,7 @@ class OpenRAEnvironment(MCPEnvironment):
                 for e in obs["visible_enemies"]
             ]
 
-            return {
+            result = {
                 "tick": obs["tick"],
                 "done": obs["done"],
                 "result": obs.get("result", ""),
@@ -259,6 +323,17 @@ class OpenRAEnvironment(MCPEnvironment):
                 "alerts": alerts,
                 "map": obs["map_info"],
             }
+
+            # Include planning phase context
+            if env._planning_active:
+                result["planning_active"] = True
+                result["planning_turns_remaining"] = max(
+                    0, env._planning_max_turns - env._planning_turns_used
+                )
+            if env._planning_strategy:
+                result["planning_strategy"] = env._planning_strategy
+
+            return result
 
         @mcp.tool()
         def get_economy() -> dict:
@@ -410,12 +485,20 @@ class OpenRAEnvironment(MCPEnvironment):
                 base_idx = (cell_y * w + cell_x) * channels
                 terrain_idx = struct.unpack_from("f", raw, base_idx * 4)[0]
                 passable = struct.unpack_from("f", raw, (base_idx + 3) * 4)[0]
+                is_passable = passable > 0.5
+                tidx = int(terrain_idx)
+                if is_passable:
+                    note = "Passable terrain."
+                elif tidx in (7, 8):
+                    note = "Water — impassable to land units. spen/syrd require water."
+                else:
+                    note = "Impassable terrain (cliff or obstacle)."
                 return {
                     "cell_x": cell_x,
                     "cell_y": cell_y,
-                    "terrain_index": int(terrain_idx),
-                    "passable": passable > 0.5,
-                    "note": "Water cells are impassable to land units. spen/syrd require water.",
+                    "terrain_index": tidx,
+                    "passable": is_passable,
+                    "note": note,
                 }
             except Exception as e:
                 return {"error": f"Failed to decode terrain: {e}"}
@@ -457,14 +540,472 @@ class OpenRAEnvironment(MCPEnvironment):
                 return {"error": f"Unknown faction '{faction}'", "factions": ["england", "france", "germany", "russia", "ukraine"]}
             return result
 
+        # ── Bulk Knowledge Tools (rich context in one call) ─────────────
+
+        @mcp.tool()
+        def get_faction_briefing() -> dict:
+            """Get complete briefing for your faction: all available units with
+            full stats, all available buildings with full stats, tech tree, and
+            faction info. One call gives you everything about your faction's
+            military capabilities. Ideal for planning phase."""
+            faction = env._player_faction
+            if not faction:
+                # Infer from observation
+                env._refresh_obs()
+                obs = env._last_obs
+                if obs:
+                    avail = obs.get("available_production", [])
+                    bldg_types = [b["type"] for b in obs.get("buildings", [])]
+                    if "tent" in avail or "tent" in bldg_types:
+                        faction = "england"
+                    else:
+                        faction = "russia"
+
+            faction_info = get_faction_info(faction)
+            if faction_info is None:
+                return {"error": f"Could not determine faction (got '{faction}')"}
+
+            side = faction_info["side"]
+            units = get_all_units_for_side(side)
+            buildings = get_all_buildings_for_side(side)
+            tech_tree = get_tech_tree(side)
+
+            return {
+                "faction": faction,
+                "side": side,
+                "description": faction_info.get("description", ""),
+                "unique_units": faction_info.get("unique_units", []),
+                "tech_tree": tech_tree.get(side, []),
+                "units": units,
+                "buildings": buildings,
+            }
+
+        @mcp.tool()
+        def get_map_analysis() -> dict:
+            """Analyze the map and produce a strategic summary: resource patch
+            locations, water presence, passability overview, quadrant breakdown,
+            and key terrain features. Essential for planning."""
+            env._refresh_obs()
+            obs = env._last_obs
+            if obs is None:
+                return {"error": "No observation available. Call reset first."}
+
+            map_info = obs.get("map_info", {})
+            w = map_info.get("width", 0)
+            h = map_info.get("height", 0)
+            channels = obs.get("spatial_channels", 0)
+            spatial = obs.get("spatial_map", "")
+
+            # Base/enemy position
+            buildings = obs.get("buildings", [])
+            units = obs.get("units", [])
+            all_pos = (
+                [(b["cell_x"], b["cell_y"]) for b in buildings]
+                + [(u["cell_x"], u["cell_y"]) for u in units]
+            )
+            if all_pos:
+                base_x = sum(p[0] for p in all_pos) // len(all_pos)
+                base_y = sum(p[1] for p in all_pos) // len(all_pos)
+            else:
+                base_x, base_y = w // 2, h // 2
+            enemy_x = max(2, min(w - 2, w - base_x))
+            enemy_y = max(2, min(h - 2, h - base_y))
+            distance = abs(enemy_x - base_x) + abs(enemy_y - base_y)
+
+            result = {
+                "map_name": map_info.get("map_name", "?"),
+                "width": w,
+                "height": h,
+                "base_position": {"x": base_x, "y": base_y},
+                "enemy_estimated_position": {"x": enemy_x, "y": enemy_y},
+                "base_to_enemy_distance": distance,
+            }
+
+            if not spatial or w == 0 or channels == 0:
+                result["note"] = "No spatial data available for detailed analysis"
+                return result
+
+            import base64
+            import struct
+
+            try:
+                raw = base64.b64decode(spatial)
+            except Exception:
+                result["note"] = "Failed to decode spatial data"
+                return result
+
+            total_cells = w * h
+            passable_count = 0
+            water_count = 0
+            resource_cells = []
+            half_w = w // 2
+            half_h = h // 2
+            quad_stats = {
+                "NW": {"passable": 0, "total": 0, "resources": 0},
+                "NE": {"passable": 0, "total": 0, "resources": 0},
+                "SW": {"passable": 0, "total": 0, "resources": 0},
+                "SE": {"passable": 0, "total": 0, "resources": 0},
+            }
+
+            for y in range(h):
+                for x in range(w):
+                    base_idx = (y * w + x) * channels
+                    try:
+                        passable = struct.unpack_from("f", raw, (base_idx + 3) * 4)[0]
+                        resource = struct.unpack_from("f", raw, (base_idx + 2) * 4)[0]
+                    except struct.error:
+                        continue
+
+                    # Determine quadrant
+                    quad = ("N" if y < half_h else "S") + ("W" if x < half_w else "E")
+                    quad_stats[quad]["total"] += 1
+
+                    if passable > 0.5:
+                        passable_count += 1
+                        quad_stats[quad]["passable"] += 1
+                    else:
+                        water_count += 1
+
+                    if resource > 0:
+                        resource_cells.append((x, y, resource))
+                        quad_stats[quad]["resources"] += 1
+
+            # Passability
+            passable_ratio = passable_count / max(total_cells, 1)
+            result["passable_ratio"] = round(passable_ratio, 2)
+            result["has_water"] = water_count > (total_cells * 0.02)
+
+            # Map type
+            water_ratio = water_count / max(total_cells, 1)
+            if water_ratio > 0.4:
+                map_type = "island/naval"
+            elif water_ratio > 0.1:
+                map_type = "mixed terrain"
+            elif passable_ratio > 0.8:
+                map_type = "open land"
+            else:
+                map_type = "confined terrain"
+            result["map_type"] = map_type
+
+            # Cluster resource cells into patches using simple grid-based grouping
+            patches = []
+            if resource_cells:
+                visited = set()
+                for rx, ry, rd in resource_cells:
+                    if (rx, ry) in visited:
+                        continue
+                    # BFS to find connected resource cells (8-connectivity, radius 3)
+                    cluster = []
+                    queue = [(rx, ry)]
+                    visited.add((rx, ry))
+                    while queue:
+                        cx, cy = queue.pop(0)
+                        # Find density for this cell
+                        cell_density = 0
+                        for rcx, rcy, rcd in resource_cells:
+                            if rcx == cx and rcy == cy:
+                                cell_density = rcd
+                                break
+                        cluster.append((cx, cy, cell_density))
+                        for dx in range(-3, 4):
+                            for dy in range(-3, 4):
+                                nx, ny = cx + dx, cy + dy
+                                if (nx, ny) not in visited:
+                                    for rcx, rcy, rcd in resource_cells:
+                                        if rcx == nx and rcy == ny:
+                                            visited.add((nx, ny))
+                                            queue.append((nx, ny))
+                                            break
+
+                    if len(cluster) >= 2:  # Only report meaningful patches
+                        cx = sum(c[0] for c in cluster) // len(cluster)
+                        cy = sum(c[1] for c in cluster) // len(cluster)
+                        total_density = sum(c[2] for c in cluster)
+                        near_base = abs(cx - base_x) + abs(cy - base_y) < distance // 3
+                        patches.append({
+                            "center_x": cx,
+                            "center_y": cy,
+                            "cells": len(cluster),
+                            "total_density": round(total_density, 1),
+                            "near_base": near_base,
+                        })
+
+            # Sort patches: nearest to base first
+            patches.sort(key=lambda p: abs(p["center_x"] - base_x) + abs(p["center_y"] - base_y))
+            result["resource_patches"] = patches[:10]  # Cap at 10
+
+            # Quadrant summary
+            quadrant_summary = {}
+            for quad, stats in quad_stats.items():
+                total = max(stats["total"], 1)
+                note = ""
+                if quad == ("N" if base_y < half_h else "S") + ("W" if base_x < half_w else "E"):
+                    note = "your base area"
+                elif quad == ("N" if enemy_y < half_h else "S") + ("W" if enemy_x < half_w else "E"):
+                    note = "enemy base area"
+                quadrant_summary[quad] = {
+                    "passable_ratio": round(stats["passable"] / total, 2),
+                    "resource_cells": stats["resources"],
+                    "note": note,
+                }
+            result["quadrant_summary"] = quadrant_summary
+
+            # Strategic notes
+            notes = []
+            if result["has_water"]:
+                notes.append("Naval buildings possible — water detected on map")
+            else:
+                notes.append("Land-only map — skip naval buildings (spen/syrd)")
+            if patches:
+                nearest = patches[0]
+                dist_to_ore = abs(nearest["center_x"] - base_x) + abs(nearest["center_y"] - base_y)
+                notes.append(f"Nearest ore patch at ({nearest['center_x']},{nearest['center_y']}), "
+                           f"{dist_to_ore} cells from base, {nearest['cells']} resource cells")
+            if distance < 40:
+                notes.append("Short distance to enemy — expect early aggression, prioritize defense")
+            elif distance > 100:
+                notes.append("Long distance to enemy — time to build economy before attacking")
+            result["strategic_notes"] = notes
+
+            return result
+
+        @mcp.tool()
+        def batch_lookup(queries: list[dict]) -> dict:
+            """Look up multiple units, buildings, factions, or tech trees in one call.
+            Each query: {"type": "unit"|"building"|"faction"|"tech_tree", "name": "..."}
+            Example: [{"type":"unit","name":"3tnk"}, {"type":"building","name":"weap"}]
+            Returns all results at once — efficient for researching multiple items."""
+            results = []
+            for q in queries:
+                qtype = q.get("type", "").lower()
+                name = q.get("name", "")
+                if qtype == "unit":
+                    data = get_unit_stats(name)
+                    if data is None:
+                        results.append({"error": f"Unknown unit '{name}'", "query": q})
+                    else:
+                        results.append({"type": "unit", "name": name, **data})
+                elif qtype == "building":
+                    data = get_building_stats(name)
+                    if data is None:
+                        results.append({"error": f"Unknown building '{name}'", "query": q})
+                    else:
+                        results.append({"type": "building", "name": name, **data})
+                elif qtype == "faction":
+                    data = get_faction_info(name)
+                    if data is None:
+                        results.append({"error": f"Unknown faction '{name}'", "query": q})
+                    else:
+                        results.append({"type": "faction", **data})
+                elif qtype == "tech_tree":
+                    data = get_tech_tree(name)
+                    results.append({"type": "tech_tree", "name": name, **data})
+                else:
+                    results.append({"error": f"Unknown query type '{qtype}'", "query": q})
+            return {"results": results, "count": len(results)}
+
+        # ── Planning Phase Tools ────────────────────────────────────────
+
+        @mcp.tool()
+        def get_opponent_intel() -> dict:
+            """Get intelligence report on the opponent AI. Returns behavioral
+            profile, win rate, typical strategy, recommended counters, and
+            recent match history. Use this during planning to prepare your strategy."""
+            difficulty = env._config.bot_type  # "easy", "normal", "hard"
+            profile = get_opponent_profile(difficulty)
+            if profile is None:
+                return {
+                    "difficulty": difficulty,
+                    "note": "No detailed profile available for this opponent type.",
+                }
+            result = dict(profile)
+            result["your_faction"] = env._player_faction
+            result["enemy_faction"] = env._enemy_faction
+            return result
+
+        @mcp.tool()
+        def start_planning_phase() -> dict:
+            """Begin the pre-game planning phase. Returns map metadata, faction info,
+            opponent intelligence, tech tree, and available units/buildings.
+
+            During planning, use game knowledge tools (lookup_unit, lookup_building,
+            lookup_tech_tree, lookup_faction) and get_opponent_intel() to formulate
+            your strategy. End planning with end_planning_phase(strategy=...).
+
+            Planning has a turn limit and time limit. If exceeded, planning ends
+            automatically."""
+            if not env._planning_enabled:
+                return {
+                    "planning_enabled": False,
+                    "message": "Planning phase is disabled. Proceed directly to gameplay.",
+                }
+
+            if env._planning_active:
+                return {
+                    "error": "Planning phase already active.",
+                    "turns_used": env._planning_turns_used,
+                    "turns_remaining": max(0, env._planning_max_turns - env._planning_turns_used),
+                }
+
+            env._planning_active = True
+            env._planning_start_time = time.time()
+            env._planning_turns_used = 0
+            env._planning_strategy = ""
+
+            # Gather initial game metadata
+            env._refresh_obs()
+            obs = env._last_obs or {}
+
+            map_info = obs.get("map_info", {})
+            buildings = obs.get("buildings", [])
+            units = obs.get("units", [])
+
+            # Base position
+            all_positions = (
+                [(b["cell_x"], b["cell_y"]) for b in buildings]
+                + [(u["cell_x"], u["cell_y"]) for u in units]
+            )
+            if all_positions:
+                base_x = sum(p[0] for p in all_positions) // len(all_positions)
+                base_y = sum(p[1] for p in all_positions) // len(all_positions)
+            else:
+                base_x = map_info.get("width", 128) // 2
+                base_y = map_info.get("height", 128) // 2
+
+            # Enemy spawn estimate (opposite side of map)
+            map_w = map_info.get("width", 128)
+            map_h = map_info.get("height", 128)
+            enemy_x = max(2, min(map_w - 2, map_w - base_x))
+            enemy_y = max(2, min(map_h - 2, map_h - base_y))
+
+            # Faction and tech tree
+            faction = env._player_faction
+            enemy_faction = env._enemy_faction
+            faction_info = get_faction_info(faction) if faction else None
+            side = faction_info["side"] if faction_info else "unknown"
+            tech_tree = get_tech_tree(side) if side != "unknown" else {}
+
+            # Opponent intel
+            opponent_profile = get_opponent_profile(env._config.bot_type)
+            opponent_summary = get_opponent_summary(env._config.bot_type)
+
+            # Key units/buildings with full stats (top 8 by cost)
+            key_units = {}
+            key_buildings = {}
+            if side != "unknown":
+                all_units = get_all_units_for_side(side)
+                sorted_units = sorted(all_units.items(), key=lambda x: x[1].get("cost", 0), reverse=True)
+                for utype, udata in sorted_units[:8]:
+                    key_units[utype] = udata
+                all_bldgs = get_all_buildings_for_side(side)
+                sorted_bldgs = sorted(all_bldgs.items(), key=lambda x: x[1].get("cost", 0), reverse=True)
+                for btype, bdata in sorted_bldgs[:8]:
+                    key_buildings[btype] = bdata
+
+            return {
+                "planning_active": True,
+                "max_turns": env._planning_max_turns,
+                "max_time_seconds": env._planning_max_time_s,
+                "map": map_info,
+                "base_position": {"x": base_x, "y": base_y},
+                "enemy_estimated_position": {"x": enemy_x, "y": enemy_y},
+                "your_faction": faction,
+                "your_side": side,
+                "enemy_faction": enemy_faction,
+                "tech_tree": tech_tree,
+                "available_units": faction_info.get("available_units", []) if faction_info else [],
+                "available_buildings": faction_info.get("available_buildings", []) if faction_info else [],
+                "key_units": key_units,
+                "key_buildings": key_buildings,
+                "starting_units": [
+                    {"type": u["type"], "id": u["actor_id"], "cell_x": u["cell_x"], "cell_y": u["cell_y"]}
+                    for u in units
+                ],
+                "starting_buildings": [
+                    {"type": b["type"], "id": b["actor_id"], "cell_x": b["cell_x"], "cell_y": b["cell_y"]}
+                    for b in buildings
+                ],
+                "opponent_intel": opponent_profile,
+                "opponent_summary": opponent_summary,
+                "instructions": (
+                    "You are in PLANNING MODE. Formulate your strategy before the game begins. "
+                    "Use get_faction_briefing() for ALL unit/building stats in one call, "
+                    "get_map_analysis() for terrain/resource intel, "
+                    "and get_opponent_intel() for enemy behavioral profile. "
+                    "Use batch_lookup() to look up multiple items at once. "
+                    "When ready, call end_planning_phase(strategy='your strategy here') "
+                    "to begin gameplay."
+                ),
+            }
+
+        @mcp.tool()
+        def end_planning_phase(strategy: str = "") -> dict:
+            """End the planning phase and transition to gameplay.
+
+            Args:
+                strategy: Your formulated strategy as a text summary. This will be
+                         available as context during gameplay.
+
+            Returns game state summary to begin gameplay."""
+            if not env._planning_active:
+                return {
+                    "error": "No planning phase active.",
+                    "planning_enabled": env._planning_enabled,
+                }
+
+            elapsed = time.time() - env._planning_start_time
+            env._planning_active = False
+            env._planning_strategy = strategy.strip() if strategy else ""
+            env._planning_turns_used = env._planning_turns_used
+            env._state.planning_strategy = env._planning_strategy
+            env._state.planning_turns_used = env._planning_turns_used
+
+            # Get current game state to hand off
+            env._refresh_obs()
+            obs = env._last_obs or {}
+
+            return {
+                "planning_complete": True,
+                "planning_duration_seconds": round(elapsed, 1),
+                "planning_turns_used": env._planning_turns_used,
+                "strategy_recorded": bool(env._planning_strategy),
+                "strategy": env._planning_strategy,
+                "tick": obs.get("tick", 0),
+                "economy": obs.get("economy", {}),
+                "own_units": len(obs.get("units", [])),
+                "own_buildings": len(obs.get("buildings", [])),
+                "message": "Planning complete. Game is live. Deploy your MCV and execute your strategy!",
+            }
+
+        @mcp.tool()
+        def get_planning_status() -> dict:
+            """Check the status of the planning phase — turns used, time remaining."""
+            if not env._planning_enabled:
+                return {"planning_enabled": False}
+            if not env._planning_active:
+                return {
+                    "planning_active": False,
+                    "strategy": env._planning_strategy or "(none)",
+                }
+
+            elapsed = time.time() - env._planning_start_time
+            return {
+                "planning_active": True,
+                "turns_used": env._planning_turns_used,
+                "turns_remaining": max(0, env._planning_max_turns - env._planning_turns_used),
+                "time_elapsed_seconds": round(elapsed, 1),
+                "time_remaining_seconds": round(max(0, env._planning_max_time_s - elapsed), 1),
+            }
+
         # ── Action Tools (advance game state) ────────────────────────────
 
         @mcp.tool()
         def advance(ticks: int = 1) -> dict:
-            """Wait for the game to advance by the specified number of ticks.
-            The game runs at normal speed (~25 ticks/sec). Use this to let
-            time pass without issuing commands (e.g., while waiting for
-            production to complete). Returns updated game summary."""
+            """Wait for the game to advance by the specified number of ticks
+            (max 500 per call). The game runs at normal speed (~25 ticks/sec).
+            Use this to let time pass without issuing commands (e.g., while
+            waiting for production to complete). Returns updated game summary."""
+            requested = ticks
             ticks = max(1, min(ticks, 500))  # clamp to [1, 500]
             try:
                 future = asyncio.run_coroutine_threadsafe(
@@ -481,7 +1022,10 @@ class OpenRAEnvironment(MCPEnvironment):
                     raise
 
             env._state.game_tick = obs_dict["tick"]
-            return {
+            # Track losses and trigger auto-placement
+            env._update_loss_tracking()
+            env._process_pending_placements()
+            result = {
                 "tick": obs_dict["tick"],
                 "done": obs_dict["done"],
                 "result": obs_dict.get("result", ""),
@@ -490,65 +1034,98 @@ class OpenRAEnvironment(MCPEnvironment):
                 "own_buildings": len(obs_dict["buildings"]),
                 "visible_enemies": len(obs_dict["visible_enemies"]),
             }
+            if requested > 500:
+                result["note"] = f"Clamped from {requested} to 500 ticks (max per call)."
+            return result
 
         @mcp.tool()
         def move_units(unit_ids: str, target_x: int, target_y: int, queued: bool = False) -> dict:
             """Move units to a map cell position. Units pathfind automatically.
             unit_ids: comma-separated actor IDs (e.g. "145,146"), "all_combat", "all_idle", or a group name."""
             env._refresh_obs()
-            unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
-            if not unit_ids:
+            resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
+            if not resolved:
                 return {"error": "No matching units found"}
             commands = [
                 CommandModel(action=ActionType.MOVE, actor_id=uid, target_x=target_x, target_y=target_y, queued=queued)
-                for uid in unit_ids
+                for uid in resolved
             ]
-            return env._execute_commands(commands)
+            result = env._execute_commands(commands)
+            return env._add_unit_feedback(result, resolved)
 
         @mcp.tool()
         def attack_move(unit_ids: str, target_x: int, target_y: int, queued: bool = False) -> dict:
             """Move units toward a cell, attacking enemies encountered along the way.
             unit_ids: comma-separated actor IDs (e.g. "145,146"), "all_combat", "all_idle", or a group name."""
             env._refresh_obs()
-            unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
-            if not unit_ids:
+            resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
+            if not resolved:
                 return {"error": "No matching units found"}
             commands = [
                 CommandModel(action=ActionType.ATTACK_MOVE, actor_id=uid, target_x=target_x, target_y=target_y, queued=queued)
-                for uid in unit_ids
+                for uid in resolved
             ]
-            return env._execute_commands(commands)
+            result = env._execute_commands(commands)
+            return env._add_unit_feedback(result, resolved)
 
         @mcp.tool()
         def attack_target(unit_ids: str, target_actor_id: int, queued: bool = False) -> dict:
             """Order units to attack a specific enemy actor by ID.
             unit_ids: comma-separated actor IDs (e.g. "145,146"), "all_combat", "all_idle", or a group name."""
             env._refresh_obs()
-            unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
-            if not unit_ids:
+            resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
+            if not resolved:
                 return {"error": "No matching units found"}
             commands = [
                 CommandModel(action=ActionType.ATTACK, actor_id=uid, target_actor_id=target_actor_id, queued=queued)
-                for uid in unit_ids
+                for uid in resolved
             ]
-            return env._execute_commands(commands)
+            result = env._execute_commands(commands)
+            return env._add_unit_feedback(result, resolved)
 
         @mcp.tool()
         def stop_units(unit_ids: str) -> dict:
             """Stop units from their current activity.
             unit_ids: comma-separated actor IDs (e.g. "145,146"), "all_combat", "all_idle", or a group name."""
             env._refresh_obs()
-            unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
-            if not unit_ids:
+            resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
+            if not resolved:
                 return {"error": "No matching units found"}
-            commands = [CommandModel(action=ActionType.STOP, actor_id=uid) for uid in unit_ids]
-            return env._execute_commands(commands)
+            commands = [CommandModel(action=ActionType.STOP, actor_id=uid) for uid in resolved]
+            result = env._execute_commands(commands)
+            return env._add_unit_feedback(result, resolved)
 
         @mcp.tool()
         def build_unit(unit_type: str, count: int = 1) -> dict:
             """Start training units (infantry, vehicle, aircraft, ship).
             The unit_type is the internal name (e.g., 'e1', '3tnk', 'mig').
             Use count > 1 to queue multiple of the same type."""
+            # Validate against available production
+            env._refresh_obs()
+            if env._last_obs:
+                available = env._last_obs.get("available_production", [])
+                if available and unit_type not in available:
+                    all_buildings = get_all_building_types()
+                    avail_units = [u for u in available if u not in all_buildings]
+                    diag = env._diagnose_unavailable(unit_type)
+                    result = {
+                        "error": diag["reason"],
+                        "available_units": avail_units,
+                    }
+                    if "missing_prerequisites" in diag:
+                        result["missing_prerequisites"] = diag["missing_prerequisites"]
+                    return result
+                # Check funds
+                eco = env._last_obs.get("economy", {})
+                total_funds = eco.get("cash", 0) + eco.get("ore", 0)
+                unit_stats = get_unit_stats(unit_type)
+                unit_cost = unit_stats["cost"] if unit_stats else 0
+                if unit_cost > 0 and total_funds < unit_cost:
+                    return {
+                        "error": f"Insufficient funds: ${total_funds} available, "
+                                 f"{unit_type} costs ${unit_cost}. "
+                                 f"Build refinery or wait for income.",
+                    }
             count = max(1, min(count, 10))
             commands = [CommandModel(action=ActionType.TRAIN, item_type=unit_type)
                         for _ in range(count)]
@@ -563,6 +1140,18 @@ class OpenRAEnvironment(MCPEnvironment):
             # Reject if same building already in production queue
             env._refresh_obs()
             if env._last_obs:
+                available = env._last_obs.get("available_production", [])
+                if available and building_type not in available:
+                    all_buildings = get_all_building_types()
+                    avail_bldgs = [b for b in available if b in all_buildings]
+                    diag = env._diagnose_unavailable(building_type)
+                    result = {
+                        "error": diag["reason"],
+                        "available_buildings": avail_bldgs,
+                    }
+                    if "missing_prerequisites" in diag:
+                        result["missing_prerequisites"] = diag["missing_prerequisites"]
+                    return result
                 already = any(
                     p["queue_type"] in env._PLACEABLE_QUEUE_TYPES and p["item"] == building_type
                     for p in env._last_obs.get("production", [])
@@ -592,9 +1181,21 @@ class OpenRAEnvironment(MCPEnvironment):
             Coordinates are optional — the engine auto-finds a valid position
             near your base if omitted or invalid.
             This is the preferred way to build — no need to call place_building separately."""
-            # Reject if same building already in production queue
+            # Validate and reject duplicates
             env._refresh_obs()
             if env._last_obs:
+                available = env._last_obs.get("available_production", [])
+                if available and building_type not in available:
+                    all_buildings = get_all_building_types()
+                    avail_bldgs = [b for b in available if b in all_buildings]
+                    diag = env._diagnose_unavailable(building_type)
+                    result = {
+                        "error": diag["reason"],
+                        "available_buildings": avail_bldgs,
+                    }
+                    if "missing_prerequisites" in diag:
+                        result["missing_prerequisites"] = diag["missing_prerequisites"]
+                    return result
                 already = any(
                     p["queue_type"] in env._PLACEABLE_QUEUE_TYPES and p["item"] == building_type
                     for p in env._last_obs.get("production", [])
@@ -679,14 +1280,15 @@ class OpenRAEnvironment(MCPEnvironment):
             """Order units to guard another actor, following and protecting it.
             unit_ids: comma-separated actor IDs (e.g. "145,146"), "all_combat", "all_idle", or a group name."""
             env._refresh_obs()
-            unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
-            if not unit_ids:
+            resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
+            if not resolved:
                 return {"error": "No matching units found"}
             commands = [
                 CommandModel(action=ActionType.GUARD, actor_id=uid, target_actor_id=target_actor_id, queued=queued)
-                for uid in unit_ids
+                for uid in resolved
             ]
-            return env._execute_commands(commands)
+            result = env._execute_commands(commands)
+            return env._add_unit_feedback(result, resolved)
 
         @mcp.tool()
         def set_stance(unit_ids: str, stance: str) -> dict:
@@ -694,16 +1296,17 @@ class OpenRAEnvironment(MCPEnvironment):
             Stances: 'hold_fire' (0), 'return_fire' (1), 'defend' (2), 'attack_anything' (3).
             unit_ids: comma-separated actor IDs (e.g. "145,146"), "all_combat", "all_idle", or a group name."""
             env._refresh_obs()
-            unit_ids = env._resolve_unit_ids(unit_ids, env._last_obs or {})
-            if not unit_ids:
+            resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
+            if not resolved:
                 return {"error": "No matching units found"}
             stance_map = {"hold_fire": 0, "return_fire": 1, "defend": 2, "attack_anything": 3}
             stance_val = stance_map.get(stance.lower(), 3)
             commands = [
                 CommandModel(action=ActionType.SET_STANCE, actor_id=uid, target_x=stance_val)
-                for uid in unit_ids
+                for uid in resolved
             ]
-            return env._execute_commands(commands)
+            result = env._execute_commands(commands)
+            return env._add_unit_feedback(result, resolved)
 
         @mcp.tool()
         def harvest(unit_id: int, cell_x: int = 0, cell_y: int = 0) -> dict:
@@ -844,7 +1447,7 @@ class OpenRAEnvironment(MCPEnvironment):
             result = env._execute_commands(commands)
             result["group"] = group_name
             result["units_commanded"] = len(ids)
-            return result
+            return env._add_unit_feedback(result, ids)
 
         @mcp.tool()
         def get_replay_path() -> dict:
@@ -862,7 +1465,16 @@ class OpenRAEnvironment(MCPEnvironment):
             """Surrender / resign the current game. Ends the game as a loss.
             Use this when you want to concede the match."""
             commands = [CommandModel(action=ActionType.SURRENDER)]
-            return env._execute_commands(commands)
+            result = env._execute_commands(commands)
+            if not result.get("done"):
+                # Game may need a tick to process surrender
+                try:
+                    adv_result = advance(ticks=50)
+                    if adv_result.get("done"):
+                        return adv_result
+                except Exception:
+                    pass
+            return result
 
         @mcp.tool()
         def batch(actions: list[dict]) -> dict:
@@ -892,15 +1504,30 @@ class OpenRAEnvironment(MCPEnvironment):
             if obs.get("done"):
                 return {"error": "Game is over", "done": True, "result": obs.get("result", "")}
 
+            # Tools that cannot be batched (flow-control or read-only)
+            _BATCH_UNSUPPORTED = {
+                "advance", "get_game_state", "get_units", "get_buildings",
+                "get_terrain_at", "get_map_analysis", "get_valid_placements",
+                "lookup_unit", "lookup_building", "get_replay",
+                "surrender", "plan", "batch",
+            }
+
             all_commands = []
             action_names = []
             for action in actions:
+                tool = action.get("tool", "?")
+                if tool in _BATCH_UNSUPPORTED:
+                    action_names.append(f"{tool}:SKIPPED (use standalone)")
+                    continue
                 cmds = env._action_to_commands(action, obs)
-                all_commands.extend(cmds)
-                action_names.append(action.get("tool", "?"))
+                if cmds:
+                    all_commands.extend(cmds)
+                    action_names.append(tool)
+                else:
+                    action_names.append(f"{tool}:FAILED")
 
             if not all_commands:
-                return {"error": "No valid commands generated"}
+                return {"error": "No valid commands generated", "actions": action_names}
 
             try:
                 result = env._execute_commands(all_commands)
@@ -1031,15 +1658,17 @@ class OpenRAEnvironment(MCPEnvironment):
         """Resolve unit selectors to actual actor IDs.
 
         Accepts:
-          - list of ints: [145, 146] — returned as-is
+          - list of ints: [145, 146] — validated against living units
           - "all_combat": all units that can attack
           - "all_idle": idle units that can attack
           - group name: units in a named group
           - comma-separated IDs: "145,146,148"
           - stringified list: "[145, 146]"
         """
+        living_ids = {u["actor_id"] for u in obs.get("units", [])}
+
         if isinstance(selector, list):
-            return selector
+            return self._filter_living(selector, living_ids)
         if not isinstance(selector, str):
             return []
         selector = selector.strip()
@@ -1050,15 +1679,95 @@ class OpenRAEnvironment(MCPEnvironment):
                     if u.get("can_attack") and u.get("is_idle")]
         # Check named groups
         if selector in self._unit_groups:
-            return list(self._unit_groups[selector])
+            group_ids = list(self._unit_groups[selector])
+            return self._filter_living(group_ids, living_ids)
         # Parse string-encoded lists: "[145, 146]" or "145,146,148"
         cleaned = selector.strip("[] ")
         if cleaned:
             try:
-                return [int(x.strip()) for x in cleaned.split(",") if x.strip()]
+                parsed = [int(x.strip()) for x in cleaned.split(",") if x.strip()]
+                return self._filter_living(parsed, living_ids)
             except ValueError:
                 pass
         return []
+
+    def _filter_living(self, unit_ids: list[int], living_ids: set[int]) -> list[int]:
+        """Filter unit IDs to only those that are alive, warn about dead ones."""
+        alive = [uid for uid in unit_ids if uid in living_ids]
+        dead = [uid for uid in unit_ids if uid not in living_ids]
+        if dead:
+            self._placement_results.append(
+                f"DEAD UNITS: IDs {dead} not found — units were destroyed or invalid"
+            )
+        return alive
+
+    def _add_unit_feedback(self, result: dict, commanded_ids: list[int]) -> dict:
+        """Append commanded_units feedback to a tool result.
+
+        Looks up the commanded unit IDs in the latest observation and adds
+        their current position and activity so the agent can verify commands
+        were received and see where units are.
+        """
+        if not self._last_obs or not commanded_ids:
+            return result
+        units_by_id = {u["actor_id"]: u for u in self._last_obs.get("units", [])}
+        result["commanded_units"] = [
+            {
+                "id": uid,
+                "type": units_by_id[uid]["type"],
+                "cell_x": units_by_id[uid]["cell_x"],
+                "cell_y": units_by_id[uid]["cell_y"],
+                "activity": units_by_id[uid].get("current_activity", "Unknown"),
+            }
+            for uid in commanded_ids
+            if uid in units_by_id
+        ]
+        return result
+
+    def _diagnose_unavailable(self, item_type: str) -> dict:
+        """Diagnose why a unit/building is unavailable for production.
+
+        Returns a dict with 'reason' and optionally 'missing_prerequisites'.
+        """
+        stats = get_unit_stats(item_type) or get_building_stats(item_type)
+        if not stats:
+            return {"reason": f"'{item_type}' is not a known unit or building type."}
+
+        # Buildings require a Construction Yard to produce
+        if get_building_stats(item_type) and self._last_obs:
+            owned_types = {b["type"] for b in self._last_obs.get("buildings", [])}
+            if "fact" not in owned_types:
+                return {"reason": "No Construction Yard (fact) — deploy an MCV or you cannot build structures."}
+
+        prereqs = stats.get("prerequisites", [])
+        if not prereqs:
+            return {"reason": f"'{item_type}' is not available. Check your faction."}
+
+        # Check which prerequisite buildings we're missing
+        owned_types = set()
+        if self._last_obs:
+            owned_types = {b["type"] for b in self._last_obs.get("buildings", [])}
+
+        missing = []
+        for prereq in prereqs:
+            # Handle "barr|tent" style alternatives
+            alternatives = prereq.split("|")
+            if not any(alt in owned_types for alt in alternatives):
+                missing.append(prereq)
+
+        if missing:
+            missing_str = ", ".join(missing)
+            return {
+                "reason": f"'{item_type}' unavailable — requires {missing_str} which you don't have.",
+                "missing_prerequisites": missing,
+            }
+
+        # Prereqs are met but still unavailable — likely faction mismatch
+        side = stats.get("side", "")
+        if side:
+            return {"reason": f"'{item_type}' is not available for your faction (it's {side}-only)."}
+
+        return {"reason": f"'{item_type}' is not available. Check your faction and tech tree."}
 
     def _action_to_commands(self, action: dict, obs: dict) -> list[CommandModel]:
         """Convert a plan action dict to a list of CommandModel objects."""
@@ -1067,8 +1776,12 @@ class OpenRAEnvironment(MCPEnvironment):
         queued = action.get("queued", False)
 
         if tool == "build_unit":
+            unit_type = action.get("unit_type", "")
+            available = obs.get("available_production", [])
+            if available and unit_type not in available:
+                return []  # unavailable — batch() will mark as FAILED
             count = max(1, action.get("count", 1))
-            return [CommandModel(action=ActionType.TRAIN, item_type=action["unit_type"])
+            return [CommandModel(action=ActionType.TRAIN, item_type=unit_type)
                     for _ in range(count)]
         elif tool == "build_structure":
             return [CommandModel(action=ActionType.BUILD, item_type=action["building_type"])]
@@ -1227,6 +1940,47 @@ class OpenRAEnvironment(MCPEnvironment):
 
     _MAX_PLACEMENT_ATTEMPTS = 20
 
+    def _update_loss_tracking(self) -> None:
+        """Compare current buildings/units against previous snapshot, emit loss alerts."""
+        obs = self._last_obs
+        if obs is None:
+            return
+
+        # Current state
+        cur_buildings = {b["actor_id"]: b["type"] for b in obs.get("buildings", [])}
+        cur_units = {u["actor_id"]: u["type"] for u in obs.get("units", [])}
+
+        # Building losses
+        if self._prev_buildings:
+            for actor_id, btype in self._prev_buildings.items():
+                if actor_id not in cur_buildings:
+                    self._placement_results.append(f"DESTROYED: {btype}")
+
+        # Unit losses (summarized by type)
+        _DEPLOY_MAP = {"mcv": "fact"}  # unit type → building type it deploys into
+        if self._prev_unit_ids:
+            lost_ids = set(self._prev_unit_ids) - set(cur_units)
+            # Filter out deployments (MCV → Construction Yard)
+            new_btypes = set(cur_buildings.values()) - set((self._prev_buildings or {}).values())
+            for uid in list(lost_ids):
+                utype = self._prev_unit_ids[uid]
+                if utype in _DEPLOY_MAP and _DEPLOY_MAP[utype] in new_btypes:
+                    lost_ids.discard(uid)
+            # Filter out husk decay (wreckage disappearing, not a real loss)
+            lost_ids = {uid for uid in lost_ids
+                        if not self._prev_unit_ids[uid].endswith(".husk")}
+            if lost_ids:
+                from collections import Counter
+                lost_types = Counter(self._prev_unit_ids[uid] for uid in lost_ids)
+                breakdown = ", ".join(f"{cnt}x {t}" for t, cnt in lost_types.most_common())
+                self._placement_results.append(
+                    f"UNITS LOST: {len(lost_ids)} destroyed ({breakdown})"
+                )
+
+        # Update snapshots
+        self._prev_buildings = cur_buildings
+        self._prev_unit_ids = cur_units
+
     def _process_pending_placements(self) -> None:
         """Auto-place buildings that finished construction via build_and_place.
 
@@ -1300,6 +2054,16 @@ class OpenRAEnvironment(MCPEnvironment):
             if not ready:
                 continue
 
+            # Water buildings can't auto-place on land — warn and skip
+            if btype in self._WATER_BUILDINGS:
+                self._placement_results.append(
+                    f"WATER BUILDING: {btype} must be placed on water. "
+                    f"Call get_valid_placements(\"{btype}\") then place_building() manually, "
+                    f"or cancel_production(\"{btype}\") to unblock the queue."
+                )
+                self._pending_placements.pop(btype, None)
+                continue
+
             # Find best placement position using full CY radius search
             candidates = self._find_placement_candidates(btype, self._last_obs)
 
@@ -1341,6 +2105,10 @@ class OpenRAEnvironment(MCPEnvironment):
                 raise
             if not obs_dict.get("done"):
                 raise
+
+        # Track losses and trigger auto-placement
+        self._update_loss_tracking()
+        self._process_pending_placements()
 
         return {
             "tick": obs_dict["tick"],
@@ -1436,6 +2204,13 @@ class OpenRAEnvironment(MCPEnvironment):
         self._pending_placements.clear()
         self._attempted_placements.clear()
         self._placement_results.clear()
+        self._planning_active = False
+        self._planning_start_time = 0.0
+        self._planning_turns_used = 0
+        self._planning_strategy = ""
+        self._enemy_ever_seen = False
+        self._prev_buildings = {}
+        self._prev_unit_ids = {}
 
         # Update seed if provided
         if seed is not None:

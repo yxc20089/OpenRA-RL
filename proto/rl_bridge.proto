@@ -64,6 +64,11 @@ message RlMilitary {
   int32 buildings_lost = 4;
   int32 army_value = 5;
   int32 active_unit_count = 6;
+  int32 kills_cost = 7;        // Total cost value of enemy units/buildings killed
+  int32 deaths_cost = 8;       // Total cost value of own units/buildings lost
+  int32 assets_value = 9;      // Total value of all assets (units + buildings)
+  int32 experience = 10;       // Player experience points
+  int32 order_count = 11;      // Total orders issued
 }
 
 message RlUnitInfo {

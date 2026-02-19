@@ -68,7 +68,7 @@ barracks ~500 ticks, war factory ~750 ticks.
 
 **batch(actions)** — Send multiple commands simultaneously in one game tick.
 Example: batch([
-  {"tool": "build_unit", "unit_type": "3tnk", "count": 2},
+  {"tool": "build_unit", "unit_type": "e1", "count": 3},
   {"tool": "attack_move", "unit_ids": "all_combat", "target_x": 50, "target_y": 50}
 ])
 
@@ -89,15 +89,20 @@ Unit selectors: comma-separated IDs (e.g. "145,146"), "all_combat", "all_idle", 
 
 ## Game Knowledge Tools
 Use these to look up unit stats, building stats, and tech trees at any time:
-- **lookup_unit(unit_type)** — Get cost, HP, speed, armor, prerequisites for any unit (e.g. "3tnk", "e1")
-- **lookup_building(building_type)** — Get cost, HP, power, prerequisites for any building (e.g. "weap", "proc")
+- **get_faction_briefing()** — Get ALL units and buildings for your faction with full stats in one call. Best for planning.
+- **get_map_analysis()** — Get strategic map summary: resource patches, water, terrain, quadrant breakdown.
+- **batch_lookup(queries)** — Look up multiple items at once: [{"type":"unit","name":"3tnk"}, {"type":"building","name":"weap"}]
+- **lookup_unit(unit_type)** — Get stats for a single unit (e.g. "3tnk", "e1")
+- **lookup_building(building_type)** — Get stats for a single building (e.g. "weap", "proc")
 - **lookup_tech_tree(faction)** — Get the full build order and tech tree for "allied" or "soviet"
 - **lookup_faction(faction)** — Get all available units and buildings for a faction
 
 ## Game Mechanics
 
 **Economy**: Funds = cash + ore. Harvesters collect ore from the map. \
-Ore refineries (proc) come with one free harvester. More harvesters = faster income.
+Ore refineries (proc) come with one free harvester. More harvesters = faster income. \
+CRITICAL: Construction costs are paid incrementally — if you hit $0, ALL production \
+pauses until income resumes. Never let funds reach zero.
 
 **Power**: Buildings require power. Power plants (powr) provide +100. \
 When power demand exceeds supply, ALL production slows to 1/3 speed — \
@@ -109,11 +114,13 @@ war factory (weap) → vehicles. Multiple production buildings of the same \
 type speed up production. Queue items and advance() to let them finish.
 
 **Tech tree**: Higher-tier buildings unlock stronger units. \
-A war factory requires an ore refinery. The "Can build:" line in each \
-briefing shows what is currently available to produce.
+A war factory requires an ore refinery. Tanks require a Repair Facility (fix) \
+which requires a war factory. Build order for tanks: powr → barracks → proc → weap → fix → tanks. \
+The "Can build:" line in each briefing shows what is currently available to produce.
 
 **Unit strength**: Vehicles (tanks) are much stronger than infantry. \
-e1 costs $100, a heavy tank (3tnk) costs $950 but is far more powerful.
+e1 costs $100, a heavy tank (3tnk, Soviet) costs $950 but is far more powerful. \
+Allied uses light tanks (1tnk, $600). Only build units listed in your available_production.
 
 **Building placement**: build_and_place() handles placement automatically. \
 Buildings that need water (spen, syrd) will fail on land maps.
@@ -123,17 +130,22 @@ are cheap ground defense. SAM sites (sam/agun) defend against air. \
 If auto-placement fails, use get_valid_placements(building_type) to find \
 positions, then place_building(building_type, cell_x, cell_y) to place manually.
 
+**Rally points**: Use set_rally_point(building_id, x, y) after building a barracks \
+or war factory to auto-send new units to a staging area away from the building.
+
 **Air power**: Build a radar dome (dome), then an airfield (afld) or helipad \
 (hpad) to produce aircraft. MiGs and Hinds are powerful strike units. \
 Air units bypass ground defenses and can hit the enemy base directly.
 
 **Scouting**: Send a cheap unit (e1 or dog) to explore the map early. \
 Knowing the enemy's base location and army composition is critical. \
-Don't wait — scout within the first 500 ticks.
+Don't wait — scout within the first 500 ticks. Scout toward the opposite \
+corner from your base — enemies usually spawn there.
 
 **Expansion**: Build multiple ore refineries (proc) for faster income. \
 Each comes with a free harvester. 2-3 refineries is ideal. Ore patches \
-deplete over time, so expand to new areas.
+deplete over time, so expand to new areas. If ore storage is near capacity, \
+build a silo ($150) to avoid wasting harvester income.
 
 **Unit variety**: Don't just build one unit type. Mix tanks for armor, \
 rocket soldiers (e3) for anti-air, and engineers (e6) to capture enemy buildings. \
@@ -141,13 +153,26 @@ Soviet players can build attack dogs (fast, cheap scouts) from a kennel.
 
 ## Strategy Priorities
 1. Deploy MCV immediately, then power plant
-2. Build barracks, then scout with a cheap unit toward the enemy
-3. Build ore refinery for economy, then a second refinery later
-4. Build 1-2 defense turrets at your base entrance
-5. War factory → mix tanks and rocket soldiers
-6. Radar dome → airfield for air strikes (mid-game)
-7. Attack when you have 4+ tanks — don't hoard units at base
+2. Build barracks, then scout with a cheap unit toward the OPPOSITE corner
+3. Build ore refinery for economy — NEVER let cash hit $0
+4. Build second refinery BEFORE war factory (economy sustains everything)
+5. War factory → Repair Facility (fix) → tanks
+6. Build 1-2 defense turrets at your base entrance
+7. Radar dome → airfield for air strikes (mid-game)
+8. Attack when you have 4+ tanks — don't hoard units at base
 8. Expand: build a second ore refinery when funds allow
+
+## Pre-Game Planning Phase
+If planning is enabled, you get a PLANNING PHASE before gameplay begins. \
+During planning you receive map intel, faction info, and an opponent scouting \
+report with their behavioral tendencies, win rate, and recommended counters. \
+BE EFFICIENT with your planning turns — use bulk tools: \
+1. Call get_faction_briefing() for ALL your units and buildings with full stats. \
+2. Call get_map_analysis() for terrain, resource locations, and strategic notes. \
+3. Review the opponent intel provided by start_planning_phase. \
+4. Call end_planning_phase(strategy="your detailed strategy here") to begin gameplay. \
+Do NOT look up units one at a time — use get_faction_briefing() or batch_lookup() instead. \
+Planning has a turn limit — aim to finish in 3-4 turns max.
 
 ## Briefing Format
 Each turn briefing includes:
@@ -535,15 +560,143 @@ async def run_agent(
         # Initialize conversation
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        # Get initial state and compose pre-game briefing
+        # ─── Pre-Game Planning Phase ──────────────────────────────────
+        planning_strategy = ""
+        planning_status = await env.call_tool("get_planning_status")
+
+        if planning_status.get("planning_enabled", True) is not False:
+            print("Starting pre-game planning phase...")
+            planning_data = await env.call_tool("start_planning_phase")
+
+            if planning_data.get("planning_active"):
+                max_planning_turns = planning_data.get("max_turns", 10)
+                opponent_summary = planning_data.get("opponent_summary", "")
+
+                planning_prompt = (
+                    f"## PRE-GAME PLANNING PHASE\n"
+                    f"You have {max_planning_turns} turns to plan. Be efficient!\n\n"
+                    f"### Map Intel\n"
+                    f"Map: {planning_data.get('map', {}).get('map_name', '?')} "
+                    f"({planning_data.get('map', {}).get('width', '?')}x"
+                    f"{planning_data.get('map', {}).get('height', '?')})\n"
+                    f"Your base: ({planning_data.get('base_position', {}).get('x', '?')}, "
+                    f"{planning_data.get('base_position', {}).get('y', '?')})\n"
+                    f"Enemy estimated: ({planning_data.get('enemy_estimated_position', {}).get('x', '?')}, "
+                    f"{planning_data.get('enemy_estimated_position', {}).get('y', '?')})\n"
+                    f"Your faction: {planning_data.get('your_faction', '?')} ({planning_data.get('your_side', '?')})\n\n"
+                    f"### Opponent Intelligence\n{opponent_summary}\n\n"
+                    f"### How to Plan Efficiently\n"
+                    f"1. Call get_faction_briefing() — returns ALL your units and buildings with full stats\n"
+                    f"2. Call get_map_analysis() — returns terrain, resource locations, strategic notes\n"
+                    f"3. Review the opponent intel above and the key units/buildings data below\n"
+                    f"4. Call end_planning_phase(strategy='your detailed strategy') to begin gameplay\n\n"
+                    f"Do NOT look up units or buildings one at a time. "
+                    f"get_faction_briefing() gives you everything in one call. "
+                    f"You can also use batch_lookup() for targeted multi-item queries.\n\n"
+                    f"Think about: build order, unit composition, timing of attacks, "
+                    f"defense priorities, and how to counter the opponent's tendencies."
+                )
+                messages.append({"role": "user", "content": planning_prompt})
+
+                # Planning loop (bounded by max_planning_turns + margin)
+                planning_done = False
+                for planning_turn in range(max_planning_turns + 2):
+                    try:
+                        response = await chat_completion(messages, openai_tools, api_key, model, verbose)
+                    except (RuntimeError, httpx.ReadTimeout, httpx.ConnectTimeout):
+                        print("  [Planning] API error, ending planning phase.")
+                        break
+                    if response is None:
+                        break
+
+                    choice = response["choices"][0]
+                    assistant_msg = choice["message"]
+                    messages.append(assistant_msg)
+
+                    if verbose and assistant_msg.get("content"):
+                        print(f"  [Planning] {assistant_msg['content'][:200]}")
+
+                    tool_calls = assistant_msg.get("tool_calls", [])
+                    if not tool_calls:
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "Use game knowledge tools to research, then call "
+                                "end_planning_phase(strategy='...') when ready."
+                            ),
+                        })
+                        continue
+
+                    for tc in tool_calls:
+                        fn_name = tc["function"]["name"]
+                        try:
+                            fn_args = json.loads(tc["function"].get("arguments", "{}"))
+                        except (json.JSONDecodeError, TypeError):
+                            fn_args = {}
+
+                        if verbose:
+                            args_str = json.dumps(fn_args)
+                            if len(args_str) > 80:
+                                args_str = args_str[:80] + "..."
+                            print(f"  [Planning Tool] {fn_name}({args_str})")
+
+                        try:
+                            result = await env.call_tool(fn_name, **fn_args)
+                        except Exception as e:
+                            result = {"error": str(e)}
+
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": json.dumps(result) if not isinstance(result, str) else result,
+                        })
+
+                        # Check if planning ended
+                        if isinstance(result, dict):
+                            if result.get("planning_complete"):
+                                planning_strategy = result.get("strategy", "")
+                                planning_done = True
+                                if verbose:
+                                    print(f"  [Planning] Strategy: {planning_strategy[:150]}...")
+                            elif result.get("planning_expired"):
+                                planning_strategy = result.get("strategy", "")
+                                planning_done = True
+                                print(f"  [Planning] Expired: {result.get('reason', '?')}")
+
+                    if planning_done:
+                        break
+
+                if not planning_done:
+                    # Force end planning
+                    try:
+                        result = await env.call_tool(
+                            "end_planning_phase",
+                            strategy="(planning timed out, no explicit strategy)"
+                        )
+                        planning_strategy = result.get("strategy", "")
+                    except Exception:
+                        pass
+                    print("  Planning phase timed out, proceeding to gameplay.")
+
+                print(f"Planning phase complete. Strategy recorded: {bool(planning_strategy)}")
+            else:
+                if verbose:
+                    print(f"  Planning: {planning_data.get('message', 'skipped')}")
+
+        # ─── Game Start ───────────────────────────────────────────────
         state = await env.call_tool("get_game_state")
         briefing = compose_pregame_briefing(state)
+
+        strategy_section = ""
+        if planning_strategy:
+            strategy_section = f"\n\n## Your Pre-Game Strategy\n{planning_strategy}\n"
+
         messages.append({
             "role": "user",
             "content": (
-                f"Game started!\n\n{briefing}\n\n"
+                f"Game started!{strategy_section}\n\n{briefing}\n\n"
                 f"## Current State\n```json\n{json.dumps(state, indent=2)}\n```\n\n"
-                f"Deploy your MCV and start building. What's your first move?"
+                f"Deploy your MCV and start building. Execute your strategy!"
             ),
         })
 
@@ -718,17 +871,31 @@ async def run_agent(
         print(f"Agent finished after {total_api_calls} API calls, {total_tool_calls} tool calls")
         print(f"Time: {elapsed:.1f}s ({elapsed / max(total_api_calls, 1):.1f}s per API call)")
 
-        # Get final state
+        # Get final state and scorecard
         try:
             final = await env.call_tool("get_game_state")
-            print(f"Final tick: {final.get('tick', '?')}")
-            print(f"Result: {final.get('result', 'ongoing')}")
+            mil = final.get("military", {})
             eco = final.get("economy", {})
-            print(f"Cash: ${eco.get('cash', '?')}")
-            print(f"Units: {final.get('own_units', '?')} own, {final.get('visible_enemies', '?')} enemy")
-            print(f"Buildings: {final.get('own_buildings', '?')}")
-        except Exception:
-            pass
+            print(f"Result: {final.get('result', 'ongoing').upper()}")
+            print()
+            print("--- SCORECARD ---")
+            print(f"  Planning:         {'ON — ' + planning_strategy[:100] if planning_strategy else 'OFF'}")
+            print(f"  Ticks played:     {final.get('tick', '?')}")
+            print(f"  Units killed:     {mil.get('units_killed', 0)} (value: ${mil.get('kills_cost', 0)})")
+            print(f"  Units lost:       {mil.get('units_lost', 0)} (value: ${mil.get('deaths_cost', 0)})")
+            print(f"  Buildings killed: {mil.get('buildings_killed', 0)}")
+            print(f"  Buildings lost:   {mil.get('buildings_lost', 0)}")
+            print(f"  Army value:       ${mil.get('army_value', 0)}")
+            print(f"  Assets value:     ${mil.get('assets_value', 0)}")
+            print(f"  Experience:       {mil.get('experience', 0)}")
+            print(f"  Orders issued:    {mil.get('order_count', 0)}")
+            print(f"  Cash remaining:   ${eco.get('cash', 0)}")
+            print(f"  K/D cost ratio:   {mil.get('kills_cost', 0) / max(mil.get('deaths_cost', 1), 1):.2f}")
+            print(f"  Own units:        {final.get('own_units', '?')}")
+            print(f"  Own buildings:    {final.get('own_buildings', '?')}")
+            print()
+        except Exception as e:
+            print(f"  (could not get final state: {e})")
 
         # Get replay
         try:
