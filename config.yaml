@@ -1,0 +1,97 @@
+# OpenRA-RL Configuration
+# ========================
+# All values below show the built-in defaults (commented out).
+# Uncomment and change any value to override.
+# Environment variables always take highest priority (see docs for mapping).
+#
+# Precedence: env vars > CLI args > constructor args > this file > defaults
+
+# ── Game Engine ───────────────────────────────────────────────────────
+game:
+  openra_path: "/Users/berta/Projects/OpenRA-RL/OpenRA"  # Path to OpenRA installation ($OPENRA_PATH)
+#   mod: "ra"                         # Game mod (ra, cnc, d2k)
+#   map_name: "singles.oramap"        # Map to play
+#   grpc_port: 9999                   # gRPC bridge port
+#   headless: true                    # Use Null renderer (no GPU)
+#   record_replays: false             # Save .orarep replay files ($RECORD_REPLAYS)
+#   seed: null                        # RNG seed for reproducibility (null = random)
+#   max_ticks: 0                      # End game after N ticks (0 = unlimited)
+#   max_wall_time_s: 0                # End game after N seconds (0 = unlimited)
+
+# ── Opponent ──────────────────────────────────────────────────────────
+opponent:
+  bot_type: "easy"                    # AI difficulty: easy, normal, hard ($BOT_TYPE)
+  ai_slot: "Multi0"                   # AI player slot ($AI_SLOT)
+
+# ── Planning Phase ────────────────────────────────────────────────────
+# planning:
+#   enabled: true                     # Enable pre-game planning phase ($PLANNING_ENABLED)
+#   max_turns: 10                     # Max planning turns ($PLANNING_MAX_TURNS)
+#   max_time_s: 60.0                  # Max planning seconds ($PLANNING_MAX_TIME)
+
+# ── Reward Function ───────────────────────────────────────────────────
+# reward:
+#   survival: 0.001                   # Per-tick survival bonus
+#   economic_efficiency: 0.01         # Cash delta reward
+#   aggression: 0.1                   # Kill reward multiplier
+#   defense: 0.05                     # Loss penalty multiplier
+#   victory: 1.0                      # Terminal win reward
+#   defeat: -1.0                      # Terminal loss penalty
+
+# ── MCP Tools ─────────────────────────────────────────────────────────
+# tools:
+#   categories:                       # Toggle tool groups (true/false)
+#     read: true                      # get_game_state, get_economy, get_units, etc.
+#     knowledge: true                 # lookup_unit, lookup_building, etc.
+#     bulk_knowledge: true            # get_faction_briefing, get_map_analysis, batch_lookup
+#     planning: true                  # start/end_planning_phase, get_opponent_intel, etc.
+#     game_control: true              # advance
+#     movement: true                  # move_units, attack_move, attack_target, stop_units
+#     production: true                # build_unit, build_structure, build_and_place
+#     building_actions: true          # place, cancel, deploy, sell, repair, rally, etc.
+#     placement: true                 # get_valid_placements
+#     unit_groups: true               # assign_group, command_group, etc.
+#     compound: true                  # batch, plan
+#     utility: true                   # get_replay_path, surrender
+#     terrain: true                   # get_terrain_at
+#   disabled: []                      # Disable specific tools by name
+
+# ── Alerts ────────────────────────────────────────────────────────────
+# alerts:
+#   under_attack: true
+#   damaged_building: true
+#   low_power: true
+#   idle_funds: true
+#   ore_full: true
+#   idle_production: true
+#   production_stalled: true
+#   building_ready: true
+#   stance_warning: true
+#   idle_army: true
+#   no_defenses: true
+#   no_scouting: true
+#   loss_tracking: true
+
+# ── LLM Model ────────────────────────────────────────────────────────
+# llm:
+#   base_url: "https://openrouter.ai/api/v1/chat/completions"
+#   api_key: ""                       # Empty = not required (local models)
+#   model: "qwen/qwen3-coder-next"
+#   max_tokens: 1500
+#   temperature: null                 # null = provider default
+#   top_p: null                       # null = provider default
+#   keep_last_messages: 40            # History compression window
+#   max_retries: 4                    # Retry on transient errors
+#   retry_backoff_s: 10               # Base backoff (multiplied by attempt)
+#   request_timeout_s: 120.0          # HTTP timeout per request
+#   extra_headers:                    # Custom headers (OpenRouter-specific)
+#     HTTP-Referer: "https://github.com/openra-rl"
+#     X-Title: "OpenRA-RL Agent"
+
+# ── Agent Runtime ─────────────────────────────────────────────────────
+# agent:
+#   server_url: "http://localhost:8000"  # OpenRA-RL server ($OPENRA_URL)
+#   max_turns: 0                      # 0 = unlimited
+#   max_time_s: 1800                  # 30 minutes ($MAX_TIME)
+#   verbose: false
+#   log_file: ""                      # Log file path ($LLM_AGENT_LOG)

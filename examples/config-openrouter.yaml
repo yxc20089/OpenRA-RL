@@ -1,0 +1,13 @@
+# OpenRA-RL config for OpenRouter (cloud)
+# Usage: OPENROUTER_API_KEY=sk-or-... python examples/llm_agent.py --config examples/config-openrouter.yaml
+
+llm:
+  base_url: "https://openrouter.ai/api/v1/chat/completions"
+  model: "anthropic/claude-sonnet-4-20250514"
+  # api_key: set via OPENROUTER_API_KEY env var
+  extra_headers:
+    HTTP-Referer: "https://github.com/openra-rl"
+    X-Title: "OpenRA-RL Agent"
+
+agent:
+  max_time_s: 1800                    # 30 minutes
