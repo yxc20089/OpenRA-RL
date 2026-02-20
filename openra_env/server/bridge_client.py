@@ -85,12 +85,23 @@ class BridgeClient:
                     return False
         return False
 
+    @property
+    def session_started(self) -> bool:
+        """Whether the streaming session has been started."""
+        return self._session_call is not None
+
     async def start_session(self) -> rl_bridge_pb2.GameObservation:
         """Start a bidirectional streaming session and return the first observation.
 
         The game sends observations continuously; a background reader task
         keeps the latest observation cached. Actions are sent via step().
+
+        Idempotent: if the session is already started, returns the latest observation.
         """
+        if self._session_call is not None:
+            # Already started — return latest cached observation
+            return self._latest_obs
+
         if not self._connected:
             await self.connect()
 

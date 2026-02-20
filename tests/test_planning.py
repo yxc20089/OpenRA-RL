@@ -165,6 +165,9 @@ class TestPlanningTools:
 
         env._config = FakeConfig()
 
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
+
         from openra_env.models import OpenRAState
         env._state = OpenRAState()
 
@@ -252,7 +255,7 @@ class TestPlanningTools:
         if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
             count = len(mcp._tool_manager._tools)
             # Previous: 40 tools. Added: 4 planning + 3 bulk = 47
-            assert count == 47, f"Expected 47 tools, got {count}"
+            assert count == 48, f"Expected 48 tools, got {count}"
 
     def test_get_opponent_intel(self, env_with_obs):
         env, mcp = env_with_obs
@@ -471,6 +474,9 @@ class TestBulkKnowledgeTools:
 
         env._config = FakeConfig()
 
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
+
         from openra_env.models import OpenRAState
         env._state = OpenRAState()
 
@@ -535,7 +541,7 @@ class TestBulkKnowledgeTools:
         if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
             count = len(mcp._tool_manager._tools)
             # Previous: 44 tools. Added: 3 bulk tools = 47
-            assert count == 47, f"Expected 47 tools, got {count}"
+            assert count == 48, f"Expected 48 tools, got {count}"
 
     # ── get_faction_briefing ──
 

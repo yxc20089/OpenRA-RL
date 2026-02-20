@@ -1,0 +1,21 @@
+# OpenRA-RL config with minimal tool set
+# Reduces tool count for models with limited context or tool-calling ability.
+# Usage: python examples/llm_agent.py --config examples/config-minimal.yaml
+
+planning:
+  enabled: false
+
+tools:
+  categories:
+    knowledge: false                  # Disable lookup_unit, lookup_building, etc.
+    bulk_knowledge: false             # Disable get_faction_briefing, get_map_analysis, etc.
+    planning: false                   # Disabled automatically when planning.enabled=false
+    unit_groups: false                # Disable assign_group, command_group, etc.
+    terrain: false                    # Disable get_terrain_at
+    compound: false                   # Disable batch, plan
+
+alerts:
+  stance_warning: false
+  idle_army: false
+  no_scouting: false
+  no_defenses: false

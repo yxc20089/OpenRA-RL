@@ -228,6 +228,8 @@ class TestMCPToolRegistration:
     def env(self):
         """Create an OpenRAEnvironment instance (doesn't launch OpenRA)."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         # Manually initialize just the MCP parts
         from fastmcp import FastMCP
         mcp = FastMCP("openra-test")
@@ -249,6 +251,7 @@ class TestMCPToolRegistration:
         assert "get_enemies" in tool_names
         assert "get_production" in tool_names
         assert "get_map_info" in tool_names
+        assert "get_exploration_status" in tool_names
 
         # Knowledge tools
         assert "lookup_unit" in tool_names
@@ -281,8 +284,8 @@ class TestMCPToolRegistration:
         _, mcp = env
         if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
             count = len(mcp._tool_manager._tools)
-            # 7 read + 1 terrain + 4 knowledge + 3 bulk + 4 planning + 27 action + 1 replay = 47
-            assert count == 47, f"Expected 47 tools, got {count}"
+            # 7 read + 1 exploration + 1 terrain + 4 knowledge + 3 bulk + 4 planning + 27 action + 1 replay = 48
+            assert count == 48, f"Expected 48 tools, got {count}"
 
 
 class TestMCPReadTools:
@@ -292,6 +295,8 @@ class TestMCPReadTools:
     def env_with_obs(self):
         """Create env with a cached observation."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         from fastmcp import FastMCP
         mcp = FastMCP("openra-test")
         env._register_tools(mcp)
@@ -430,6 +435,8 @@ class TestMCPKnowledgeTools:
     @pytest.fixture
     def mcp(self):
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         from fastmcp import FastMCP
         mcp = FastMCP("openra-test")
         env._last_obs = None
@@ -695,6 +702,8 @@ class TestProductionValidation:
     def env_with_allied_obs(self):
         """Create env with Allied faction observation (has 1tnk, NOT 3tnk)."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         from fastmcp import FastMCP
         mcp = FastMCP("openra-test")
 
@@ -885,6 +894,8 @@ class TestOreCapAlert:
     def env_with_full_ore(self):
         """Create env with ore near capacity."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         from fastmcp import FastMCP
         mcp = FastMCP("openra-test")
 
@@ -995,6 +1006,8 @@ class TestWaterBuildingGuard:
     def env_with_water_building(self):
         """Create env with a completed spen in pending placements."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         from fastmcp import FastMCP
         mcp = FastMCP("openra-test")
 
@@ -1085,6 +1098,8 @@ class TestExecuteCommandsTriggersPlacement:
     def test_pending_placement_processed_via_execute_commands(self):
         """When _execute_commands runs, pending placements should be processed."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._pending_placements = {"powr": {"cell_x": 5, "cell_y": 5}}
         env._attempted_placements = {}
         env._placement_results = []
@@ -1162,6 +1177,8 @@ class TestDeadUnitFiltering:
     def env_with_units(self):
         """Create env with some living units."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._placement_results = []
         env._unit_groups = {"alpha": [10, 11, 99]}  # 99 is dead
         env._last_obs = {
@@ -1237,6 +1254,8 @@ class TestBuildUnitFundsCheck:
     def env_broke(self):
         """Create env with $0 funds."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         from fastmcp import FastMCP
         mcp = FastMCP("openra-test")
 
@@ -1326,6 +1345,8 @@ class TestStalledProductionAlert:
     def env_stalled(self):
         """Create env with stalled production and $0 funds."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         from fastmcp import FastMCP
         mcp = FastMCP("openra-test")
 
@@ -1456,6 +1477,8 @@ class TestBuildingStuckAlertText:
     def env_stuck_building(self):
         """Create env with a stuck building in attempted placements."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         from fastmcp import FastMCP
         mcp = FastMCP("openra-test")
 
@@ -1539,6 +1562,8 @@ class TestUnderAttackAlertCap:
     def env_base(self):
         """Create env with buildings and variable enemy counts."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         from fastmcp import FastMCP
         mcp = FastMCP("openra-test")
 
@@ -1670,6 +1695,8 @@ class TestLossTracking:
     def test_building_destroyed_alert(self):
         """DESTROYED alert fires when a building disappears between observations."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._placement_results = []
         env._prev_buildings = {1: "fact", 2: "weap", 3: "barr"}
         env._prev_unit_ids = {}
@@ -1688,6 +1715,8 @@ class TestLossTracking:
     def test_units_lost_alert(self):
         """UNITS LOST alert fires with type breakdown when units disappear."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._placement_results = []
         env._prev_buildings = {}
         env._prev_unit_ids = {10: "e1", 11: "e1", 12: "e3", 13: "3tnk", 14: "e1"}
@@ -1709,6 +1738,8 @@ class TestLossTracking:
     def test_no_losses_no_alert(self):
         """No losses → no alerts."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._placement_results = []
         env._prev_buildings = {1: "fact"}
         env._prev_unit_ids = {10: "e1"}
@@ -1722,6 +1753,8 @@ class TestLossTracking:
     def test_first_observation_no_alert(self):
         """First observation (empty prev) → no alerts, just snapshot."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._placement_results = []
         env._prev_buildings = {}
         env._prev_unit_ids = {}
@@ -1738,6 +1771,8 @@ class TestLossTracking:
     def test_multiple_buildings_destroyed(self):
         """Multiple buildings destroyed → multiple DESTROYED alerts."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._placement_results = []
         env._prev_buildings = {1: "fact", 2: "weap", 3: "barr", 4: "kenn"}
         env._prev_unit_ids = {}
@@ -1752,6 +1787,8 @@ class TestLossTracking:
     def test_snapshots_updated_after_tracking(self):
         """_prev_buildings and _prev_unit_ids updated after tracking."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._placement_results = []
         env._prev_buildings = {1: "fact", 2: "weap"}
         env._prev_unit_ids = {10: "e1"}
@@ -1771,6 +1808,8 @@ class TestPrereqDiagnosis:
     def env_no_kenn(self):
         """Create env without kennel — dog should explain missing prereq."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         from fastmcp import FastMCP
         mcp = FastMCP("openra-test")
 
@@ -1873,6 +1912,8 @@ class TestPrereqDiagnosis:
     def test_diagnose_unknown_type(self):
         """_diagnose_unavailable for unknown type returns generic message."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._last_obs = {"buildings": []}
         result = env._diagnose_unavailable("zzzz")
         assert "not a known" in result["reason"]
@@ -1888,6 +1929,8 @@ class TestUnitFeedback:
     def env_with_units(self):
         """Create env with units for move command testing."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         from fastmcp import FastMCP
         mcp = FastMCP("openra-test")
 
@@ -2065,6 +2108,8 @@ class TestFactDestroyedDiagnosis:
     def test_powr_without_fact(self):
         """build_and_place('powr') without fact says 'No Construction Yard'."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._last_obs = {
             "buildings": [
                 {"actor_id": 2, "type": "barr", "cell_x": 5, "cell_y": 5},
@@ -2077,6 +2122,8 @@ class TestFactDestroyedDiagnosis:
     def test_fact_present_uses_normal_diagnosis(self):
         """With fact present, _diagnose_unavailable uses normal prereq check."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._last_obs = {
             "buildings": [
                 {"actor_id": 1, "type": "fact", "cell_x": 5, "cell_y": 5},
@@ -2089,6 +2136,8 @@ class TestFactDestroyedDiagnosis:
     def test_afld_without_fact(self):
         """Any building type without fact should say 'No Construction Yard'."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._last_obs = {
             "buildings": [
                 {"actor_id": 2, "type": "barr", "cell_x": 5, "cell_y": 5},
@@ -2101,6 +2150,8 @@ class TestFactDestroyedDiagnosis:
     def test_unit_without_fact_still_normal(self):
         """Units (not buildings) should NOT get the fact check."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._last_obs = {
             "buildings": [
                 {"actor_id": 2, "type": "barr", "cell_x": 5, "cell_y": 5},
@@ -2121,6 +2172,8 @@ class TestBatchValidation:
     def env_with_batch(self):
         """Create env for batch testing."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         from fastmcp import FastMCP
         mcp = FastMCP("openra-test")
 
@@ -2232,6 +2285,8 @@ class TestLossTrackingFixes:
     def test_mcv_deploy_not_loss(self):
         """MCV disappearing + fact appearing should NOT trigger UNITS LOST."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._placement_results = []
         env._prev_buildings = {}
         env._prev_unit_ids = {120: "mcv"}
@@ -2246,6 +2301,8 @@ class TestLossTrackingFixes:
     def test_husk_decay_not_loss(self):
         """Husk disappearing should NOT trigger UNITS LOST."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._placement_results = []
         env._prev_buildings = {1: "fact"}
         env._prev_unit_ids = {200: "2tnk.husk"}
@@ -2260,6 +2317,8 @@ class TestLossTrackingFixes:
     def test_real_loss_still_tracked(self):
         """Actual unit destruction should still be tracked."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._placement_results = []
         env._prev_buildings = {1: "fact"}
         env._prev_unit_ids = {150: "e1", 151: "e1"}
@@ -2279,6 +2338,8 @@ class TestNoScoutingHistory:
     def test_no_scouting_fires_before_contact(self):
         """Alert fires when enemies never seen."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._enemy_ever_seen = False
         obs = {
             "tick": 1000,
@@ -2303,6 +2364,8 @@ class TestNoScoutingHistory:
     def test_no_scouting_suppressed_after_contact(self):
         """Alert suppressed once enemy has been seen."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._enemy_ever_seen = True  # enemy was seen before
         alerts = []
         obs = {"tick": 5000, "visible_enemies": [], "visible_enemy_buildings": []}
@@ -2330,6 +2393,8 @@ class TestTerrainNote:
         spatial = base64.b64encode(raw).decode()
 
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._last_obs = {
             "spatial_map": spatial,
             "map_info": {"width": 1, "height": 1},
@@ -2374,6 +2439,8 @@ class TestTerrainNote:
         spatial = base64.b64encode(raw).decode()
 
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         env._last_obs = {
             "spatial_map": spatial,
             "map_info": {"width": 1, "height": 1},
@@ -2413,6 +2480,8 @@ class TestAdvanceClamping:
     def env_with_advance(self):
         """Create env for advance testing with mocked bridge."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
         from fastmcp import FastMCP
         mcp = FastMCP("openra-test")
 
@@ -2487,3 +2556,470 @@ class TestAdvanceClamping:
         tool = mcp._tool_manager._tools["advance"]
         result = tool.fn(ticks=100)
         assert "note" not in result
+
+
+# ── Helpers for spatial data ────────────────────────────────────────────────
+
+
+def _make_spatial(width, height, channels=9, fog_values=None):
+    """Build a base64-encoded spatial map for testing.
+
+    fog_values: dict mapping (x, y) -> fog float (default 0.0 = shroud).
+    Channel 3 = passability (1.0 for all), channel 4 = fog.
+    """
+    import base64
+    import struct
+
+    data = []
+    for y in range(height):
+        for x in range(width):
+            cell = [0.0] * channels
+            cell[3] = 1.0  # passable
+            if fog_values and (x, y) in fog_values:
+                cell[4] = fog_values[(x, y)]
+            data.extend(cell)
+    raw = struct.pack(f"{len(data)}f", *data)
+    return base64.b64encode(raw).decode()
+
+
+def _make_env_with_tools(obs_dict):
+    """Create an env + mcp with tools registered and a given observation."""
+    env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+    from openra_env.config import OpenRARLConfig
+    env._app_config = OpenRARLConfig()
+    from fastmcp import FastMCP
+    mcp = FastMCP("openra-test")
+    env._last_obs = obs_dict
+    env._refresh_obs = lambda: None
+    env._planning_active = False
+    env._planning_strategy = ""
+    env._planning_enabled = False
+    env._planning_max_turns = 10
+    env._planning_max_time_s = 60.0
+    env._planning_start_time = 0.0
+    env._planning_turns_used = 0
+    env._pending_placements = {}
+    env._attempted_placements = {}
+    env._placement_results = []
+    env._player_faction = "russia"
+    env._last_production_progress = {}
+    env._prev_buildings = {}
+    env._prev_unit_ids = {}
+    env._unit_groups = {}
+    env._enemy_ever_seen = False
+    env._register_tools(mcp)
+    return env, mcp
+
+
+# ── Type-based unit selector tests ──────────────────────────────────────────
+
+
+class TestTypeBasedUnitSelectors:
+    """Test type: and category selectors in _resolve_unit_ids."""
+
+    def _make_obs(self):
+        return {
+            "units": [
+                {"actor_id": 1, "type": "e1", "is_idle": True, "can_attack": True},
+                {"actor_id": 2, "type": "e1", "is_idle": False, "can_attack": True},
+                {"actor_id": 3, "type": "e3", "is_idle": True, "can_attack": True},
+                {"actor_id": 4, "type": "1tnk", "is_idle": True, "can_attack": True},
+                {"actor_id": 5, "type": "2tnk", "is_idle": False, "can_attack": True},
+                {"actor_id": 6, "type": "harv", "is_idle": False, "can_attack": False},
+            ],
+        }
+
+    @pytest.fixture
+    def env(self):
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        env._unit_groups = {}
+        return env
+
+    def test_type_selector_e1(self, env):
+        obs = self._make_obs()
+        result = env._resolve_unit_ids("type:e1", obs)
+        assert sorted(result) == [1, 2]
+
+    def test_type_selector_1tnk(self, env):
+        obs = self._make_obs()
+        result = env._resolve_unit_ids("type:1tnk", obs)
+        assert result == [4]
+
+    def test_type_selector_nonexistent(self, env):
+        obs = self._make_obs()
+        result = env._resolve_unit_ids("type:zzz", obs)
+        assert result == []
+
+    def test_type_selector_with_spaces(self, env):
+        obs = self._make_obs()
+        result = env._resolve_unit_ids("type: e1 ", obs)
+        assert sorted(result) == [1, 2]
+
+    def test_all_infantry(self, env):
+        obs = self._make_obs()
+        result = env._resolve_unit_ids("all_infantry", obs)
+        # e1(1,2) and e3(3) are infantry
+        assert sorted(result) == [1, 2, 3]
+
+    def test_all_vehicles(self, env):
+        obs = self._make_obs()
+        result = env._resolve_unit_ids("all_vehicles", obs)
+        # 1tnk(4), 2tnk(5), harv(6) are vehicles
+        assert sorted(result) == [4, 5, 6]
+
+    def test_all_aircraft_empty(self, env):
+        obs = self._make_obs()
+        result = env._resolve_unit_ids("all_aircraft", obs)
+        assert result == []
+
+    def test_all_ships_empty(self, env):
+        obs = self._make_obs()
+        result = env._resolve_unit_ids("all_ships", obs)
+        assert result == []
+
+
+# ── Exploration stats in get_map_analysis tests ─────────────────────────────
+
+
+class TestMapAnalysisExploration:
+    """Test that get_map_analysis includes exploration stats."""
+
+    def test_exploration_stats_present(self):
+        """get_map_analysis should include exploration section."""
+        # 4x4 map, all fog = 1.0 (visible)
+        fog = {(x, y): 1.0 for x in range(4) for y in range(4)}
+        spatial = _make_spatial(4, 4, fog_values=fog)
+        obs = {
+            "units": [],
+            "buildings": [{"cell_x": 1, "cell_y": 1}],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 4, "height": 4, "map_name": "Test"},
+            "spatial_map": spatial,
+            "spatial_channels": 9,
+        }
+        _, mcp = _make_env_with_tools(obs)
+        tool = mcp._tool_manager._tools["get_map_analysis"]
+        result = tool.fn()
+        assert "exploration" in result
+        assert result["exploration"]["explored_percent"] == 100.0
+        assert result["exploration"]["unexplored_percent"] == 0.0
+        assert result["exploration"]["visible_percent"] == 100.0
+
+    def test_exploration_partial(self):
+        """Half-explored map should show ~50%."""
+        # 4x4 map, top half (y<2) visible, bottom half shroud
+        fog = {}
+        for y in range(4):
+            for x in range(4):
+                fog[(x, y)] = 1.0 if y < 2 else 0.0
+        spatial = _make_spatial(4, 4, fog_values=fog)
+        obs = {
+            "units": [],
+            "buildings": [{"cell_x": 1, "cell_y": 1}],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 4, "height": 4, "map_name": "Test"},
+            "spatial_map": spatial,
+            "spatial_channels": 9,
+        }
+        _, mcp = _make_env_with_tools(obs)
+        tool = mcp._tool_manager._tools["get_map_analysis"]
+        result = tool.fn()
+        assert result["exploration"]["explored_percent"] == 50.0
+
+    def test_quadrant_explored_percent(self):
+        """Quadrant summary should include explored_percent."""
+        fog = {(x, y): 1.0 for x in range(4) for y in range(4)}
+        spatial = _make_spatial(4, 4, fog_values=fog)
+        obs = {
+            "units": [],
+            "buildings": [{"cell_x": 1, "cell_y": 1}],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 4, "height": 4, "map_name": "Test"},
+            "spatial_map": spatial,
+            "spatial_channels": 9,
+        }
+        _, mcp = _make_env_with_tools(obs)
+        tool = mcp._tool_manager._tools["get_map_analysis"]
+        result = tool.fn()
+        for quad in ["NW", "NE", "SW", "SE"]:
+            assert "explored_percent" in result["quadrant_summary"][quad]
+            assert result["quadrant_summary"][quad]["explored_percent"] == 100.0
+
+    def test_no_spatial_data_no_exploration(self):
+        """Without spatial data, exploration section should not appear."""
+        obs = {
+            "units": [],
+            "buildings": [{"cell_x": 1, "cell_y": 1}],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 4, "height": 4, "map_name": "Test"},
+            "spatial_map": "",
+            "spatial_channels": 0,
+        }
+        _, mcp = _make_env_with_tools(obs)
+        tool = mcp._tool_manager._tools["get_map_analysis"]
+        result = tool.fn()
+        assert "exploration" not in result
+
+
+# ── get_exploration_status tests ────────────────────────────────────────────
+
+
+class TestExplorationStatus:
+    """Test the get_exploration_status tool."""
+
+    def test_fully_explored(self):
+        """Fully visible map returns 100% explored."""
+        fog = {(x, y): 1.0 for x in range(4) for y in range(4)}
+        spatial = _make_spatial(4, 4, fog_values=fog)
+        obs = {
+            "units": [
+                {"actor_id": 1, "type": "e1", "cell_x": 1, "cell_y": 1,
+                 "is_idle": True, "can_attack": True},
+            ],
+            "buildings": [{"cell_x": 1, "cell_y": 1}],
+            "visible_enemies": [{"actor_id": 99}],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 4, "height": 4, "map_name": "Test"},
+            "spatial_map": spatial,
+            "spatial_channels": 9,
+        }
+        env, mcp = _make_env_with_tools(obs)
+        env._enemy_ever_seen = True
+        tool = mcp._tool_manager._tools["get_exploration_status"]
+        result = tool.fn()
+        assert result["explored_percent"] == 100.0
+        assert result["unexplored_percent"] == 0.0
+        assert result["enemy_found"] is True
+        assert result["enemy_currently_visible"] == 1
+
+    def test_unexplored(self):
+        """All-shroud map returns 0% explored."""
+        # All fog=0.0 (default)
+        spatial = _make_spatial(4, 4)
+        obs = {
+            "units": [],
+            "buildings": [{"cell_x": 1, "cell_y": 1}],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 4, "height": 4, "map_name": "Test"},
+            "spatial_map": spatial,
+            "spatial_channels": 9,
+        }
+        _, mcp = _make_env_with_tools(obs)
+        tool = mcp._tool_manager._tools["get_exploration_status"]
+        result = tool.fn()
+        assert result["explored_percent"] == 0.0
+        assert result["unexplored_percent"] == 100.0
+        assert result["enemy_found"] is False
+
+    def test_quadrant_exploration(self):
+        """Per-quadrant exploration should be reported."""
+        # Only NW quadrant explored (x<2, y<2)
+        fog = {}
+        for y in range(4):
+            for x in range(4):
+                fog[(x, y)] = 1.0 if (x < 2 and y < 2) else 0.0
+        spatial = _make_spatial(4, 4, fog_values=fog)
+        obs = {
+            "units": [],
+            "buildings": [{"cell_x": 1, "cell_y": 1}],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 4, "height": 4, "map_name": "Test"},
+            "spatial_map": spatial,
+            "spatial_channels": 9,
+        }
+        _, mcp = _make_env_with_tools(obs)
+        tool = mcp._tool_manager._tools["get_exploration_status"]
+        result = tool.fn()
+        assert result["quadrant_exploration"]["NW"]["explored_percent"] == 100.0
+        assert result["quadrant_exploration"]["NE"]["explored_percent"] == 0.0
+        assert result["quadrant_exploration"]["SW"]["explored_percent"] == 0.0
+        assert result["quadrant_exploration"]["SE"]["explored_percent"] == 0.0
+
+    def test_idle_counts(self):
+        """idle_combat_count and idle_infantry_count are correct."""
+        spatial = _make_spatial(4, 4)
+        obs = {
+            "units": [
+                {"actor_id": 1, "type": "e1", "cell_x": 1, "cell_y": 1,
+                 "is_idle": True, "can_attack": True},
+                {"actor_id": 2, "type": "e1", "cell_x": 2, "cell_y": 1,
+                 "is_idle": True, "can_attack": True},
+                {"actor_id": 3, "type": "1tnk", "cell_x": 3, "cell_y": 1,
+                 "is_idle": True, "can_attack": True},
+                {"actor_id": 4, "type": "harv", "cell_x": 1, "cell_y": 3,
+                 "is_idle": False, "can_attack": False},
+            ],
+            "buildings": [{"cell_x": 1, "cell_y": 1}],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 4, "height": 4, "map_name": "Test"},
+            "spatial_map": spatial,
+            "spatial_channels": 9,
+        }
+        _, mcp = _make_env_with_tools(obs)
+        tool = mcp._tool_manager._tools["get_exploration_status"]
+        result = tool.fn()
+        assert result["idle_combat_count"] == 3  # e1, e1, 1tnk
+        assert result["idle_infantry_count"] == 2  # e1, e1
+
+    def test_base_position(self):
+        """Base position is computed from units+buildings."""
+        spatial = _make_spatial(8, 8)
+        obs = {
+            "units": [
+                {"actor_id": 1, "type": "e1", "cell_x": 2, "cell_y": 2,
+                 "is_idle": True, "can_attack": True},
+            ],
+            "buildings": [{"cell_x": 4, "cell_y": 4}],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 8, "height": 8, "map_name": "Test"},
+            "spatial_map": spatial,
+            "spatial_channels": 9,
+        }
+        _, mcp = _make_env_with_tools(obs)
+        tool = mcp._tool_manager._tools["get_exploration_status"]
+        result = tool.fn()
+        assert result["base_position"] == {"x": 3, "y": 3}  # avg of (2,2) and (4,4)
+
+    def test_no_spatial_data(self):
+        """Without spatial data, returns 0% explored."""
+        obs = {
+            "units": [],
+            "buildings": [{"cell_x": 1, "cell_y": 1}],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 4, "height": 4, "map_name": "Test"},
+            "spatial_map": "",
+            "spatial_channels": 0,
+        }
+        _, mcp = _make_env_with_tools(obs)
+        tool = mcp._tool_manager._tools["get_exploration_status"]
+        result = tool.fn()
+        assert result["explored_percent"] == 0.0
+        assert result["quadrant_exploration"] == {}
+
+
+# ── Factual NO_SCOUTING alert tests ────────────────────────────────────────
+
+
+class TestFactualNoScoutingAlert:
+    """NO_SCOUTING alert should be fact-based, not prescriptive."""
+
+    def _make_obs_with_fog(self, tick=1000, fog_values=None, units=None):
+        spatial = _make_spatial(4, 4, fog_values=fog_values or {})
+        return {
+            "tick": tick,
+            "done": False,
+            "result": "",
+            "economy": {
+                "cash": 5000, "ore": 1000, "power_provided": 200,
+                "power_drained": 80, "resource_capacity": 5000, "harvester_count": 1,
+            },
+            "military": {
+                "units_killed": 0, "units_lost": 0, "buildings_killed": 0,
+                "buildings_lost": 0, "army_value": 0, "active_unit_count": 0,
+            },
+            "units": units or [
+                {"actor_id": 1, "type": "e1", "cell_x": 1, "cell_y": 1,
+                 "pos_x": 1024, "pos_y": 1024, "hp_percent": 1.0,
+                 "is_idle": True, "current_activity": "", "owner": "Multi1",
+                 "can_attack": True, "facing": 0, "experience_level": 0,
+                 "stance": 3, "speed": 56, "attack_range": 5120,
+                 "passenger_count": -1, "is_building": False},
+            ],
+            "buildings": [
+                {"actor_id": 100, "type": "fact", "pos_x": 2048, "pos_y": 2048,
+                 "hp_percent": 1.0, "owner": "Multi1", "is_producing": False,
+                 "production_progress": 0.0, "producing_item": "", "is_powered": True,
+                 "is_repairing": False, "sell_value": 500, "rally_x": -1, "rally_y": -1,
+                 "power_amount": 0, "can_produce": ["powr"], "cell_x": 2, "cell_y": 2},
+            ],
+            "production": [],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 4, "height": 4, "map_name": "Test"},
+            "spatial_map": _make_spatial(4, 4, fog_values=fog_values or {}),
+            "spatial_channels": 9,
+            "available_production": ["e1"],
+        }
+
+    def test_no_scouting_alert_is_factual(self):
+        """Alert should state facts: % explored and idle count."""
+        obs = self._make_obs_with_fog(tick=1000)
+        env, mcp = _make_env_with_tools(obs)
+        tool = mcp._tool_manager._tools["get_game_state"]
+        result = tool.fn()
+        scouting_alerts = [a for a in result["alerts"] if "NO SCOUTING" in a]
+        assert len(scouting_alerts) == 1
+        alert = scouting_alerts[0]
+        # Should contain factual info
+        assert "enemy not found" in alert
+        assert "% of map explored" in alert
+        assert "idle combat units available" in alert
+        # Should NOT contain prescriptive language
+        assert "send a unit" not in alert
+        assert "explore the map" not in alert.replace("% of map explored", "")
+
+    def test_no_scouting_alert_shows_exploration_percent(self):
+        """Alert should show actual exploration percentage."""
+        # Half map explored
+        fog = {}
+        for y in range(4):
+            for x in range(4):
+                fog[(x, y)] = 1.0 if y < 2 else 0.0
+        obs = self._make_obs_with_fog(tick=1000, fog_values=fog)
+        env, mcp = _make_env_with_tools(obs)
+        tool = mcp._tool_manager._tools["get_game_state"]
+        result = tool.fn()
+        scouting_alerts = [a for a in result["alerts"] if "NO SCOUTING" in a]
+        assert len(scouting_alerts) == 1
+        assert "50.0%" in scouting_alerts[0]
+
+    def test_no_scouting_suppressed_after_enemy_found(self):
+        """Alert should not appear after enemy has been seen."""
+        obs = self._make_obs_with_fog(tick=1000)
+        env, mcp = _make_env_with_tools(obs)
+        env._enemy_ever_seen = True
+        tool = mcp._tool_manager._tools["get_game_state"]
+        result = tool.fn()
+        scouting_alerts = [a for a in result["alerts"] if "NO SCOUTING" in a]
+        assert len(scouting_alerts) == 0
+
+    def test_no_scouting_suppressed_early(self):
+        """Alert should not appear before tick 750."""
+        obs = self._make_obs_with_fog(tick=500)
+        _, mcp = _make_env_with_tools(obs)
+        tool = mcp._tool_manager._tools["get_game_state"]
+        result = tool.fn()
+        scouting_alerts = [a for a in result["alerts"] if "NO SCOUTING" in a]
+        assert len(scouting_alerts) == 0
+
+
+# ── Tool registration test for get_exploration_status ───────────────────────
+
+
+class TestExplorationStatusRegistration:
+    """get_exploration_status should be registered as a read tool."""
+
+    def test_registered(self):
+        obs = {
+            "units": [], "buildings": [{"cell_x": 1, "cell_y": 1}],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+            "map_info": {"width": 4, "height": 4, "map_name": "Test"},
+            "spatial_map": "", "spatial_channels": 0,
+        }
+        _, mcp = _make_env_with_tools(obs)
+        tool_names = set(mcp._tool_manager._tools.keys())
+        assert "get_exploration_status" in tool_names
+
+    def test_in_config_categories(self):
+        from openra_env.config import TOOL_CATEGORIES
+        assert "get_exploration_status" in TOOL_CATEGORIES
+        assert TOOL_CATEGORIES["get_exploration_status"] == "read"
