@@ -10,7 +10,10 @@
 
 services:
   openra-rl:
-    image: openra-rl
+    image: ${OPENRA_RL_IMAGE:-ghcr.io/yxc20089/openra-rl:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
       - "8000:8000"   # OpenEnv HTTP API
       - "9999:9999"   # gRPC bridge (direct access)
