@@ -1,7 +1,7 @@
 [project]
-name = "openra-env"
-version = "0.1.0"
-description = "OpenRA Reinforcement Learning Environment - Gymnasium-style RL environment for the OpenRA RTS engine"
+name = "openra-rl"
+version = "0.2.0"
+description = "Play Red Alert with AI agents — LLMs, scripted bots, or RL"
 readme = "README.md"
 license = {text = "GPL-3.0"}
 requires-python = ">=3.10"
@@ -14,7 +14,15 @@ dependencies = [
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
     "pyyaml>=6.0",
+    "mcp>=1.2.0",
+    "httpx>=0.24.0",
+    "python-dotenv>=1.0.0",
+    "websockets>=12.0",
 ]
+
+[project.scripts]
+openra-rl = "openra_env.cli.main:main"
+openra-rl-mcp = "openra_env.mcp_server:main"
 
 [project.optional-dependencies]
 dev = [
