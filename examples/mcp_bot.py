@@ -429,9 +429,10 @@ class MCPBot:
             enemy = enemies["units"][0]
             nearby = [u for u in idle_fighters[:3] if u["can_attack"]]
             if nearby:
+                nearby_ids = ",".join(str(u["actor_id"]) for u in nearby)
                 await self.call(
                     "attack_target",
-                    unit_ids=",".join(str(u["actor_id"]) for u in nearby),
+                    unit_ids=nearby_ids,
                     target_actor_id=enemy["actor_id"],
                 )
 
