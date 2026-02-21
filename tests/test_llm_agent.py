@@ -1,12 +1,6 @@
 """Tests for llm_agent helper functions."""
 
-import sys
-from pathlib import Path
-
-# Add examples/ to path so we can import llm_agent
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples"))
-
-from llm_agent import _sanitize_messages
+from openra_env.agent import _sanitize_messages
 
 
 class TestSanitizeMessages:
