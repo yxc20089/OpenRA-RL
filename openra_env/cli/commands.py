@@ -4,7 +4,7 @@ import shutil
 import sys
 from typing import Optional
 
-from openra_env.cli.console import dim, error, header, info, step, success, warn
+from openra_env.cli.console import dim, error, header, info, success, warn
 from openra_env.cli import docker_manager as docker
 from openra_env.cli.wizard import (
     CONFIG_PATH,
@@ -12,7 +12,6 @@ from openra_env.cli.wizard import (
     load_saved_config,
     merge_cli_into_config,
     run_wizard,
-    save_config,
 )
 
 

@@ -6,7 +6,7 @@ import sys
 import time
 from typing import Optional
 
-from openra_env.cli.console import error, info, step, success, warn
+from openra_env.cli.console import error, info, step, success
 
 IMAGE = "ghcr.io/yxc20089/openra-rl:latest"
 CONTAINER_NAME = "openra-rl-server"
