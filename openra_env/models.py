@@ -88,6 +88,11 @@ class MilitaryInfo(Action):
     buildings_lost: int = Field(default=0, description="Own buildings lost")
     army_value: int = Field(default=0, description="Total value of active army")
     active_unit_count: int = Field(default=0, description="Number of active units")
+    kills_cost: int = Field(default=0, description="Total cost of enemy units/buildings killed")
+    deaths_cost: int = Field(default=0, description="Total cost of own units/buildings lost")
+    assets_value: int = Field(default=0, description="Total value of all assets (units + buildings)")
+    experience: int = Field(default=0, description="Player experience points")
+    order_count: int = Field(default=0, description="Total orders issued")
 
 
 class UnitInfoModel(Action):
@@ -203,6 +208,8 @@ class OpenRAState(State):
     game_tick: int = Field(default=0, description="Current game tick")
     map_name: str = Field(default="", description="Active map name")
     opponent_type: str = Field(default="bot_normal", description="Opponent type: bot_easy, bot_normal, bot_hard")
+    planning_strategy: str = Field(default="", description="Agent's pre-game strategy if planning was used")
+    planning_turns_used: int = Field(default=0, description="Number of planning turns used")
 
     # Inherited from State:
     # episode_id: Optional[str] = None

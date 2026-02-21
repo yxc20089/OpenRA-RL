@@ -166,8 +166,8 @@ RA_UNITS: dict[str, dict] = {
         "speed": 72,
         "armor": "heavy",
         "side": "allied",
-        "prerequisites": ["weap"],
-        "description": "Main battle tank. Balanced stats. Allied only.",
+        "prerequisites": ["weap", "fix"],
+        "description": "Main battle tank. Balanced stats. Allied only. Requires Repair Facility.",
     },
     "3tnk": {
         "name": "Heavy Tank",
@@ -177,8 +177,8 @@ RA_UNITS: dict[str, dict] = {
         "speed": 64,
         "armor": "heavy",
         "side": "soviet",
-        "prerequisites": ["weap"],
-        "description": "Powerful main battle tank. Dual cannons. Soviet only.",
+        "prerequisites": ["weap", "fix"],
+        "description": "Powerful main battle tank. Dual cannons. Soviet only. Requires Repair Facility.",
     },
     "4tnk": {
         "name": "Mammoth Tank",
@@ -188,7 +188,7 @@ RA_UNITS: dict[str, dict] = {
         "speed": 43,
         "armor": "heavy",
         "side": "soviet",
-        "prerequisites": ["weap", "stek"],
+        "prerequisites": ["weap", "fix", "stek"],
         "description": "Heaviest tank. Dual cannons + missiles. Self-healing. Soviet only.",
     },
     "v2rl": {
@@ -220,9 +220,9 @@ RA_UNITS: dict[str, dict] = {
         "hp": 20000,
         "speed": 128,
         "armor": "heavy",
-        "side": "both",
+        "side": "soviet",
         "prerequisites": ["weap"],
-        "description": "Armored troop transport. Carries 5 infantry.",
+        "description": "Armored troop transport. Carries 5 infantry. Soviet only.",
     },
     "arty": {
         "name": "Artillery",
@@ -954,3 +954,31 @@ def get_all_unit_types() -> list[str]:
 def get_all_building_types() -> list[str]:
     """Get all available building type names."""
     return sorted(RA_BUILDINGS.keys())
+
+
+def get_all_units_for_side(side: str) -> dict[str, dict]:
+    """Get all units available to a side ('allied' or 'soviet') with full stats.
+
+    Returns dict keyed by unit type name, each value is the full stats dict.
+    Includes units with side='both' plus units specific to the given side.
+    """
+    side = side.lower()
+    return {
+        utype: dict(data)
+        for utype, data in RA_UNITS.items()
+        if data.get("side") in (side, "both")
+    }
+
+
+def get_all_buildings_for_side(side: str) -> dict[str, dict]:
+    """Get all buildings available to a side ('allied' or 'soviet') with full stats.
+
+    Returns dict keyed by building type name, each value is the full stats dict.
+    Includes buildings with side='both' plus buildings specific to the given side.
+    """
+    side = side.lower()
+    return {
+        btype: dict(data)
+        for btype, data in RA_BUILDINGS.items()
+        if data.get("side") in (side, "both")
+    }

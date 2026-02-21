@@ -12,11 +12,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-OPENRA_DIR="${OPENRA_DIR:-$PROJECT_DIR/../OpenRA}"
+OPENRA_DIR="${OPENRA_DIR:-$PROJECT_DIR/OpenRA}"
 
 if [ ! -d "$OPENRA_DIR" ]; then
     echo "ERROR: OpenRA source not found at $OPENRA_DIR"
-    echo "Set OPENRA_DIR to point to your OpenRA repo."
+    echo "Run: git submodule update --init"
     exit 1
 fi
 
@@ -30,14 +30,18 @@ echo "OpenRA source: $OPENRA_DIR"
 echo "Project dir:   $PROJECT_DIR"
 echo ""
 
-# Copy OpenRA into the build context (rsync for speed, exclude .git and build artifacts)
-echo "Copying OpenRA source into build context..."
-rsync -a --delete \
-    --exclude='.git' \
-    --exclude='bin/' \
-    --exclude='*/obj/' \
-    --exclude='*.user' \
-    "$OPENRA_DIR/" "$PROJECT_DIR/OpenRA/"
+# If OpenRA source is external (not the submodule), copy it into build context
+REAL_OPENRA="$(cd "$OPENRA_DIR" && pwd)"
+REAL_SUBMODULE="$(cd "$PROJECT_DIR/OpenRA" 2>/dev/null && pwd || echo "")"
+if [ "$REAL_OPENRA" != "$REAL_SUBMODULE" ]; then
+    echo "Copying OpenRA source into build context..."
+    rsync -a --delete \
+        --exclude='.git' \
+        --exclude='bin/' \
+        --exclude='*/obj/' \
+        --exclude='*.user' \
+        "$OPENRA_DIR/" "$PROJECT_DIR/OpenRA/"
+fi
 
 echo "Building Docker image..."
 docker build -t openra-rl "$PROJECT_DIR" "$@"
