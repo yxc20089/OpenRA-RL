@@ -109,7 +109,7 @@ def _run_llm_agent(config: dict, server_url: str, verbose: bool) -> None:
 
     app_config = load_config(cli_overrides=cli_overrides)
 
-    from examples.llm_agent import run_agent
+    from openra_env.agent import run_agent
     asyncio.run(run_agent(app_config, verbose))
 
 
