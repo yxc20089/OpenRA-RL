@@ -75,16 +75,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     liblua5.1-0 \
     libicu72 \
     curl procps \
+    x11vnc novnc websockify \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Python packages from builder
 COPY --from=python-build /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=python-build /usr/local/bin /usr/local/bin
 
-# Copy built OpenRA (bin, mods, and glsl shaders needed at runtime)
+# Copy built OpenRA (bin, mods, glsl shaders, and global mix database for content resolution)
 COPY --from=openra-build /src/openra/bin /opt/openra/bin
 COPY --from=openra-build /src/openra/mods /opt/openra/mods
 COPY --from=openra-build /src/openra/glsl /opt/openra/glsl
+COPY --from=openra-build ["/src/openra/global mix database.dat", "/opt/openra/global mix database.dat"]
 
 # Create native library symlinks that OpenRA expects
 # (configure-system-libraries.sh points these to system lib paths)
@@ -99,12 +101,24 @@ COPY openra_env/ /app/openra_env/
 COPY proto/ /app/proto/
 COPY pyproject.toml /app/
 
-# Create OpenRA support directory
-RUN mkdir -p /root/.config/openra
+# Create OpenRA support directory and pre-install RA game content
+# (required for replay viewer which uses Game.Platform=Default with full UI)
+RUN mkdir -p /root/.config/openra/Content/ra/v2/expand /root/.config/openra/Content/ra/v2/cnc && \
+    curl -sL -o /tmp/ra-quickinstall.zip \
+        https://openra.baxxster.no/openra/ra-quickinstall.zip && \
+    apt-get update && apt-get install -y --no-install-recommends unzip && \
+    unzip -o /tmp/ra-quickinstall.zip -d /tmp/ra-content && \
+    cp /tmp/ra-content/*.mix /root/.config/openra/Content/ra/v2/ && \
+    cp /tmp/ra-content/expand/* /root/.config/openra/Content/ra/v2/expand/ && \
+    cp /tmp/ra-content/cnc/* /root/.config/openra/Content/ra/v2/cnc/ && \
+    rm -rf /tmp/ra-quickinstall.zip /tmp/ra-content && \
+    apt-get purge -y unzip && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
-# Copy entrypoint (fix Windows CRLF line endings)
+# Copy entrypoints (fix Windows CRLF line endings)
 COPY docker/entrypoint.sh /entrypoint.sh
-RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
+COPY docker/replay-viewer.sh /replay-viewer.sh
+RUN sed -i 's/\r$//' /entrypoint.sh /replay-viewer.sh && \
+    chmod +x /entrypoint.sh /replay-viewer.sh
 
 # Environment
 ENV OPENRA_PATH=/opt/openra

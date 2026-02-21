@@ -1,10 +1,13 @@
 """Subcommand implementations for the openra-rl CLI."""
 
 import shutil
+import subprocess
 import sys
+import webbrowser
+from pathlib import Path
 from typing import Optional
 
-from openra_env.cli.console import dim, error, header, info, success, warn
+from openra_env.cli.console import dim, error, header, info, step, success, warn
 from openra_env.cli import docker_manager as docker
 from openra_env.cli.wizard import (
     CONFIG_PATH,
@@ -23,11 +26,31 @@ def cmd_play(
     verbose: bool = False,
     port: int = 8000,
     server_url: Optional[str] = None,
+    local: bool = False,
+    image_version: Optional[str] = None,
 ) -> None:
     """Run the LLM agent against the game server."""
-    # 1. Check Docker
-    if server_url is None and not docker.check_docker():
+    use_docker = server_url is None and not local
+
+    # 1. Check Docker (unless --local or --server-url)
+    if use_docker and not docker.check_docker():
         sys.exit(1)
+
+    # 1b. Version selection — let user pick if multiple versions exist locally
+    if use_docker and image_version is None:
+        versions = docker.list_local_versions()
+        # Filter out "latest" for display — only show concrete version tags
+        concrete = [v for v in versions if v != "latest"]
+        if len(concrete) > 1:
+            info(f"Multiple engine versions available: {', '.join(concrete)}")
+            try:
+                choice = input(f"  Version to use [{concrete[0]}]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                choice = ""
+            if choice:
+                image_version = choice
+            else:
+                image_version = concrete[0]
 
     # 2. Load or create config
     has_cli_overrides = any([provider, model, api_key])
@@ -43,8 +66,8 @@ def cmd_play(
     # Validate we have enough config to proceed
     llm_cfg = config.get("llm", {})
     base_url = llm_cfg.get("base_url", "")
-    is_local = any(h in base_url for h in ("localhost", "127.0.0.1", "0.0.0.0"))
-    if not llm_cfg.get("api_key") and not is_local:
+    is_local_llm = any(h in base_url for h in ("localhost", "127.0.0.1", "0.0.0.0"))
+    if not llm_cfg.get("api_key") and not is_local_llm:
         error("No API key configured. Run `openra-rl config` or pass --api-key.")
         sys.exit(1)
     if not llm_cfg.get("model"):
@@ -54,12 +77,41 @@ def cmd_play(
     # 3. Start/reuse server
     actual_url = server_url or f"http://localhost:{port}"
     we_started_server = False
+    local_server_proc = None
 
-    if server_url is None:
+    if local:
+        # Run the server locally (for developers with local OpenRA build)
+        header("Starting local server...")
+        local_server_proc = subprocess.Popen(
+            [sys.executable, "-m", "openra_env.server.app"],
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+        we_started_server = True
+        # Wait for it to be ready
+        import time
+        import urllib.request
+        import urllib.error
+        step(f"Waiting for local server on port {port}...")
+        start = time.time()
+        while time.time() - start < 60:
+            try:
+                req = urllib.request.urlopen(f"{actual_url}/health", timeout=3)
+                if req.status == 200:
+                    success("Local server is ready!")
+                    break
+            except (urllib.error.URLError, OSError):
+                pass
+            time.sleep(2)
+        else:
+            error("Local server did not become ready within 60s.")
+            local_server_proc.terminate()
+            sys.exit(1)
+    elif use_docker:
         if docker.is_running():
             info(f"Server already running on port {port}.")
         else:
-            if not docker.start_server(port=port, difficulty=difficulty):
+            if not docker.start_server(port=port, difficulty=difficulty, version=image_version):
                 sys.exit(1)
             we_started_server = True
             if not docker.wait_for_health(port=port):
@@ -80,15 +132,34 @@ def cmd_play(
     except Exception as e:
         error(f"Agent error: {e}")
 
-    # 5. Cleanup
+    # 5. Auto-copy replays from Docker
+    if use_docker and docker.is_running():
+        new_replays = docker.copy_replays()
+        if new_replays:
+            print()
+            for f in new_replays:
+                success(f"Replay saved: {docker.LOCAL_REPLAY_DIR / f}")
+            info("Watch with: openra-rl replay watch")
+
+    # 6. Cleanup
     if we_started_server:
         print()
-        try:
-            answer = input("  Stop game server? [Y/n] ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            answer = "y"
-        if answer in ("", "y", "yes"):
-            docker.stop_server()
+        if local_server_proc:
+            try:
+                answer = input("  Stop local server? [Y/n] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = "y"
+            if answer in ("", "y", "yes"):
+                local_server_proc.terminate()
+                local_server_proc.wait(timeout=10)
+                success("Local server stopped.")
+        elif use_docker:
+            try:
+                answer = input("  Stop game server? [Y/n] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = "y"
+            if answer in ("", "y", "yes"):
+                docker.stop_server()
 
 
 def _run_llm_agent(config: dict, server_url: str, verbose: bool) -> None:
@@ -219,3 +290,109 @@ def cmd_mcp_server(server_url: Optional[str] = None, port: int = 8000) -> None:
     """Start the MCP stdio server."""
     from openra_env.mcp_server import main as mcp_main
     mcp_main(server_url=server_url or f"http://localhost:{port}")
+
+
+# ── Replay commands ──────────────────────────────────────────────────
+
+
+def cmd_replay_watch(file: Optional[str] = None, port: int = 6080) -> None:
+    """Watch a replay in the browser via VNC-in-Docker."""
+    if not docker.check_docker():
+        sys.exit(1)
+
+    replay_path = file
+
+    if replay_path is None:
+        # Try to find the latest replay — first in Docker container, then local
+        if docker.is_running():
+            replay_path = docker.get_latest_replay()
+            if replay_path:
+                info(f"Latest replay: {Path(replay_path).name}")
+        if replay_path is None:
+            # Check local replays
+            local_replays = sorted(docker.LOCAL_REPLAY_DIR.glob("*.orarep"))
+            if local_replays:
+                replay_path = str(local_replays[-1])
+                info(f"Latest local replay: {local_replays[-1].name}")
+            else:
+                error("No replays found. Play a game first with: openra-rl play")
+                sys.exit(1)
+
+    header("Starting replay viewer...")
+
+    if not docker.start_replay_viewer(replay_path, port=port):
+        sys.exit(1)
+
+    import time
+    url = f"http://localhost:{port}/vnc.html"
+    step(f"Waiting for viewer to be ready...")
+    time.sleep(3)
+    info(f"Opening {url}")
+    webbrowser.open(url)
+    print()
+    info("Press Ctrl+C to stop the replay viewer")
+    print()
+
+    try:
+        # Wait until container exits or user presses Ctrl+C
+        while docker.is_replay_viewer_running():
+            time.sleep(2)
+        info("Replay viewer has stopped.")
+    except KeyboardInterrupt:
+        print()
+        docker.stop_replay_viewer()
+
+
+def cmd_replay_list() -> None:
+    """List available replays from Docker and local."""
+    header("Game Replays")
+
+    # Docker replays
+    if docker.is_running():
+        docker_replays = docker.list_replays()
+        if docker_replays:
+            info(f"In Docker container ({len(docker_replays)}):")
+            for r in docker_replays:
+                dim(f"    {Path(r).name}")
+        else:
+            dim("  No replays in Docker container.")
+    else:
+        dim("  Docker server not running — cannot list container replays.")
+
+    # Local replays
+    print()
+    local_dir = docker.LOCAL_REPLAY_DIR
+    if local_dir.exists():
+        local_replays = sorted(local_dir.glob("*.orarep"))
+        if local_replays:
+            info(f"Local ({len(local_replays)}) — {local_dir}:")
+            for r in local_replays:
+                dim(f"    {r.name}")
+        else:
+            dim(f"  No local replays in {local_dir}")
+    else:
+        dim(f"  No local replay directory ({local_dir})")
+
+
+def cmd_replay_copy() -> None:
+    """Copy replays from Docker container to local directory."""
+    if not docker.check_docker():
+        sys.exit(1)
+
+    if not docker.is_running():
+        error("Game server is not running. Start it first or use: openra-rl server start")
+        sys.exit(1)
+
+    header("Copying replays from Docker...")
+    new_files = docker.copy_replays()
+    if new_files:
+        for f in new_files:
+            success(f"  Copied: {f}")
+        success(f"Copied {len(new_files)} new replay(s) to {docker.LOCAL_REPLAY_DIR}")
+    else:
+        info(f"No new replays to copy. Replays are in {docker.LOCAL_REPLAY_DIR}")
+
+
+def cmd_replay_stop() -> None:
+    """Stop the replay viewer."""
+    docker.stop_replay_viewer()

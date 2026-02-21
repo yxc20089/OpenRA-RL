@@ -32,6 +32,8 @@ def main() -> None:
     play_parser.add_argument("--verbose", action="store_true", help="Verbose output")
     play_parser.add_argument("--port", type=int, default=8000, help="Game server port (default: 8000)")
     play_parser.add_argument("--server-url", help="Connect to existing server URL (skip Docker)")
+    play_parser.add_argument("--local", action="store_true", help="Run server locally instead of Docker (for developers)")
+    play_parser.add_argument("--version", dest="image_version", default=None, help="Docker image version to use (default: latest)")
 
     # ── config ──────────────────────────────────────────────────────
     subparsers.add_parser("config", help="Re-run the setup wizard")
@@ -57,6 +59,18 @@ def main() -> None:
     mcp_parser = subparsers.add_parser("mcp-server", help="Start MCP stdio server")
     mcp_parser.add_argument("--server-url", help="Game server URL")
     mcp_parser.add_argument("--port", type=int, default=8000, help="Game server port (default: 8000)")
+
+    # ── replay ─────────────────────────────────────────────────────
+    replay_parser = subparsers.add_parser("replay", help="Manage and watch game replays")
+    replay_sub = replay_parser.add_subparsers(dest="replay_command")
+
+    watch_parser = replay_sub.add_parser("watch", help="Watch a replay in your browser (via VNC)")
+    watch_parser.add_argument("file", nargs="?", default=None, help="Replay file (local path or container path; default: latest)")
+    watch_parser.add_argument("--port", type=int, default=6080, help="noVNC port (default: 6080)")
+
+    replay_sub.add_parser("list", help="List available replays")
+    replay_sub.add_parser("copy", help="Copy replays from Docker to ~/.openra-rl/replays/")
+    replay_sub.add_parser("stop", help="Stop the replay viewer")
 
     # ── doctor ──────────────────────────────────────────────────────
     subparsers.add_parser("doctor", help="Check system prerequisites")
@@ -88,6 +102,8 @@ def main() -> None:
             verbose=args.verbose,
             port=args.port,
             server_url=args.server_url,
+            local=args.local,
+            image_version=args.image_version,
         )
     elif args.command == "config":
         commands.cmd_config()
@@ -106,6 +122,17 @@ def main() -> None:
             commands.cmd_server_logs(follow=args.follow)
         else:
             server_parser.print_help()
+    elif args.command == "replay":
+        if args.replay_command == "watch":
+            commands.cmd_replay_watch(file=args.file, port=args.port)
+        elif args.replay_command == "list":
+            commands.cmd_replay_list()
+        elif args.replay_command == "copy":
+            commands.cmd_replay_copy()
+        elif args.replay_command == "stop":
+            commands.cmd_replay_stop()
+        else:
+            replay_parser.print_help()
     elif args.command == "mcp-server":
         commands.cmd_mcp_server(
             server_url=args.server_url,

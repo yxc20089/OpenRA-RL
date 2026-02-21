@@ -328,6 +328,8 @@ class TestMain:
             verbose=True,
             port=9000,
             server_url=None,
+            local=False,
+            image_version=None,
         )
 
     @patch("openra_env.cli.commands.cmd_mcp_server")

@@ -28,6 +28,9 @@ openra-rl play --provider openrouter --api-key sk-or-... --model anthropic/claud
 # Local (Ollama — free, no API key)
 openra-rl play --provider ollama --model qwen3:32b
 
+# Developer mode (skip Docker, run server locally)
+openra-rl play --local --provider ollama --model qwen3:32b
+
 # Reconfigure later
 openra-rl config
 ```
@@ -44,6 +47,7 @@ openra-rl config
 openra-rl play       Run the LLM agent (wizard on first use)
 openra-rl config     Re-run the setup wizard
 openra-rl server     start | stop | status | logs
+openra-rl replay     watch | list | copy | stop
 openra-rl mcp-server Start MCP stdio server (for OpenClaw / Claude Desktop)
 openra-rl doctor     Check system prerequisites
 openra-rl version    Print version
@@ -252,13 +256,19 @@ OPENROUTER_API_KEY=sk-or-... docker compose up agent
 
 ### Replays
 
-Games save `.orarep` replay files inside the container. Extract them:
+After each game, replays are automatically copied to `~/.openra-rl/replays/`. Watch them in your browser:
 
 ```bash
-docker cp openra-rl-server:/root/.config/openra/Replays ./replays
+openra-rl replay watch              # Watch the latest replay (opens browser via VNC)
+openra-rl replay watch <file>       # Watch a specific .orarep file
+openra-rl replay list               # List replays (Docker + local)
+openra-rl replay copy               # Copy replays from Docker to local
+openra-rl replay stop               # Stop the replay viewer
 ```
 
-> **Note:** Replays use the dev engine version and cannot be opened in the standard OpenRA release. Build the dev client from the `OpenRA/` submodule to view them.
+The replay viewer runs inside Docker using the same engine that recorded the game, so replays always play back correctly. The browser connects via noVNC — no local game install needed.
+
+> **Version tracking:** Each replay records which Docker image version was used. When you upgrade, old replays are still viewable using their original engine version.
 
 ## Local Development (without Docker)
 
