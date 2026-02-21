@@ -65,6 +65,13 @@ class TestOpenRAEnvironmentReset:
         mock_bridge.close = AsyncMock()
         mock_bridge.wait_for_ready = AsyncMock(return_value=True)
         mock_bridge.start_session = AsyncMock(return_value=_make_proto_observation(tick=0))
+        mock_bridge.session_started = False
+        # Mock get_state to return a GameState proto
+        mock_game_state = MagicMock()
+        mock_game_state.tick = 0
+        mock_game_state.player_faction = "england"
+        mock_game_state.enemy_faction = "russia"
+        mock_bridge.get_state = AsyncMock(return_value=mock_game_state)
 
         mock_process = MockProcess.return_value
         mock_process.kill = MagicMock()
@@ -76,13 +83,14 @@ class TestOpenRAEnvironmentReset:
 
         obs = env.reset()
 
+        # reset() now returns a minimal observation (game is paused,
+        # session not yet started). Full obs available after session starts.
         assert obs.tick == 0
-        assert obs.economy.cash == 1000
-        assert len(obs.units) == 1
-        assert obs.units[0].type == "e1"
-        assert obs.map_info.width == 64
+        assert obs.economy.cash == 0  # Minimal obs — no economy data yet
         mock_process.kill.assert_called_once()
         mock_process.launch.assert_called_once()
+        # start_session should NOT be called during reset (deferred)
+        mock_bridge.start_session.assert_not_called()
 
     @patch("openra_env.server.openra_environment.OpenRAProcessManager")
     @patch("openra_env.server.openra_environment.BridgeClient")
@@ -91,6 +99,8 @@ class TestOpenRAEnvironmentReset:
         mock_bridge.close = AsyncMock()
         mock_bridge.wait_for_ready = AsyncMock(return_value=True)
         mock_bridge.start_session = AsyncMock(return_value=_make_proto_observation())
+        mock_bridge.session_started = False
+        mock_bridge.get_state = AsyncMock(return_value=MagicMock(tick=0, player_faction="", enemy_faction=""))
 
         mock_process = MockProcess.return_value
         mock_process.kill = MagicMock()
@@ -110,6 +120,8 @@ class TestOpenRAEnvironmentReset:
         mock_bridge.close = AsyncMock()
         mock_bridge.wait_for_ready = AsyncMock(return_value=True)
         mock_bridge.start_session = AsyncMock(return_value=_make_proto_observation())
+        mock_bridge.session_started = False
+        mock_bridge.get_state = AsyncMock(return_value=MagicMock(tick=0, player_faction="", enemy_faction=""))
 
         mock_process = MockProcess.return_value
         mock_process.kill = MagicMock()

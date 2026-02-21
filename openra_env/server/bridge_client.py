@@ -85,12 +85,23 @@ class BridgeClient:
                     return False
         return False
 
+    @property
+    def session_started(self) -> bool:
+        """Whether the streaming session has been started."""
+        return self._session_call is not None
+
     async def start_session(self) -> rl_bridge_pb2.GameObservation:
         """Start a bidirectional streaming session and return the first observation.
 
         The game sends observations continuously; a background reader task
         keeps the latest observation cached. Actions are sent via step().
+
+        Idempotent: if the session is already started, returns the latest observation.
         """
+        if self._session_call is not None:
+            # Already started — return latest cached observation
+            return self._latest_obs
+
         if not self._connected:
             await self.connect()
 
@@ -244,6 +255,11 @@ def observation_to_dict(obs: rl_bridge_pb2.GameObservation) -> dict:
             "buildings_lost": obs.military.buildings_lost,
             "army_value": obs.military.army_value,
             "active_unit_count": obs.military.active_unit_count,
+            "kills_cost": obs.military.kills_cost,
+            "deaths_cost": obs.military.deaths_cost,
+            "assets_value": obs.military.assets_value,
+            "experience": obs.military.experience,
+            "order_count": obs.military.order_count,
         },
         "units": [
             {

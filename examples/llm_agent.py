@@ -1,26 +1,19 @@
 #!/usr/bin/env python3
-"""LLM agent that plays Red Alert using OpenRouter models via MCP tools.
+"""LLM agent that plays Red Alert using any OpenAI-compatible model.
 
-The agent connects to the OpenRA-RL server, discovers MCP tools, converts
-them to OpenAI function calling format, and uses an LLM (via OpenRouter)
-to decide which tools to call each turn.
-
-Supports any OpenAI-compatible model via OpenRouter:
-  - anthropic/claude-sonnet-4-20250514 (default, good at tool use)
-  - openai/gpt-4o
-  - google/gemini-2.0-flash-001
-  - meta-llama/llama-3.1-70b-instruct
+Supports OpenRouter, Ollama, LM Studio, or any local/remote endpoint
+that implements the OpenAI Chat Completions API with tool calling.
 
 Usage:
-    # Start the game server
-    docker run -p 8000:8000 openra-rl
-
-    # Run the agent
+    # With OpenRouter (cloud)
     export OPENROUTER_API_KEY=sk-or-...
     python examples/llm_agent.py --verbose
 
-    # Or with a specific model
-    python examples/llm_agent.py --model openai/gpt-4o --verbose
+    # With a YAML config file
+    python examples/llm_agent.py --config examples/config-ollama.yaml
+
+    # With LM Studio (local, no API key needed)
+    python examples/llm_agent.py --base-url http://localhost:1234/v1/chat/completions --model my-model
 """
 
 import argparse
@@ -37,6 +30,7 @@ from collections import defaultdict
 from typing import Any, Optional
 
 import httpx
+from openra_env.config import LLMConfig, load_config
 from openra_env.game_data import get_building_stats, get_faction_info, get_tech_tree, get_unit_stats
 from openra_env.mcp_ws_client import OpenRAMCPClient
 
@@ -44,9 +38,6 @@ from openra_env.mcp_ws_client import OpenRAMCPClient
 sys.stdout.reconfigure(line_buffering=True)
 
 logger = logging.getLogger("llm_agent")
-
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "qwen/qwen3-coder-next"
 
 SYSTEM_PROMPT = """\
 You are playing Command & Conquer: Red Alert as one faction against an AI opponent.
@@ -68,7 +59,7 @@ barracks ~500 ticks, war factory ~750 ticks.
 
 **batch(actions)** — Send multiple commands simultaneously in one game tick.
 Example: batch([
-  {"tool": "build_unit", "unit_type": "3tnk", "count": 2},
+  {"tool": "build_unit", "unit_type": "e1", "count": 3},
   {"tool": "attack_move", "unit_ids": "all_combat", "target_x": 50, "target_y": 50}
 ])
 
@@ -85,78 +76,203 @@ production building (barracks for infantry, war factory for vehicles).
 
 **attack_move(unit_ids, target_x, target_y)** — Move units, engaging enemies en route.
 
-Unit selectors: comma-separated IDs (e.g. "145,146"), "all_combat", "all_idle", or a group name.
+Unit selectors: comma-separated IDs (e.g. "145,146"), "all_combat", "all_idle", \
+"type:e1" (all units of a type), "all_infantry", "all_vehicles", "all_aircraft", "all_ships", or a group name.
 
 ## Game Knowledge Tools
 Use these to look up unit stats, building stats, and tech trees at any time:
-- **lookup_unit(unit_type)** — Get cost, HP, speed, armor, prerequisites for any unit (e.g. "3tnk", "e1")
-- **lookup_building(building_type)** — Get cost, HP, power, prerequisites for any building (e.g. "weap", "proc")
+- **get_faction_briefing()** — Get ALL units and buildings for your faction with full stats in one call. Best for planning.
+- **get_map_analysis()** — Get strategic map summary: resource patches, water, terrain, quadrant breakdown, and exploration %.
+- **get_exploration_status()** — Get fog-of-war data: overall/per-quadrant explored %, enemy found, idle combat/infantry counts.
+- **batch_lookup(queries)** — Look up multiple items at once: [{"type":"unit","name":"3tnk"}, {"type":"building","name":"weap"}]
+- **lookup_unit(unit_type)** — Get stats for a single unit (e.g. "3tnk", "e1")
+- **lookup_building(building_type)** — Get stats for a single building (e.g. "weap", "proc")
 - **lookup_tech_tree(faction)** — Get the full build order and tech tree for "allied" or "soviet"
 - **lookup_faction(faction)** — Get all available units and buildings for a faction
 
 ## Game Mechanics
 
-**Economy**: Funds = cash + ore. Harvesters collect ore from the map. \
-Ore refineries (proc) come with one free harvester. More harvesters = faster income.
+**Economy (TOP PRIORITY)**: Funds = cash + ore. Harvesters collect ore and bring it \
+to refineries. Each ore refinery (proc) comes with one FREE harvester — so every \
+refinery is both storage and income. More refineries = more harvesters = faster income. \
+CRITICAL: Construction costs are paid incrementally — if you hit $0, ALL production \
+pauses until income resumes. NEVER let funds reach zero. \
+Build 2-3 ore refineries as early as possible. This is more important than military. \
+If ore storage is near max, build a silo ($150) to avoid wasting harvester income. \
+Protect your harvesters — if they die, your economy collapses.
 
 **Power**: Buildings require power. Power plants (powr) provide +100. \
 When power demand exceeds supply, ALL production slows to 1/3 speed — \
 this is devastating. Always build a power plant BEFORE any building \
-that drains power. Check your power balance in every briefing.
+that drains power. Check your power balance in every briefing. \
+Defense turrets consume power too — plan ahead and build extra power plants.
 
 **Production**: Buildings produce units — barracks/tent → infantry, \
 war factory (weap) → vehicles. Multiple production buildings of the same \
 type speed up production. Queue items and advance() to let them finish.
 
 **Tech tree**: Higher-tier buildings unlock stronger units. \
-A war factory requires an ore refinery. The "Can build:" line in each \
-briefing shows what is currently available to produce.
+A war factory requires an ore refinery. Build order: powr → barracks → proc → weap. \
+The "Can build:" line in each briefing shows what is currently available to produce.
 
-**Unit strength**: Vehicles (tanks) are much stronger than infantry. \
-e1 costs $100, a heavy tank (3tnk) costs $950 but is far more powerful.
+**Unit strength**: Vehicles (tanks) are VASTLY stronger than infantry. \
+A single heavy tank (3tnk, $950) can kill 10+ infantry (e1, $100 each). \
+Allied uses medium tanks (2tnk, $800) or light tanks (1tnk, $600). \
+CRITICAL LESSON: Once you have a war factory, STOP building infantry for combat. \
+Switch IMMEDIATELY to tanks — they are your main fighting force. \
+Infantry dies fast to tanks, turrets, and splash damage. Only build infantry \
+for scouting (e1, dog) or anti-air (e3 rocket soldiers). \
+Your army should be 70-80% tanks, with a few e3 mixed in for anti-air. \
+Only build units listed in your available_production.
 
 **Building placement**: build_and_place() handles placement automatically. \
+For precise placement, use get_valid_placements(building_type) to see positions, \
+then place_building(building_type, cell_x, cell_y). \
 Buildings that need water (spen, syrd) will fail on land maps.
 
-**Defense**: Build turrets to protect your base. Gun turrets (gun/ftur) \
-are cheap ground defense. SAM sites (sam/agun) defend against air. \
-If auto-placement fails, use get_valid_placements(building_type) to find \
-positions, then place_building(building_type, cell_x, cell_y) to place manually.
+**Defense (HIGH PRIORITY)**: Defense turrets protect your base while you grow your economy. \
+They are far more cost-effective than units for base defense.
 
-**Air power**: Build a radar dome (dome), then an airfield (afld) or helipad \
-(hpad) to produce aircraft. MiGs and Hinds are powerful strike units. \
-Air units bypass ground defenses and can hit the enemy base directly.
+Available turrets by faction:
+- Allied early: Pillbox (pbox, $400, no power drain, needs barracks) — anti-infantry
+- Allied early: Camo Pillbox (hbox, $600, no power drain, needs barracks) — hidden defense
+- Allied mid: Gun Turret (gun, $600, -20 power, needs war factory) — anti-armor, best all-round
+- Soviet early: Flame Tower (ftur, $600, -20 power, needs barracks) — anti-infantry
+- Soviet mid: Tesla Coil (tsla, $1500, -75 power, needs war factory) — devastating but power-hungry
+
+PLACEMENT IS CRITICAL — place turrets between your base and where the enemy will attack from:
+1. The STRATEGIC BRIEFING tells you the enemy estimated position
+2. Calculate the APPROACH DIRECTION: if enemy is NE, defenses go on the NE side of your base
+3. Use get_valid_placements(building_type) to find candidate positions
+4. Pick positions that are TOWARD the enemy direction — place_building(type, cell_x, cell_y)
+5. Build 2 cheap turrets early (pbox/ftur) right after your first refinery
+6. Add stronger turrets (gun/tsla) once you have a war factory
+7. Also protect ore refineries — they are high-value targets enemies will target
+8. Cover flanks as you expand — don't cluster all turrets in one spot
+
+Example: Your base at (20,60), enemy estimated at (80,20). Enemy approaches from NE. \
+Place turrets at (25,55), (28,52) — NE of your construction yard, between base and enemy.
+
+TURRET QUANTITY: 2 turrets is NOT enough. Aim for 4-6 turrets minimum. \
+As you expand, keep building turrets — they are cheap insurance. \
+A well-turreted base can hold off attacks while you mass tanks.
+
+ANTI-AIR IS ESSENTIAL: The enemy WILL build helicopters or aircraft mid-game. \
+Build SAM sites (sam, Soviet, $750) or AA Guns (agun, Allied, $600) once you have \
+a radar dome. Also keep 2-3 rocket soldiers (e3) near your base as mobile anti-air. \
+Without anti-air, a single helicopter can destroy your entire base.
+
+**Rally points**: Use set_rally_point(building_id, x, y) after building a barracks \
+or war factory to auto-send new units to a staging area near your defenses.
 
 **Scouting**: Send a cheap unit (e1 or dog) to explore the map early. \
 Knowing the enemy's base location and army composition is critical. \
-Don't wait — scout within the first 500 ticks.
+Use get_exploration_status() to see how much of the map is explored and which \
+quadrants are still unexplored. Use "type:e1" or "all_infantry" selectors to \
+move scout units. Once you find the enemy, you know where to aim your defenses.
 
-**Expansion**: Build multiple ore refineries (proc) for faster income. \
-Each comes with a free harvester. 2-3 refineries is ideal. Ore patches \
-deplete over time, so expand to new areas.
+**Expansion**: Every ore refinery comes with a free harvester. \
+Build refinery #2 as soon as possible, refinery #3 when ore starts depleting. \
+Place refineries near ore patches for faster collection. \
+Always guard expansion refineries with at least 1 turret.
 
-**Unit variety**: Don't just build one unit type. Mix tanks for armor, \
-rocket soldiers (e3) for anti-air, and engineers (e6) to capture enemy buildings. \
-Soviet players can build attack dogs (fast, cheap scouts) from a kennel.
+**Army composition**: Your army should be mostly TANKS once the war factory is up. \
+Mix in 2-3 rocket soldiers (e3) for anti-air coverage. Engineers (e6) can capture \
+enemy buildings for a surprise swing. Stop building e1 riflemen once you have tanks — \
+they are cannon fodder against armored units.
 
-## Strategy Priorities
-1. Deploy MCV immediately, then power plant
-2. Build barracks, then scout with a cheap unit toward the enemy
-3. Build ore refinery for economy, then a second refinery later
-4. Build 1-2 defense turrets at your base entrance
-5. War factory → mix tanks and rocket soldiers
-6. Radar dome → airfield for air strikes (mid-game)
-7. Attack when you have 4+ tanks — don't hoard units at base
-8. Expand: build a second ore refinery when funds allow
+**MASS BEFORE ATTACKING**: This is the #1 rule of RTS combat. \
+NEVER send units to attack one by one — they will die one by one. \
+Wait until you have 5+ tanks gathered in one spot, THEN attack_move together. \
+Keep new units near your base defenses until the attack group is ready. \
+Set rally points on your war factory to a staging area behind your turrets. \
+A single attack with 8 tanks wins. Eight attacks with 1 tank each = 8 dead tanks.
+
+## Strategy Priorities (ECONOMY & DEFENSE FIRST)
+ACT FAST — every second of idle construction is wasted. Start building immediately!
+1. Deploy MCV the INSTANT the game starts — don't wait even one tick
+2. Build power plant IMMEDIATELY after MCV deploys — you need power for everything
+3. Build barracks as soon as power plant starts, scout with a cheap unit toward OPPOSITE corner
+4. Build ore refinery #1 — your economy starts here. NEVER let cash hit $0
+5. Build 2 defense turrets (pbox/ftur) facing the enemy approach direction
+6. Build ore refinery #2 immediately — double income is essential for sustained production
+7. Build power plant #2 (defense turrets + production need power headroom)
+8. War factory → IMMEDIATELY switch to building TANKS, not infantry
+9. Build ore refinery #3 — triple income sustains tank production
+10. Add 2-3 more turrets (gun/tsla) at base entrance and near refineries (aim for 4-6 total)
+11. Radar dome → SAM/AA Gun for anti-air defense (enemy WILL build aircraft)
+12. Keep 2-3 e3 rocket soldiers at base for mobile anti-air backup
+13. MASS tanks behind your turret line — do NOT send them one by one
+14. Attack only when you have 5+ tanks grouped together AND a strong economy
+15. Never stop: more refineries, more turrets, more tanks — economy and defense win games
+
+TEMPO: Use plan() and batch() to issue multiple build orders per turn. \
+Don't build one thing at a time — queue the power plant, then immediately \
+queue the barracks while power is building. Overlap production!
+
+CRITICAL MISTAKES TO AVOID:
+- Building infantry (e1) for combat after you have a war factory — TANKS are 10x better
+- Sending units to attack one at a time — they die for nothing. MASS FIRST.
+- Having only 1-2 turrets — build 4-6 minimum, more as you expand
+- Ignoring anti-air — one helicopter can destroy your whole base. Build SAM/AA + keep e3 at base
+- Letting production sit idle — always be building something (tanks, turrets, refineries)
+
+## Pre-Game Planning Phase
+If planning is enabled, you get a PLANNING PHASE before gameplay begins. \
+During planning you receive map intel, faction info, and an opponent scouting \
+report with their behavioral tendencies, win rate, and recommended counters. \
+BE EFFICIENT with your planning turns — use bulk tools: \
+1. Call get_faction_briefing() for ALL your units and buildings with full stats. \
+2. Call get_map_analysis() for terrain, resource locations, and strategic notes. \
+3. Review the opponent intel provided by start_planning_phase. \
+4. Call end_planning_phase(strategy="your detailed strategy here") to begin gameplay. \
+Do NOT look up units one at a time — use get_faction_briefing() or batch_lookup() instead. \
+Planning has a turn limit — aim to finish in 3-4 turns max. \
+\
+Your strategy MUST be a detailed 3-phase game plan adapted to the opponent and map. \
+Study the opponent intel (aggressiveness, tendencies, weaknesses) and map analysis \
+(size, resource locations, terrain chokepoints, water) before writing your plan. \
+\
+**EARLY GAME (ticks 0-5000, ~0-3 min):** \
+- Exact build order: what buildings in what sequence, adapted to map size \
+  (small maps = faster enemy contact, rush defenses; large maps = more economy time) \
+- Scouting plan: which direction to scout based on map layout and enemy spawn estimate \
+- Economy target: how many refineries by tick 5000 (aim for 2-3) \
+- Defense placement: how many turrets and WHERE based on enemy approach direction \
+- If opponent is aggressive (check intel): prioritize defenses and turrets earlier \
+- If opponent is passive/slow (check intel): prioritize economy, delay defenses slightly \
+\
+**MID GAME (ticks 5000-15000, ~3-10 min):** \
+- Tank production plan: which tank types to build based on your faction and opponent counters \
+- Anti-air plan: when to build radar dome + SAM/AA, how many e3 to keep at base \
+  (enemy AI WILL build aircraft — plan for it before it happens) \
+- Turret expansion: add stronger turrets (gun/tsla) and cover flanks + refineries \
+- Army composition target: e.g. "6 heavy tanks + 3 e3 rocket soldiers" \
+- Massing point: where to stage your army before attacking (behind turret line) \
+- If map has chokepoints: turret those chokepoints for massive defensive advantage \
+- If map is open: need more mobile defense (tanks on patrol) \
+\
+**LATE GAME (ticks 15000+, ~10+ min):** \
+- Attack plan: target priority (enemy harvesters → production buildings → CY) \
+- Reinforcement pipeline: keep war factory producing while army attacks \
+- Expansion plan: where to build additional refineries as ore depletes \
+- Tech upgrades: radar dome → airfield/helipad for air strikes if economy allows \
+- Win condition: how to finish the opponent (overwhelming tank push vs attrition) \
+- If opponent is defensive (check intel): expand economy, build overwhelming force \
+- If opponent rushes early (check intel): survive with turrets, then counter-attack when they're spent
 
 ## Briefing Format
 Each turn briefing includes:
-- Funds, power balance, harvester count
+- Funds, power balance, harvester count — monitor harvester count closely!
 - Your units with IDs and positions
-- Your buildings with IDs and positions
-- Visible enemies with IDs and positions
+- Your buildings with IDs and positions — check turret coverage
+- Visible enemies with IDs and positions — note their approach direction
 - Current production queue and available builds
 - ALERTS for events needing attention (attacks, low power, idle production)
+- Base center position — compare with enemy center to know defense direction
+
+KEY CHECK EVERY TURN: Do you have enough refineries (3+)? Enough turrets (3+)? \
+Is there a turret between each refinery and the enemy?
 """
 
 
@@ -230,12 +346,33 @@ def compose_pregame_briefing(state: dict) -> str:
             power_str = f", {power:+d} power" if power else ""
             bldg_lines.append(f"  {btype}: {stats['name']} — ${stats['cost']}{power_str}")
 
+    # Calculate defense direction
+    dx = enemy_x - base_x
+    dy = enemy_y - base_y
+    dir_parts = []
+    if dy < -map_h // 6:
+        dir_parts.append("North")
+    elif dy > map_h // 6:
+        dir_parts.append("South")
+    if dx > map_w // 6:
+        dir_parts.append("East")
+    elif dx < -map_w // 6:
+        dir_parts.append("West")
+    defense_direction = "".join(dir_parts) if dir_parts else "Center"
+
+    # Suggest turret placement offset (toward enemy, 3-5 cells from base center)
+    norm = max(abs(dx), abs(dy), 1)
+    turret_x = base_x + (dx * 5) // norm
+    turret_y = base_y + (dy * 5) // norm
+
     parts = [
         f"## Strategic Briefing",
         f"Map: {map_name} ({map_w}x{map_h})",
         f"Your faction: {faction or side} ({side})",
         f"Your base: ({base_x}, {base_y})",
         f"Enemy likely near: ({enemy_x}, {enemy_y}) — SCOUT to confirm!",
+        f"Enemy approach direction: {defense_direction}",
+        f">> PLACE DEFENSE TURRETS toward ({turret_x}, {turret_y}) — {defense_direction} side of base <<",
         f"",
         f"Tech tree: {' → '.join(tech_order[:8])}{'...' if len(tech_order) > 8 else ''}",
         f"Barracks type: {barracks}",
@@ -369,50 +506,85 @@ def mcp_tools_to_openai(tools: list) -> list[dict]:
     return result
 
 
+def _sanitize_messages(messages: list[dict]) -> list[dict]:
+    """Merge consecutive same-role messages for strict-alternation models (e.g. Mistral).
+
+    Some models require strict user/assistant alternation and reject sequences
+    like ``user → user`` or ``tool → user``.  This helper:
+    1. Merges consecutive ``user`` messages by joining their content with newlines.
+    2. Inserts a bridge ``assistant`` message when a ``tool`` result is followed
+       by a ``user`` message (Mistral requires tool → assistant → user).
+    """
+    if not messages:
+        return messages
+
+    merged: list[dict] = [dict(messages[0])]
+    for msg in messages[1:]:
+        prev = merged[-1]
+        # Merge consecutive user messages
+        if msg["role"] == "user" and prev["role"] == "user":
+            merged[-1] = {**prev, "content": prev["content"] + "\n\n" + msg["content"]}
+            continue
+        # Bridge: tool → user needs an assistant message in between
+        if msg["role"] == "user" and prev["role"] == "tool":
+            merged.append({"role": "assistant", "content": "Acknowledged. Continuing."})
+        merged.append(msg)
+    return merged
+
+
 async def chat_completion(
     messages: list[dict],
     tools: list[dict],
-    api_key: str,
-    model: str,
+    llm_config: LLMConfig,
     verbose: bool = False,
 ) -> dict:
-    """Call OpenRouter chat completions API."""
+    """Call an OpenAI-compatible chat completions API.
+
+    Works with OpenRouter, Ollama, LM Studio, or any endpoint
+    implementing the OpenAI Chat Completions spec with tool calling.
+    """
+    clean_messages = _sanitize_messages(messages)
     payload = {
-        "model": model,
-        "messages": messages,
+        "model": llm_config.model,
+        "messages": clean_messages,
         "tools": tools,
         "tool_choice": "auto",
-        "max_tokens": 1500,  # Cap output — enough for tool calls, kills long thinking
+        "max_tokens": llm_config.max_tokens,
     }
-    # Let OpenRouter auto-route to the best available provider
+    if llm_config.temperature is not None:
+        payload["temperature"] = llm_config.temperature
+    if llm_config.top_p is not None:
+        payload["top_p"] = llm_config.top_p
+
+    headers = dict(llm_config.extra_headers)
+    if llm_config.api_key:
+        headers["Authorization"] = f"Bearer {llm_config.api_key}"
 
     async with httpx.AsyncClient() as client:
         if verbose:
-            n_msgs = len(messages)
-            print(f"  [LLM] Sending {n_msgs} messages to {model}...")
+            n_msgs = len(clean_messages)
+            roles = [m.get("role", "?") for m in clean_messages]
+            print(f"  [LLM] Sending {n_msgs} messages to {llm_config.model}...")
+            print(f"  [LLM] Roles: {' → '.join(roles)}")
 
         response = await client.post(
-            OPENROUTER_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "HTTP-Referer": "https://github.com/openra-rl",
-                "X-Title": "OpenRA-RL Agent",
-            },
+            llm_config.base_url,
+            headers=headers,
             json=payload,
-            timeout=120.0,
+            timeout=llm_config.request_timeout_s,
         )
 
         if response.status_code != 200:
             error_text = response.text[:500]
-            raise RuntimeError(f"OpenRouter API error {response.status_code}: {error_text}")
+            raise RuntimeError(f"LLM API error {response.status_code}: {error_text}")
 
         try:
             data = response.json()
         except (json.JSONDecodeError, ValueError) as e:
-            raise RuntimeError(f"OpenRouter API error 502: invalid JSON response ({e})")
+            raise RuntimeError(f"LLM API error 502: invalid JSON response ({e})")
 
         if "error" in data:
-            raise RuntimeError(f"OpenRouter error 500: {data['error']}")
+            raise RuntimeError(f"LLM API error 500: {data['error']}")
 
         if verbose:
             usage = data.get("usage", {})
@@ -507,17 +679,15 @@ def compress_history(messages: list[dict], keep_last: int = 40) -> list[dict]:
     ]
 
 
-async def run_agent(
-    url: str,
-    api_key: str,
-    model: str,
-    max_turns: int,
-    max_time: int,
-    verbose: bool,
-):
+async def run_agent(config, verbose: bool = False):
     """Connect to OpenRA-RL and play a game using an LLM agent."""
+    url = config.agent.server_url
+    llm_config = config.llm
+    max_turns = config.agent.max_turns
+    max_time = config.agent.max_time_s
+
     print(f"Connecting to {url}...")
-    print(f"Model: {model}")
+    print(f"Model: {llm_config.model} @ {llm_config.base_url}")
 
     async with OpenRAMCPClient(base_url=url, message_timeout_s=300.0) as env:
         print("Resetting environment (launching OpenRA)...")
@@ -535,15 +705,151 @@ async def run_agent(
         # Initialize conversation
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        # Get initial state and compose pre-game briefing
+        # ─── Pre-Game Planning Phase ──────────────────────────────────
+        planning_strategy = ""
+        planning_status = await env.call_tool("get_planning_status")
+
+        if planning_status.get("planning_enabled", True) is not False:
+            print("Starting pre-game planning phase...")
+            planning_data = await env.call_tool("start_planning_phase")
+
+            if planning_data.get("planning_active"):
+                max_planning_turns = planning_data.get("max_turns", 10)
+                opponent_summary = planning_data.get("opponent_summary", "")
+
+                planning_prompt = (
+                    f"## PRE-GAME PLANNING PHASE\n"
+                    f"You have {max_planning_turns} turns to plan. Be efficient!\n\n"
+                    f"### Map Intel\n"
+                    f"Map: {planning_data.get('map', {}).get('map_name', '?')} "
+                    f"({planning_data.get('map', {}).get('width', '?')}x"
+                    f"{planning_data.get('map', {}).get('height', '?')})\n"
+                    f"Your base: ({planning_data.get('base_position', {}).get('x', '?')}, "
+                    f"{planning_data.get('base_position', {}).get('y', '?')})\n"
+                    f"Enemy estimated: ({planning_data.get('enemy_estimated_position', {}).get('x', '?')}, "
+                    f"{planning_data.get('enemy_estimated_position', {}).get('y', '?')})\n"
+                    f"Your faction: {planning_data.get('your_faction', '?')} ({planning_data.get('your_side', '?')})\n\n"
+                    f"### Opponent Intelligence\n{opponent_summary}\n\n"
+                    f"### How to Plan Efficiently\n"
+                    f"1. Call get_faction_briefing() — returns ALL your units and buildings with full stats\n"
+                    f"2. Call get_map_analysis() — returns terrain, resource locations, strategic notes\n"
+                    f"3. Review the opponent intel above and the key units/buildings data below\n"
+                    f"4. Call end_planning_phase(strategy='your detailed strategy') to begin gameplay\n\n"
+                    f"Do NOT look up units or buildings one at a time. "
+                    f"get_faction_briefing() gives you everything in one call. "
+                    f"You can also use batch_lookup() for targeted multi-item queries.\n\n"
+                    f"Think about: build order, unit composition, timing of attacks, "
+                    f"defense priorities, and how to counter the opponent's tendencies."
+                )
+                messages.append({"role": "user", "content": planning_prompt})
+
+                # Planning loop (bounded by max_planning_turns + margin)
+                planning_done = False
+                for planning_turn in range(max_planning_turns + 2):
+                    try:
+                        response = await chat_completion(messages, openai_tools, llm_config, verbose)
+                    except (RuntimeError, httpx.ReadTimeout, httpx.ConnectTimeout):
+                        print("  [Planning] API error, ending planning phase.")
+                        break
+                    if response is None:
+                        break
+
+                    choice = response["choices"][0]
+                    assistant_msg = choice["message"]
+                    messages.append(assistant_msg)
+
+                    if verbose and assistant_msg.get("content"):
+                        print(f"  [Planning] {assistant_msg['content'][:200]}")
+
+                    tool_calls = assistant_msg.get("tool_calls", [])
+                    if not tool_calls:
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "Use game knowledge tools to research, then call "
+                                "end_planning_phase(strategy='...') when ready."
+                            ),
+                        })
+                        continue
+
+                    for tc in tool_calls:
+                        fn_name = tc["function"]["name"]
+                        try:
+                            fn_args = json.loads(tc["function"].get("arguments", "{}"))
+                        except (json.JSONDecodeError, TypeError):
+                            fn_args = {}
+
+                        if verbose:
+                            args_str = json.dumps(fn_args)
+                            if len(args_str) > 80:
+                                args_str = args_str[:80] + "..."
+                            print(f"  [Planning Tool] {fn_name}({args_str})")
+
+                        try:
+                            result = await env.call_tool(fn_name, **fn_args)
+                        except Exception as e:
+                            result = {"error": str(e)}
+
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": json.dumps(result) if not isinstance(result, str) else result,
+                        })
+
+                        # Check if planning ended
+                        if isinstance(result, dict):
+                            if result.get("planning_complete"):
+                                planning_strategy = result.get("strategy", "")
+                                planning_done = True
+                                if verbose:
+                                    print(f"  [Planning] Strategy: {planning_strategy[:150]}...")
+                            elif result.get("planning_expired"):
+                                planning_strategy = result.get("strategy", "")
+                                planning_done = True
+                                print(f"  [Planning] Expired: {result.get('reason', '?')}")
+
+                    if planning_done:
+                        break
+
+                if not planning_done:
+                    # Force end planning
+                    try:
+                        result = await env.call_tool(
+                            "end_planning_phase",
+                            strategy="(planning timed out, no explicit strategy)"
+                        )
+                        planning_strategy = result.get("strategy", "")
+                    except Exception:
+                        pass
+                    print("  Planning phase timed out, proceeding to gameplay.")
+
+                print(f"Planning phase complete. Strategy recorded: {bool(planning_strategy)}")
+            else:
+                if verbose:
+                    print(f"  Planning: {planning_data.get('message', 'skipped')}")
+
+        # ─── Game Start ───────────────────────────────────────────────
+        # Reset messages to just system prompt — planning context is captured
+        # in the strategy text below. This avoids tool/user role alternation
+        # issues with models that enforce strict message ordering (e.g. Mistral).
+        messages = [messages[0]]  # keep only system prompt
+
         state = await env.call_tool("get_game_state")
         briefing = compose_pregame_briefing(state)
+
+        strategy_section = ""
+        if planning_strategy:
+            strategy_section = f"\n\n## Your Pre-Game Strategy\n{planning_strategy}\n"
+
         messages.append({
             "role": "user",
             "content": (
-                f"Game started!\n\n{briefing}\n\n"
+                f"Game started!{strategy_section}\n\n{briefing}\n\n"
                 f"## Current State\n```json\n{json.dumps(state, indent=2)}\n```\n\n"
-                f"Deploy your MCV and start building. What's your first move?"
+                f"ACT NOW! Deploy your MCV immediately, then start building power plant + barracks. "
+                f"Expand fast — every idle second costs you. Use plan() to chain: "
+                f"deploy MCV → build power plant → build barracks → build refinery. "
+                f"Then focus on economy (3+ refineries) and defense turrets toward the enemy."
             ),
         })
 
@@ -566,7 +872,7 @@ async def run_agent(
             turn += 1
 
             # Compress history periodically
-            messages = compress_history(messages, keep_last=40)
+            messages = compress_history(messages, keep_last=llm_config.keep_last_messages)
 
             # Inject state briefing before LLM thinks (skip first turn — initial state already provided)
             if total_api_calls > 0:
@@ -589,17 +895,18 @@ async def run_agent(
 
             # Call LLM with retry for rate limits
             response = None
-            for attempt in range(4):
+            max_retries = llm_config.max_retries
+            for attempt in range(max_retries):
                 try:
-                    response = await chat_completion(messages, openai_tools, api_key, model, verbose)
+                    response = await chat_completion(messages, openai_tools, llm_config, verbose)
                     break
                 except (RuntimeError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
                     err_str = str(e)
                     retriable = isinstance(e, (httpx.ReadTimeout, httpx.ConnectTimeout)) or \
                         any(code in err_str for code in ("429", "500", "502", "503", "504"))
-                    if retriable and attempt < 3:
-                        wait = 10 * (attempt + 1)
-                        print(f"\n  [RETRY] Provider error, waiting {wait}s ({attempt + 1}/4)...")
+                    if retriable and attempt < max_retries - 1:
+                        wait = llm_config.retry_backoff_s * (attempt + 1)
+                        print(f"\n  [RETRY] Provider error, waiting {wait}s ({attempt + 1}/{max_retries})...")
                         await asyncio.sleep(wait)
                     else:
                         print(f"\n  [ERROR] API call failed: {e}")
@@ -718,17 +1025,31 @@ async def run_agent(
         print(f"Agent finished after {total_api_calls} API calls, {total_tool_calls} tool calls")
         print(f"Time: {elapsed:.1f}s ({elapsed / max(total_api_calls, 1):.1f}s per API call)")
 
-        # Get final state
+        # Get final state and scorecard
         try:
             final = await env.call_tool("get_game_state")
-            print(f"Final tick: {final.get('tick', '?')}")
-            print(f"Result: {final.get('result', 'ongoing')}")
+            mil = final.get("military", {})
             eco = final.get("economy", {})
-            print(f"Cash: ${eco.get('cash', '?')}")
-            print(f"Units: {final.get('own_units', '?')} own, {final.get('visible_enemies', '?')} enemy")
-            print(f"Buildings: {final.get('own_buildings', '?')}")
-        except Exception:
-            pass
+            print(f"Result: {final.get('result', 'ongoing').upper()}")
+            print()
+            print("--- SCORECARD ---")
+            print(f"  Planning:         {'ON — ' + planning_strategy[:100] if planning_strategy else 'OFF'}")
+            print(f"  Ticks played:     {final.get('tick', '?')}")
+            print(f"  Units killed:     {mil.get('units_killed', 0)} (value: ${mil.get('kills_cost', 0)})")
+            print(f"  Units lost:       {mil.get('units_lost', 0)} (value: ${mil.get('deaths_cost', 0)})")
+            print(f"  Buildings killed: {mil.get('buildings_killed', 0)}")
+            print(f"  Buildings lost:   {mil.get('buildings_lost', 0)}")
+            print(f"  Army value:       ${mil.get('army_value', 0)}")
+            print(f"  Assets value:     ${mil.get('assets_value', 0)}")
+            print(f"  Experience:       {mil.get('experience', 0)}")
+            print(f"  Orders issued:    {mil.get('order_count', 0)}")
+            print(f"  Cash remaining:   ${eco.get('cash', 0)}")
+            print(f"  K/D cost ratio:   {mil.get('kills_cost', 0) / max(mil.get('deaths_cost', 1), 1):.2f}")
+            print(f"  Own units:        {final.get('own_units', '?')}")
+            print(f"  Own buildings:    {final.get('own_buildings', '?')}")
+            print()
+        except Exception as e:
+            print(f"  (could not get final state: {e})")
 
         # Get replay
         try:
@@ -743,41 +1064,51 @@ async def run_agent(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="LLM agent that plays Red Alert via OpenRouter",
+        description="LLM agent that plays Red Alert via any OpenAI-compatible model",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
+            "  %(prog)s --config examples/config-ollama.yaml --verbose\n"
             "  %(prog)s --api-key sk-or-... --verbose\n"
-            "  %(prog)s --model openai/gpt-4o --max-turns 100\n"
-            "  OPENROUTER_API_KEY=sk-or-... %(prog)s\n"
+            "  %(prog)s --base-url http://localhost:1234/v1/chat/completions --model my-model\n"
         ),
     )
     parser.add_argument(
+        "--config", "-c",
+        default=None,
+        help="Path to YAML config file (default: auto-discover config.yaml)",
+    )
+    parser.add_argument(
         "--url",
-        default=os.environ.get("OPENRA_URL", "http://localhost:8000"),
-        help="OpenRA-RL server URL (default: $OPENRA_URL or http://localhost:8000)",
+        default=None,
+        help="OpenRA-RL server URL (overrides config agent.server_url)",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="LLM API endpoint URL (overrides config llm.base_url)",
     )
     parser.add_argument(
         "--model",
-        default=os.environ.get("OPENROUTER_MODEL", DEFAULT_MODEL),
-        help=f"OpenRouter model ID (default: $OPENROUTER_MODEL or {DEFAULT_MODEL})",
+        default=None,
+        help="Model ID (overrides config llm.model)",
     )
     parser.add_argument(
         "--api-key",
-        default=os.environ.get("OPENROUTER_API_KEY"),
-        help="OpenRouter API key (default: $OPENROUTER_API_KEY)",
+        default=None,
+        help="API key for LLM endpoint (overrides config llm.api_key)",
     )
     parser.add_argument(
         "--max-turns",
         type=int,
-        default=0,
-        help="Maximum LLM turns, 0 = unlimited (default: 0)",
+        default=None,
+        help="Maximum LLM turns, 0 = unlimited (overrides config agent.max_turns)",
     )
     parser.add_argument(
         "--max-time",
         type=int,
-        default=int(os.environ.get("MAX_TIME", "1800")),
-        help="Maximum wall-clock time in seconds (default: $MAX_TIME or 1800 = 30min)",
+        default=None,
+        help="Maximum wall-clock time in seconds (overrides config agent.max_time_s)",
     )
     parser.add_argument(
         "--verbose",
@@ -786,16 +1117,38 @@ def main():
     )
     parser.add_argument(
         "--log-file",
-        default=os.environ.get("LLM_AGENT_LOG", ""),
-        help="Write all output to this log file in addition to stdout (default: $LLM_AGENT_LOG)",
+        default=None,
+        help="Write all output to this log file in addition to stdout",
     )
     args = parser.parse_args()
 
+    # Build config: YAML file + env vars + CLI overrides (CLI wins over .env)
+    cli: dict = {}
+    if args.url is not None:
+        cli.setdefault("agent", {})["server_url"] = args.url
+    if args.base_url is not None:
+        cli.setdefault("llm", {})["base_url"] = args.base_url
+    if args.model is not None:
+        cli.setdefault("llm", {})["model"] = args.model
+    if args.api_key is not None:
+        cli.setdefault("llm", {})["api_key"] = args.api_key
+    if args.max_turns is not None:
+        cli.setdefault("agent", {})["max_turns"] = args.max_turns
+    if args.max_time is not None:
+        cli.setdefault("agent", {})["max_time_s"] = args.max_time
+    if args.verbose:
+        cli.setdefault("agent", {})["verbose"] = True
+    if args.log_file is not None:
+        cli.setdefault("agent", {})["log_file"] = args.log_file
+
+    config = load_config(config_path=args.config, cli_overrides=cli)
+    verbose = config.agent.verbose
+
     # Set up logging to file if requested — tee all print() to both stdout and file
-    if args.log_file:
+    if config.agent.log_file:
         import builtins
         _builtin_print = builtins.print
-        _log_fh = open(args.log_file, "w")
+        _log_fh = open(config.agent.log_file, "w")
 
         def _tee_print(*pargs, **kwargs):
             _builtin_print(*pargs, **kwargs)
@@ -805,19 +1158,22 @@ def main():
 
         builtins.print = _tee_print
 
-    if not args.api_key:
-        print("Error: OpenRouter API key required.")
-        print("  Set OPENROUTER_API_KEY environment variable or use --api-key")
-        print("  Get a key at: https://openrouter.ai/keys")
+    # API key validation: only required for remote endpoints
+    is_local = any(h in config.llm.base_url for h in ("localhost", "127.0.0.1", "0.0.0.0"))
+    if not config.llm.api_key and not is_local:
+        print("Error: API key required for remote LLM endpoints.")
+        print("  Set OPENROUTER_API_KEY or LLM_API_KEY environment variable, use --api-key,")
+        print("  or use a config file with llm.api_key set.")
+        print("  For local models (Ollama, LM Studio), use --base-url http://localhost:...")
         sys.exit(1)
 
     try:
-        asyncio.run(run_agent(args.url, args.api_key, args.model, args.max_turns, args.max_time, args.verbose))
+        asyncio.run(run_agent(config, verbose))
     except KeyboardInterrupt:
         print("\nInterrupted by user")
         sys.exit(0)
     except ConnectionRefusedError:
-        print(f"\nCould not connect to {args.url}")
+        print(f"\nCould not connect to {config.agent.server_url}")
         print("Is the OpenRA-RL server running?")
         print("  docker run -p 8000:8000 openra-rl")
         sys.exit(1)

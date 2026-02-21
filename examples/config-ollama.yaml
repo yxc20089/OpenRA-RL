@@ -1,0 +1,14 @@
+# OpenRA-RL config for Ollama (local)
+# Usage: python examples/llm_agent.py --config examples/config-ollama.yaml
+
+llm:
+  base_url: "http://localhost:11434/v1/chat/completions"
+  model: "llama3.1:70b"
+  api_key: ""                         # No key needed for Ollama
+  max_tokens: 2000
+  extra_headers: {}
+  request_timeout_s: 180.0            # Local models can be slower
+
+agent:
+  max_time_s: 3600                    # 1 hour (local models are slower)
+  verbose: true

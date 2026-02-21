@@ -8,7 +8,8 @@ OpenRAMCPClient to interact with the OpenRA-RL server via WebSocket.
 Exercises ALL 30 MCP tools:
   - Read tools: get_game_state, get_economy, get_units, get_buildings,
     get_enemies, get_production, get_map_info
-  - Knowledge tools: lookup_unit, lookup_building, lookup_tech_tree, lookup_faction
+  - Knowledge tools: lookup_unit, lookup_building, lookup_tech_tree, lookup_faction,
+    get_faction_briefing, get_map_analysis, batch_lookup
   - Action tools: advance, deploy_unit, build_structure, place_building,
     build_unit, move_units, attack_move, attack_target, stop_units,
     set_rally_point, guard_target, set_stance, sell_building, repair_building,
@@ -25,6 +26,9 @@ import asyncio
 import json
 import sys
 from typing import Any, Optional
+
+# Line-buffered stdout so output is observable in real time
+sys.stdout.reconfigure(line_buffering=True)
 
 from openra_env.mcp_ws_client import OpenRAMCPClient
 
@@ -49,9 +53,10 @@ class MCPBot:
     COMBAT_TYPES = {"e1", "e2", "e3", "e4", "1tnk", "2tnk", "3tnk", "arty", "jeep", "apc"}
     INFANTRY_TYPES = {"e1", "e2", "e3", "e4"}
 
-    def __init__(self, env: OpenRAMCPClient, verbose: bool = False):
+    def __init__(self, env: OpenRAMCPClient, verbose: bool = False, no_planning: bool = False):
         self.env = env
         self.verbose = verbose
+        self.no_planning = no_planning
         self.phase = "startup"
         self.build_index = 0
         self.placement_count = 0
@@ -107,25 +112,65 @@ class MCPBot:
             "replay": replay,
             "tools_exercised": sorted(self._tools_exercised),
             "tools_count": len(self._tools_exercised),
+            "planning_strategy": getattr(self, "_planning_strategy", ""),
         }
 
     # ── Startup: knowledge tools ──────────────────────────────────
 
     async def _startup(self):
-        """Exercise knowledge tools at game start."""
-        self._log("=== Startup: Looking up game knowledge ===")
+        """Run planning phase and look up game knowledge at game start."""
+        if self.no_planning:
+            self._log("=== Startup: Planning DISABLED ===")
+            # Use bulk knowledge tool instead of individual lookups
+            briefing = await self.call("get_faction_briefing")
+            self._log(f"Faction briefing: {briefing.get('side', '?')}, "
+                      f"{len(briefing.get('units', {}))} units, "
+                      f"{len(briefing.get('buildings', {}))} buildings")
+        else:
+            self._log("=== Startup: Planning Phase ===")
 
-        tech = await self.call("lookup_tech_tree", faction="soviet")
-        self._log(f"Soviet tech tree: {json.dumps(tech, indent=2)[:200]}")
+            # Try the planning phase
+            planning = await self.call("start_planning_phase")
+            if planning.get("planning_active"):
+                self._log(f"Planning active — opponent: {planning.get('opponent_summary', '')[:120]}")
 
-        unit_info = await self.call("lookup_unit", unit_type="e1")
-        self._log(f"Rifle Infantry: cost={unit_info.get('cost')}, hp={unit_info.get('hp')}")
+                # Use bulk tools for efficient research
+                briefing = await self.call("get_faction_briefing")
+                self._log(f"Faction briefing: {briefing.get('side', '?')}, "
+                          f"{len(briefing.get('units', {}))} units, "
+                          f"{len(briefing.get('buildings', {}))} buildings")
 
-        building_info = await self.call("lookup_building", building_type="powr")
-        self._log(f"Power Plant: cost={building_info.get('cost')}, power={building_info.get('power')}")
+                map_analysis = await self.call("get_map_analysis")
+                self._log(f"Map analysis: {map_analysis.get('map_type', '?')}, "
+                          f"{len(map_analysis.get('resource_patches', []))} resource patches")
 
-        faction = await self.call("lookup_faction", faction="russia")
-        self._log(f"Russia faction: {len(faction.get('units', []))} units available")
+                intel = await self.call("get_opponent_intel")
+                aggressiveness = intel.get("aggressiveness", "unknown")
+                self._log(f"Opponent aggressiveness: {aggressiveness}")
+
+                # Formulate strategy based on opponent profile
+                if aggressiveness in ("high", "very_high"):
+                    strategy = (
+                        "Defensive opening: power plant, barracks, turrets at base entrance, "
+                        "then ore refinery for economy. Build war factory for tanks once stable. "
+                        "Scout early to find and deny enemy expansion."
+                    )
+                else:
+                    strategy = (
+                        "Rush opening: power plant, barracks, infantry rush while building "
+                        "ore refinery. Transition to tanks from war factory."
+                    )
+
+                result = await self.call("end_planning_phase", strategy=strategy)
+                self._planning_strategy = strategy
+                self._log(f"Planning complete: {result.get('planning_duration_seconds', '?')}s, strategy: {strategy[:80]}")
+            else:
+                # Planning disabled server-side
+                self._log(f"Planning: {planning.get('message', 'disabled')}")
+                briefing = await self.call("get_faction_briefing")
+                self._log(f"Faction briefing: {briefing.get('side', '?')}, "
+                          f"{len(briefing.get('units', {}))} units, "
+                          f"{len(briefing.get('buildings', {}))} buildings")
 
         map_info = await self.call("get_map_info")
         self._log(f"Map: {map_info.get('map_name', '?')} ({map_info.get('width')}x{map_info.get('height')})")
@@ -375,9 +420,9 @@ class MCPBot:
         target_x, target_y = self._find_attack_target(enemies, units)
 
         unit_id_list = [u["actor_id"] for u in idle_fighters]
-        ids_str = ",".join(str(i) for i in unit_id_list)
+        unit_ids = ",".join(str(i) for i in unit_id_list)
         self._log(f"Attacking with {len(unit_id_list)} units toward ({target_x}, {target_y})")
-        await self.call("attack_move", unit_ids=ids_str, target_x=target_x, target_y=target_y)
+        await self.call("attack_move", unit_ids=unit_ids, target_x=target_x, target_y=target_y)
 
         # Attack specific visible enemy if close
         if enemies.get("units"):
@@ -479,7 +524,7 @@ class MCPBot:
 # ── Main ──────────────────────────────────────────────────────────
 
 
-async def run_mcp_bot(url: str, max_turns: int, verbose: bool):
+async def run_mcp_bot(url: str, max_turns: int, verbose: bool, no_planning: bool = False):
     """Connect to the OpenRA-RL server and play using MCP tools."""
     print(f"Connecting to {url}...")
 
@@ -493,7 +538,7 @@ async def run_mcp_bot(url: str, max_turns: int, verbose: bool):
         print(f"Discovered {len(tools)} MCP tools: {tool_names}")
 
         # Run bot
-        bot = MCPBot(env, verbose=verbose)
+        bot = MCPBot(env, verbose=verbose, no_planning=no_planning)
         result = bot.run(max_turns)
         if asyncio.iscoroutine(result):
             result = await result
@@ -505,6 +550,27 @@ async def run_mcp_bot(url: str, max_turns: int, verbose: bool):
         print(f"Game finished after {result['turns']} turns")
         if final.get("done"):
             print(f"Result: {final.get('result', '?').upper()}")
+
+        # Score card
+        mil = final.get("military", {})
+        eco = final.get("economy", {})
+        planning = result.get("planning_strategy", "")
+        print()
+        print("--- SCORECARD ---")
+        print(f"  Planning:         {'ON — ' + planning if planning else 'OFF'}")
+        print(f"  Ticks played:     {final.get('tick', '?')}")
+        print(f"  Units killed:     {mil.get('units_killed', 0)} (value: ${mil.get('kills_cost', 0)})")
+        print(f"  Units lost:       {mil.get('units_lost', 0)} (value: ${mil.get('deaths_cost', 0)})")
+        print(f"  Buildings killed: {mil.get('buildings_killed', 0)}")
+        print(f"  Buildings lost:   {mil.get('buildings_lost', 0)}")
+        print(f"  Army value:       ${mil.get('army_value', 0)}")
+        print(f"  Assets value:     ${mil.get('assets_value', 0)}")
+        print(f"  Experience:       {mil.get('experience', 0)}")
+        print(f"  Orders issued:    {mil.get('order_count', 0)}")
+        print(f"  Cash remaining:   ${eco.get('cash', 0)}")
+        print(f"  K/D cost ratio:   {mil.get('kills_cost', 0) / max(mil.get('deaths_cost', 1), 1):.2f}")
+        print()
+
         print(f"Tools exercised: {result['tools_count']}/{len(tools)}")
         print(f"  {result['tools_exercised']}")
         if result.get("replay", {}).get("path"):
@@ -530,10 +596,15 @@ def main():
         action="store_true",
         help="Print detailed bot decisions",
     )
+    parser.add_argument(
+        "--no-planning",
+        action="store_true",
+        help="Disable planning phase (for comparison runs)",
+    )
     args = parser.parse_args()
 
     try:
-        asyncio.run(run_mcp_bot(args.url, args.max_turns, args.verbose))
+        asyncio.run(run_mcp_bot(args.url, args.max_turns, args.verbose, no_planning=args.no_planning))
     except KeyboardInterrupt:
         print("\nInterrupted by user")
         sys.exit(0)

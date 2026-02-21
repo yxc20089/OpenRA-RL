@@ -1,0 +1,14 @@
+# OpenRA-RL config for LM Studio (local)
+# Usage: python examples/llm_agent.py --config examples/config-lmstudio.yaml
+
+llm:
+  base_url: "http://localhost:1234/v1/chat/completions"
+  model: "lmstudio-community/Meta-Llama-3.1-70B-Instruct-GGUF"
+  api_key: ""                         # No key needed for LM Studio
+  max_tokens: 2000
+  extra_headers: {}
+  request_timeout_s: 180.0
+
+agent:
+  max_time_s: 3600
+  verbose: true
