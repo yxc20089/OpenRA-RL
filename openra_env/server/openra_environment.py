@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from fastmcp import FastMCP
 from openenv.core.env_server.mcp_environment import MCPEnvironment
-from openenv.core.env_server.types import Action, Observation, State
+from openenv.core.env_server.types import Action, Observation
 
 from openra_env.game_data import (
     get_all_building_types,
