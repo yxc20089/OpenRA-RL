@@ -7,14 +7,12 @@ that implements the OpenAI Chat Completions API with tool calling.
 import asyncio
 import json
 import logging
-import sys
 import time
 
 from collections import defaultdict
-from typing import Any, Optional
 
 import httpx
-from openra_env.config import LLMConfig, load_config
+from openra_env.config import LLMConfig
 from openra_env.game_data import get_building_stats, get_faction_info, get_tech_tree, get_unit_stats
 from openra_env.mcp_ws_client import OpenRAMCPClient
 
@@ -347,21 +345,21 @@ def compose_pregame_briefing(state: dict) -> str:
     turret_y = base_y + (dy * 5) // norm
 
     parts = [
-        f"## Strategic Briefing",
+        "## Strategic Briefing",
         f"Map: {map_name} ({map_w}x{map_h})",
         f"Your faction: {faction or side} ({side})",
         f"Your base: ({base_x}, {base_y})",
         f"Enemy likely near: ({enemy_x}, {enemy_y}) — SCOUT to confirm!",
         f"Enemy approach direction: {defense_direction}",
         f">> PLACE DEFENSE TURRETS toward ({turret_x}, {turret_y}) — {defense_direction} side of base <<",
-        f"",
+        "",
         f"Tech tree: {' → '.join(tech_order[:8])}{'...' if len(tech_order) > 8 else ''}",
         f"Barracks type: {barracks}",
-        f"",
-        f"Available units:",
+        "",
+        "Available units:",
         *unit_lines,
-        f"",
-        f"Available buildings:",
+        "",
+        "Available buildings:",
         *bldg_lines,
     ]
     return "\n".join(parts)

@@ -4,7 +4,7 @@ Configurable multi-component reward function that combines
 survival, economic, military, and strategic signals.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 

@@ -10,10 +10,8 @@ Usage:
 Works with OpenClaw, Claude Desktop, and any MCP client.
 """
 
-import asyncio
 import json
 import logging
-import sys
 from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
