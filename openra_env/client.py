@@ -1,16 +1,14 @@
 """OpenRA-RL environment client.
 
-Provides an async WebSocket client for connecting to the OpenRA-RL
-environment server. This is a standalone async implementation that
-does not rely on the sync EnvClient base class.
+Provides the EnvClient subclass for connecting to the OpenRA-RL
+environment server over WebSocket.
 """
 
-import asyncio
-import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from openenv.core.client_types import StepResult
+from openenv.core.env_client import EnvClient
 from websockets.asyncio.client import connect as ws_connect
 
 from openra_env.models import (
@@ -26,8 +24,8 @@ from openra_env.models import (
 )
 
 
-class OpenRAEnv:
-    """Async WebSocket client for the OpenRA-RL environment.
+class OpenRAEnv(EnvClient[OpenRAAction, OpenRAObservation, OpenRAState]):
+    """WebSocket client for the OpenRA-RL environment.
 
     Usage:
         async with OpenRAEnv(base_url="http://localhost:8000") as env:
@@ -36,20 +34,6 @@ class OpenRAEnv:
                 action = OpenRAAction(commands=[...])
                 result = await env.step(action)
     """
-
-    def __init__(
-        self,
-        base_url: str = "http://localhost:8000",
-        connect_timeout_s: float = 10.0,
-        message_timeout_s: float = 60.0,
-    ):
-        # Convert HTTP URL to WebSocket URL
-        ws_url = base_url.replace("http://", "ws://").replace("https://", "wss://")
-        ws_url = ws_url.rstrip("/")
-        self._ws_url = f"{ws_url}/ws"
-        self._connect_timeout = connect_timeout_s
-        self._message_timeout = message_timeout_s
-        self._ws = None
 
     async def connect(self) -> "OpenRAEnv":
         """Connect with ping keepalive disabled.
@@ -78,7 +62,7 @@ class OpenRAEnv:
             self._ws = await ws_connect(
                 self._ws_url,
                 open_timeout=self._connect_timeout,
-                max_size=50 * 1024 * 1024,  # 50 MB for large spatial observations
+                max_size=self._max_message_size,
                 ping_interval=None,
             )
         except Exception as e:
@@ -92,57 +76,9 @@ class OpenRAEnv:
 
         return self
 
-    async def close(self) -> None:
-        """Close the WebSocket connection."""
-        if self._ws is not None:
-            try:
-                await self._ws.close()
-            except Exception:
-                pass
-            self._ws = None
-
-    async def __aenter__(self) -> "OpenRAEnv":
-        """Support `async with OpenRAEnv(...) as env:` syntax."""
-        return await self.connect()
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Close connection on context exit."""
-        await self.close()
-
-    # ── Core protocol ──────────────────────────────────────────────
-
-    async def _send_and_receive(self, message: dict) -> dict:
-        """Send a JSON message and wait for a JSON response."""
-        if self._ws is None:
-            raise RuntimeError("Not connected. Call connect() first.")
-
-        await self._ws.send(json.dumps(message))
-        raw = await asyncio.wait_for(
-            self._ws.recv(), timeout=self._message_timeout
-        )
-        return json.loads(raw)
-
-    # ── Environment API ────────────────────────────────────────────
-
-    async def reset(self, **kwargs: Any) -> StepResult[OpenRAObservation]:
-        """Reset the environment and start a new game."""
-        message = {
-            "type": "reset",
-            "data": kwargs,
-        }
-        response = await self._send_and_receive(message)
-        return self._parse_result(response.get("data", {}))
-
-    async def step(self, action: OpenRAAction, **kwargs: Any) -> StepResult[OpenRAObservation]:
-        """Execute an action in the environment."""
-        message = {
-            "type": "step",
-            "data": action.model_dump(),
-        }
-        response = await self._send_and_receive(message)
-        return self._parse_result(response.get("data", {}))
-
-    # ── Parsing ────────────────────────────────────────────────────
+    def _step_payload(self, action: OpenRAAction) -> Dict[str, Any]:
+        """Convert action to JSON for WebSocket transport."""
+        return action.model_dump()
 
     def _parse_result(self, data: Dict[str, Any]) -> StepResult[OpenRAObservation]:
         """Parse server response into StepResult."""
