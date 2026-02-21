@@ -233,17 +233,13 @@ class TestPlanningTools:
 
     def _get_tool(self, mcp, name):
         """Get a tool function from the MCP tool manager."""
-        if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
-            tool = mcp._tool_manager._tools.get(name)
-            if tool and hasattr(tool, "fn"):
-                return tool.fn
-        return None
+        from tests.conftest import get_tool_fn
+        return get_tool_fn(mcp, name)
 
     def test_planning_tools_registered(self, env_with_obs):
         _, mcp = env_with_obs
-        tool_names = set()
-        if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
-            tool_names = set(mcp._tool_manager._tools.keys())
+        from tests.conftest import get_tool_names
+        tool_names = get_tool_names(mcp)
 
         assert "get_opponent_intel" in tool_names
         assert "start_planning_phase" in tool_names
@@ -252,10 +248,10 @@ class TestPlanningTools:
 
     def test_tool_count_increased(self, env_with_obs):
         _, mcp = env_with_obs
-        if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
-            count = len(mcp._tool_manager._tools)
-            # Previous: 40 tools. Added: 4 planning + 3 bulk = 47
-            assert count == 48, f"Expected 48 tools, got {count}"
+        from tests.conftest import get_tool_count
+        count = get_tool_count(mcp)
+        # 7 read + 1 exploration + 1 terrain + 4 knowledge + 3 bulk + 4 planning + 27 action + 1 replay = 48
+        assert count == 48, f"Expected 48 tools, got {count}"
 
     def test_get_opponent_intel(self, env_with_obs):
         env, mcp = env_with_obs
@@ -521,27 +517,23 @@ class TestBulkKnowledgeTools:
         return env, mcp
 
     def _get_tool(self, mcp, name):
-        if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
-            tool = mcp._tool_manager._tools.get(name)
-            if tool and hasattr(tool, "fn"):
-                return tool.fn
-        return None
+        from tests.conftest import get_tool_fn
+        return get_tool_fn(mcp, name)
 
     def test_bulk_tools_registered(self, env_with_obs):
         _, mcp = env_with_obs
-        tool_names = set()
-        if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
-            tool_names = set(mcp._tool_manager._tools.keys())
+        from tests.conftest import get_tool_names
+        tool_names = get_tool_names(mcp)
         assert "get_faction_briefing" in tool_names
         assert "get_map_analysis" in tool_names
         assert "batch_lookup" in tool_names
 
     def test_tool_count_with_bulk_tools(self, env_with_obs):
         _, mcp = env_with_obs
-        if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
-            count = len(mcp._tool_manager._tools)
-            # Previous: 44 tools. Added: 3 bulk tools = 47
-            assert count == 48, f"Expected 48 tools, got {count}"
+        from tests.conftest import get_tool_count
+        count = get_tool_count(mcp)
+        # 7 read + 1 exploration + 1 terrain + 4 knowledge + 3 bulk + 4 planning + 27 action + 1 replay = 48
+        assert count == 48, f"Expected 48 tools, got {count}"
 
     # ── get_faction_briefing ──
 

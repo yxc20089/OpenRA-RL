@@ -1,6 +1,5 @@
 """Interactive first-run setup wizard."""
 
-import os
 from pathlib import Path
 from typing import Optional
 
@@ -67,7 +66,7 @@ def _choose(question: str, options: list[tuple[str, str]], allow_custom: bool = 
 
     max_choice = len(options) + (1 if allow_custom else 0)
     while True:
-        raw = input(f"  > ").strip()
+        raw = input("  > ").strip()
         try:
             idx = int(raw)
             if 1 <= idx <= len(options):
@@ -132,7 +131,7 @@ def run_wizard() -> dict:
     # Model selection
     if provider.get("models"):
         model = _choose(
-            f"Choose a model:",
+            "Choose a model:",
             [(m, label) for m, label in provider["models"]],
             allow_custom=True,
         )
@@ -149,7 +148,7 @@ def run_wizard() -> dict:
 
     print()
     save_config(config)
-    dim(f"Run `openra-rl config` to change these settings later.\n")
+    dim("Run `openra-rl config` to change these settings later.\n")
 
     return config
 
