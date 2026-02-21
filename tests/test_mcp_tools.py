@@ -239,9 +239,8 @@ class TestMCPToolRegistration:
 
     def test_tools_registered(self, env):
         _, mcp = env
-        tool_names = set()
-        if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
-            tool_names = set(mcp._tool_manager._tools.keys())
+        from tests.conftest import get_tool_names
+        tool_names = get_tool_names(mcp)
 
         # Read tools
         assert "get_game_state" in tool_names
@@ -282,10 +281,10 @@ class TestMCPToolRegistration:
 
     def test_tool_count(self, env):
         _, mcp = env
-        if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
-            count = len(mcp._tool_manager._tools)
-            # 7 read + 1 exploration + 1 terrain + 4 knowledge + 3 bulk + 4 planning + 27 action + 1 replay = 48
-            assert count == 48, f"Expected 48 tools, got {count}"
+        from tests.conftest import get_tool_count
+        count = get_tool_count(mcp)
+        # 7 read + 1 exploration + 1 terrain + 4 knowledge + 3 bulk + 4 planning + 27 action + 1 replay = 48
+        assert count == 48, f"Expected 48 tools, got {count}"
 
 
 class TestMCPReadTools:
