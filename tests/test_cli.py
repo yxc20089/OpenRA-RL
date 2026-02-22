@@ -216,14 +216,16 @@ class TestReplayViewerSettings:
     def test_gpu_docker_args_gpu(self):
         from openra_env.cli.docker_manager import _gpu_docker_args
         variants = _gpu_docker_args("gpu")
-        assert len(variants) == 3
+        assert len(variants) == 4  # NVIDIA, WSL2, AMD ROCm, DRI
         assert "--gpus" in variants[0]
-        assert "--device" in variants[1]
+        assert "/dev/dxg" in str(variants[1])
+        assert "/dev/kfd" in str(variants[2])
+        assert "/dev/dri" in str(variants[3])
 
     def test_gpu_docker_args_auto(self):
         from openra_env.cli.docker_manager import _gpu_docker_args
         variants = _gpu_docker_args("auto")
-        assert len(variants) == 4
+        assert len(variants) == 5  # 4 GPU + 1 CPU
         # GPU variants first, CPU last
         assert "--gpus" in variants[0]
         assert "LIBGL_ALWAYS_SOFTWARE=1" in variants[-1]

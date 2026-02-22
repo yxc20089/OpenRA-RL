@@ -69,6 +69,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1-mesa-dri \
     libgl1-mesa-glx \
     libegl-mesa0 \
+    mesa-vulkan-drivers \
+    libvulkan1 \
     libsdl2-2.0-0 \
     libopenal1 \
     libfreetype6 \

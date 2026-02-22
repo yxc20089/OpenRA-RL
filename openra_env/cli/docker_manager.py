@@ -365,9 +365,14 @@ def _gpu_docker_args(mode: str, cpu_cores: int = 4) -> list[list[str]]:
     """
     cpu = ["-e", "LIBGL_ALWAYS_SOFTWARE=1", "-e", f"LP_NUM_THREADS={cpu_cores}"]
     gpu_variants = [
-        ["--gpus", "all"],                     # NVIDIA
-        ["--device", "/dev/dxg:/dev/dxg"],     # WSL2
-        ["--device", "/dev/dri:/dev/dri"],     # Linux DRI
+        ["--gpus", "all"],                                      # NVIDIA
+        ["--device", "/dev/dxg:/dev/dxg",                       # WSL2 (AMD/NVIDIA/Intel)
+         "-v", "/usr/lib/wsl:/usr/lib/wsl:ro",
+         "-e", "LD_LIBRARY_PATH=/usr/lib/wsl/lib"],
+        ["--device", "/dev/kfd:/dev/kfd",                       # AMD ROCm (native Linux)
+         "--device", "/dev/dri:/dev/dri",
+         "--group-add", "video"],
+        ["--device", "/dev/dri:/dev/dri"],                      # Generic DRI (AMD/Intel)
     ]
     if mode == "cpu":
         return [cpu]
@@ -560,7 +565,15 @@ def start_replay_viewer(
         result = _run(cmd)
         if result.returncode == 0:
             if is_gpu:
-                info("Rendering mode: GPU (hardware acceleration)")
+                gpu_args_str = " ".join(gpu_args)
+                if "--gpus" in gpu_args_str:
+                    info("Rendering mode: GPU (NVIDIA)")
+                elif "/dev/dxg" in gpu_args_str:
+                    info("Rendering mode: GPU (WSL2 DirectX)")
+                elif "/dev/kfd" in gpu_args_str:
+                    info("Rendering mode: GPU (AMD ROCm)")
+                else:
+                    info("Rendering mode: GPU (DRI)")
             else:
                 info(f"Rendering mode: CPU (software, {settings.cpu_cores} cores)")
             success("Replay viewer started.")
