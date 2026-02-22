@@ -325,7 +325,7 @@ def cmd_replay_watch(file: Optional[str] = None, port: int = 6080) -> None:
 
     import time
     url = f"http://localhost:{port}/vnc.html"
-    step(f"Waiting for viewer to be ready...")
+    step("Waiting for viewer to be ready...")
     time.sleep(3)
     info(f"Opening {url}")
     webbrowser.open(url)
