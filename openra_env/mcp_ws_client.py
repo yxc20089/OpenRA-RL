@@ -77,6 +77,11 @@ class OpenRAMCPClient:
                 max_size=50 * 1024 * 1024,  # 50 MB
                 ping_interval=None,
             )
+        except (asyncio.TimeoutError, OSError, ConnectionRefusedError) as e:
+            raise RuntimeError(
+                f"Could not connect to game server at {self._ws_url}: {e}\n"
+                f"  Is the server running? Try: openra-rl server start"
+            ) from e
         finally:
             if is_localhost:
                 if old_no_proxy is None:
