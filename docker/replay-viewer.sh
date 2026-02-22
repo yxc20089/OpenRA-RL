@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# The base image sets LIBGL_ALWAYS_SOFTWARE=1 for the headless game server.
+# The replay viewer needs GPU rendering, so unset it.
+unset LIBGL_ALWAYS_SOFTWARE
+
 REPLAY_FILE="$1"
 if [ -z "$REPLAY_FILE" ]; then
     echo "Usage: /replay-viewer.sh <replay_file_path>"
