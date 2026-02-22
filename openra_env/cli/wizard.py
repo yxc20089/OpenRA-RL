@@ -90,7 +90,7 @@ def load_saved_config() -> Optional[dict]:
     if not CONFIG_PATH.exists():
         return None
     try:
-        with open(CONFIG_PATH) as f:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
     except Exception:
         return None
@@ -99,7 +99,7 @@ def load_saved_config() -> Optional[dict]:
 def save_config(config: dict) -> None:
     """Save config to ~/.openra-rl/config.yaml."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_PATH, "w") as f:
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
     success(f"Config saved to {CONFIG_PATH}")
 
