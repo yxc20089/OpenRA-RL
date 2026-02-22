@@ -326,20 +326,19 @@ def cmd_replay_watch(
     replay_path = file
 
     if replay_path is None:
-        # Try to find the latest replay — first in Docker container, then local
-        if docker.is_running():
+        # Check local replays first (most reliable — file is mounted directly)
+        local_replays = sorted(docker.LOCAL_REPLAY_DIR.glob("*.orarep"))
+        if local_replays:
+            replay_path = str(local_replays[-1])
+            info(f"Latest local replay: {local_replays[-1].name}")
+        elif docker.is_running():
+            # Fall back to container path (uses --volumes-from, less reliable)
             replay_path = docker.get_latest_replay()
             if replay_path:
-                info(f"Latest replay: {Path(replay_path).name}")
+                info(f"Latest container replay: {Path(replay_path).name}")
         if replay_path is None:
-            # Check local replays
-            local_replays = sorted(docker.LOCAL_REPLAY_DIR.glob("*.orarep"))
-            if local_replays:
-                replay_path = str(local_replays[-1])
-                info(f"Latest local replay: {local_replays[-1].name}")
-            else:
-                error("No replays found. Play a game first with: openra-rl play")
-                sys.exit(1)
+            error("No replays found. Play a game first with: openra-rl play")
+            sys.exit(1)
 
     header("Starting replay viewer...")
     info(
