@@ -128,9 +128,12 @@ def cmd_play(
     except KeyboardInterrupt:
         print("\nInterrupted.")
     except ConnectionRefusedError:
-        error(f"Could not connect to {actual_url}. Is the server running?")
+        error(f"Could not connect to {actual_url}.")
+        info("Try: openra-rl server start")
+        info("Check: openra-rl doctor")
     except Exception as e:
         error(f"Agent error: {e}")
+        info("Run with --verbose for full details, or check: openra-rl doctor")
 
     # 5. Auto-copy replays from Docker
     if use_docker and docker.is_running():

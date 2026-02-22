@@ -17,21 +17,13 @@ PROVIDERS = {
         "base_url": "https://openrouter.ai/api/v1/chat/completions",
         "needs_key": True,
         "key_help": "Get one at https://openrouter.ai/keys",
-        "default_model": "anthropic/claude-sonnet-4-20250514",
-        "models": [
-            ("anthropic/claude-sonnet-4-20250514", "Claude Sonnet 4 (recommended)"),
-            ("qwen/qwen3-coder-next", "Qwen3 Coder (budget)"),
-        ],
+        "default_model": "qwen/qwen3-coder-next",
     },
     "ollama": {
         "name": "Ollama",
         "base_url": "http://localhost:11434/v1/chat/completions",
         "needs_key": False,
         "default_model": "qwen3:32b",
-        "models": [
-            ("qwen3:32b", "Qwen3 32B (recommended)"),
-            ("qwen3:4b", "Qwen3 4B (lightweight)"),
-        ],
     },
     "lmstudio": {
         "name": "LM Studio",

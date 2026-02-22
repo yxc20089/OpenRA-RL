@@ -555,6 +555,20 @@ async def chat_completion(
 
         if response.status_code != 200:
             error_text = response.text[:500]
+            if response.status_code in (401, 403):
+                raise RuntimeError(
+                    f"Authentication failed ({response.status_code}). "
+                    f"Check your API key: openra-rl config"
+                )
+            if response.status_code == 400 and "model" in error_text.lower():
+                raise RuntimeError(
+                    f"Invalid model ID '{llm_config.model}'. "
+                    f"Update with: openra-rl config"
+                )
+            if response.status_code == 429:
+                raise RuntimeError(
+                    f"Rate limited by LLM provider. Wait a minute and retry."
+                )
             raise RuntimeError(f"LLM API error {response.status_code}: {error_text}")
 
         try:
@@ -727,8 +741,9 @@ async def run_agent(config, verbose: bool = False):
                 for planning_turn in range(max_planning_turns + 2):
                     try:
                         response = await chat_completion(messages, openai_tools, llm_config, verbose)
-                    except (RuntimeError, httpx.ReadTimeout, httpx.ConnectTimeout):
-                        print("  [Planning] API error, ending planning phase.")
+                    except (RuntimeError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+                        print(f"  [Planning] API error: {e}")
+                        print("  Skipping planning phase.")
                         break
                     if response is None:
                         break
@@ -891,7 +906,7 @@ async def run_agent(config, verbose: bool = False):
                         print(f"\n  [ERROR] API call failed: {e}")
                         break
             if response is None:
-                print("  [ERROR] All retries exhausted, stopping.")
+                print("  [ERROR] All retries exhausted. Run with --verbose for details.")
                 break
 
             total_api_calls += 1
