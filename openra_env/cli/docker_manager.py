@@ -519,6 +519,16 @@ def start_replay_viewer(
     if local_path.exists():
         local_file = str(local_path)
         container_replay_path = f"/tmp/replay/{local_path.name}"
+    elif replay_path.startswith("/") and is_running():
+        # Container path — copy locally first so we can mount it reliably
+        # (--volumes-from only shares Docker volumes, not the writable layer)
+        filename = os.path.basename(replay_path)
+        LOCAL_REPLAY_DIR.mkdir(parents=True, exist_ok=True)
+        local_dest = LOCAL_REPLAY_DIR / filename
+        cp_result = _run(["docker", "cp", f"{CONTAINER_NAME}:{replay_path}", str(local_dest)])
+        if cp_result.returncode == 0 and local_dest.exists():
+            local_file = str(local_dest)
+            container_replay_path = f"/tmp/replay/{filename}"
     elif not replay_path.startswith("/"):
         error(f"Replay file not found: {local_path}")
         return False
