@@ -308,7 +308,7 @@ def load_config(
     # 1. Load YAML file
     resolved_path = _resolve_config_path(config_path)
     if resolved_path is not None:
-        with open(resolved_path) as f:
+        with open(resolved_path, encoding="utf-8") as f:
             file_dict = yaml.safe_load(f) or {}
         _deep_merge(config_dict, file_dict)
 

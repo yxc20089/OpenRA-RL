@@ -127,7 +127,7 @@ def main():
     if config.agent.log_file:
         import builtins
         _builtin_print = builtins.print
-        _log_fh = open(config.agent.log_file, "w")
+        _log_fh = open(config.agent.log_file, "w", encoding="utf-8")
 
         def _tee_print(*pargs, **kwargs):
             _builtin_print(*pargs, **kwargs)

@@ -27,6 +27,7 @@ def _run(args: list[str], capture: bool = True, **kwargs) -> subprocess.Complete
         args,
         capture_output=capture,
         text=True,
+        encoding="utf-8",
         **kwargs,
     )
 
@@ -114,7 +115,7 @@ def _load_manifest() -> dict:
     """Load the replay manifest (replay filename → image tag)."""
     if MANIFEST_PATH.exists():
         try:
-            return json.loads(MANIFEST_PATH.read_text())
+            return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             pass
     return {}
@@ -123,7 +124,7 @@ def _load_manifest() -> dict:
 def _save_manifest(manifest: dict) -> None:
     """Save the replay manifest."""
     MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2) + "\n")
+    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 
 def get_replay_image_tag(replay_filename: str) -> Optional[str]:
