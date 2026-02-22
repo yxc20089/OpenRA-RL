@@ -139,6 +139,171 @@ class TestDockerManager:
         assert CONTAINER_NAME == "openra-rl-server"
 
 
+# ── Replay Viewer Settings ──────────────────────────────────────────
+
+class TestReplayViewerSettings:
+    def test_defaults(self, monkeypatch):
+        import os as _os
+        from openra_env.cli.docker_manager import load_replay_viewer_settings
+        for key in [
+            "OPENRA_RL_REPLAY_RESOLUTION", "OPENRA_RL_REPLAY_RENDER",
+            "OPENRA_RL_REPLAY_VNC_QUALITY", "OPENRA_RL_REPLAY_VNC_COMPRESSION",
+            "OPENRA_RL_REPLAY_UI_SCALE", "OPENRA_RL_REPLAY_VIEWPORT_DISTANCE",
+            "OPENRA_RL_REPLAY_MUTE", "OPENRA_RL_REPLAY_CPU_CORES",
+        ]:
+            monkeypatch.delenv(key, raising=False)
+        s = load_replay_viewer_settings()
+        assert s.width == 1280
+        assert s.height == 960
+        assert s.render_mode == "auto"
+        assert s.vnc_quality == 8
+        assert s.vnc_compression == 4
+        assert s.ui_scale == 1.0
+        assert s.viewport_distance == "Medium"
+        assert s.mute is True
+        assert s.cpu_cores == 4
+
+    def test_env_overrides(self, monkeypatch):
+        from openra_env.cli.docker_manager import load_replay_viewer_settings
+        monkeypatch.setenv("OPENRA_RL_REPLAY_RESOLUTION", "1280x720")
+        monkeypatch.setenv("OPENRA_RL_REPLAY_RENDER", "cpu")
+        monkeypatch.setenv("OPENRA_RL_REPLAY_VNC_QUALITY", "9")
+        monkeypatch.setenv("OPENRA_RL_REPLAY_VNC_COMPRESSION", "2")
+        monkeypatch.setenv("OPENRA_RL_REPLAY_UI_SCALE", "1.0")
+        monkeypatch.setenv("OPENRA_RL_REPLAY_VIEWPORT_DISTANCE", "far")
+        monkeypatch.setenv("OPENRA_RL_REPLAY_MUTE", "false")
+        s = load_replay_viewer_settings()
+        assert s.width == 1280
+        assert s.height == 720
+        assert s.render_mode == "cpu"
+        assert s.vnc_quality == 9
+        assert s.vnc_compression == 2
+        assert s.ui_scale == 1.0
+        assert s.viewport_distance == "Far"
+        assert s.mute is False
+
+    def test_cli_overrides_take_precedence(self, monkeypatch):
+        from openra_env.cli.docker_manager import load_replay_viewer_settings
+        monkeypatch.setenv("OPENRA_RL_REPLAY_RESOLUTION", "640x480")
+        monkeypatch.setenv("OPENRA_RL_REPLAY_RENDER", "cpu")
+        s = load_replay_viewer_settings(resolution="1920x1080", render_mode="gpu")
+        assert s.width == 1920
+        assert s.height == 1080
+        assert s.render_mode == "gpu"
+
+    def test_invalid_resolution_raises(self):
+        from openra_env.cli.docker_manager import load_replay_viewer_settings
+        with pytest.raises(ValueError, match="resolution"):
+            load_replay_viewer_settings(resolution="bad")
+
+    def test_invalid_render_mode_raises(self):
+        from openra_env.cli.docker_manager import load_replay_viewer_settings
+        with pytest.raises(ValueError, match="render mode"):
+            load_replay_viewer_settings(render_mode="turbo")
+
+    def test_gpu_docker_args_cpu(self):
+        from openra_env.cli.docker_manager import _gpu_docker_args
+        variants = _gpu_docker_args("cpu", cpu_cores=4)
+        assert len(variants) == 1
+        assert "LIBGL_ALWAYS_SOFTWARE=1" in variants[0]
+        assert "LP_NUM_THREADS=4" in variants[0]
+
+    def test_gpu_docker_args_cpu_custom_cores(self):
+        from openra_env.cli.docker_manager import _gpu_docker_args
+        variants = _gpu_docker_args("cpu", cpu_cores=8)
+        assert "LP_NUM_THREADS=8" in variants[0]
+
+    def test_gpu_docker_args_gpu(self):
+        from openra_env.cli.docker_manager import _gpu_docker_args
+        variants = _gpu_docker_args("gpu")
+        assert len(variants) == 3
+        assert "--gpus" in variants[0]
+        assert "--device" in variants[1]
+
+    def test_gpu_docker_args_auto(self):
+        from openra_env.cli.docker_manager import _gpu_docker_args
+        variants = _gpu_docker_args("auto")
+        assert len(variants) == 4
+        # GPU variants first, CPU last
+        assert "--gpus" in variants[0]
+        assert "LIBGL_ALWAYS_SOFTWARE=1" in variants[-1]
+
+    def test_cpu_cores_env_override(self, monkeypatch):
+        from openra_env.cli.docker_manager import load_replay_viewer_settings
+        monkeypatch.setenv("OPENRA_RL_REPLAY_CPU_CORES", "8")
+        s = load_replay_viewer_settings()
+        assert s.cpu_cores == 8
+
+    def test_cpu_cores_cli_override(self, monkeypatch):
+        from openra_env.cli.docker_manager import load_replay_viewer_settings
+        monkeypatch.setenv("OPENRA_RL_REPLAY_CPU_CORES", "8")
+        s = load_replay_viewer_settings(cpu_cores=2)
+        assert s.cpu_cores == 2
+
+    def test_cpu_cores_clamped(self):
+        import os as _os
+        from openra_env.cli.docker_manager import load_replay_viewer_settings
+        # 0 means "all available"
+        s = load_replay_viewer_settings(cpu_cores=0)
+        assert s.cpu_cores == (_os.cpu_count() or 4)
+        # Clamped to max 32
+        s = load_replay_viewer_settings(cpu_cores=100)
+        assert s.cpu_cores == 32
+
+    def test_settings_env_args(self):
+        from openra_env.cli.docker_manager import ReplayViewerSettings, _settings_env_args
+        s = ReplayViewerSettings(width=1280, height=720, mute=False)
+        args = _settings_env_args(s)
+        assert "-e" in args
+        assert "OPENRA_RL_REPLAY_RESOLUTION=1280x720" in args
+        assert "OPENRA_RL_REPLAY_MUTE=False" in args
+
+    @patch("openra_env.cli.docker_manager._run")
+    def test_replay_viewer_exists_false(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        from openra_env.cli.docker_manager import replay_viewer_exists
+        assert replay_viewer_exists() is False
+
+    @patch("openra_env.cli.docker_manager._run")
+    def test_replay_viewer_exists_true(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="openra-rl-replay\n")
+        from openra_env.cli.docker_manager import replay_viewer_exists
+        assert replay_viewer_exists() is True
+
+    @patch("openra_env.cli.commands.docker")
+    def test_cmd_replay_watch_invalid_setting(self, mock_docker):
+        from openra_env.cli.commands import cmd_replay_watch
+        mock_docker.check_docker.return_value = True
+        mock_docker.load_replay_viewer_settings.side_effect = ValueError("bad resolution")
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_replay_watch(resolution="bad")
+        assert exc_info.value.code == 1
+        mock_docker.start_replay_viewer.assert_not_called()
+
+    @patch("openra_env.cli.commands.cmd_replay_watch")
+    def test_main_replay_watch_with_flags(self, mock_watch):
+        from openra_env.cli.main import main
+        with patch("sys.argv", [
+            "openra-rl", "replay", "watch", "demo.orarep",
+            "--port", "6090",
+            "--resolution", "1280x720",
+            "--render", "gpu",
+            "--vnc-quality", "9",
+            "--vnc-compression", "2",
+            "--cpus", "6",
+        ]):
+            main()
+        mock_watch.assert_called_once_with(
+            file="demo.orarep",
+            port=6090,
+            resolution="1280x720",
+            render_mode="gpu",
+            vnc_quality=9,
+            vnc_compression=2,
+            cpu_cores=6,
+        )
+
+
 # ── Wizard ──────────────────────────────────────────────────────────
 
 class TestWizard:

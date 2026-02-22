@@ -295,9 +295,29 @@ def cmd_mcp_server(server_url: Optional[str] = None, port: int = 8000) -> None:
 # ── Replay commands ──────────────────────────────────────────────────
 
 
-def cmd_replay_watch(file: Optional[str] = None, port: int = 6080) -> None:
+def cmd_replay_watch(
+    file: Optional[str] = None,
+    port: int = 6080,
+    resolution: Optional[str] = None,
+    render_mode: Optional[str] = None,
+    vnc_quality: Optional[int] = None,
+    vnc_compression: Optional[int] = None,
+    cpu_cores: Optional[int] = None,
+) -> None:
     """Watch a replay in the browser via VNC-in-Docker."""
     if not docker.check_docker():
+        sys.exit(1)
+
+    try:
+        viewer_settings = docker.load_replay_viewer_settings(
+            resolution=resolution,
+            render_mode=render_mode,
+            vnc_quality=vnc_quality,
+            vnc_compression=vnc_compression,
+            cpu_cores=cpu_cores,
+        )
+    except ValueError as exc:
+        error(f"Invalid replay viewer setting: {exc}")
         sys.exit(1)
 
     replay_path = file
@@ -319,17 +339,61 @@ def cmd_replay_watch(file: Optional[str] = None, port: int = 6080) -> None:
                 sys.exit(1)
 
     header("Starting replay viewer...")
+    info(
+        f"Settings: {viewer_settings.width}x{viewer_settings.height}, "
+        f"render={viewer_settings.render_mode}, "
+        f"vnc q/c={viewer_settings.vnc_quality}/{viewer_settings.vnc_compression}"
+    )
 
-    if not docker.start_replay_viewer(replay_path, port=port):
+    if not docker.start_replay_viewer(replay_path, port=port, settings=viewer_settings):
         sys.exit(1)
 
     import time
-    url = f"http://localhost:{port}/vnc.html"
+    import urllib.error
+    import urllib.request
+
+    url = (
+        f"http://localhost:{port}/vnc.html?autoconnect=1&resize=scale"
+        f"&quality={viewer_settings.vnc_quality}"
+        f"&compression={viewer_settings.vnc_compression}"
+    )
     step("Waiting for viewer to be ready...")
-    time.sleep(3)
+
+    ready = False
+    start_time = time.time()
+    timeout = 30
+    while time.time() - start_time < timeout:
+        if not docker.is_replay_viewer_running():
+            error("Replay viewer exited before it became ready.")
+            logs = docker.get_replay_viewer_logs()
+            if logs:
+                print()
+                info("Replay viewer logs:")
+                print(logs)
+            sys.exit(1)
+        try:
+            req = urllib.request.urlopen(f"http://localhost:{port}/vnc.html", timeout=2)
+            if 200 <= req.status < 500:
+                ready = True
+                break
+        except (urllib.error.URLError, OSError):
+            pass
+        time.sleep(1)
+
+    if not ready:
+        error(f"Viewer did not become ready within {timeout}s.")
+        logs = docker.get_replay_viewer_logs()
+        if logs:
+            print()
+            info("Replay viewer logs:")
+            print(logs)
+        sys.exit(1)
+
     info(f"Opening {url}")
     webbrowser.open(url)
     print()
+    info("Tip: press F12 in the viewer for maximum replay speed.")
+    info("Tip: tune with --resolution, --render, --vnc-quality, --vnc-compression.")
     info("Press Ctrl+C to stop the replay viewer")
     print()
 

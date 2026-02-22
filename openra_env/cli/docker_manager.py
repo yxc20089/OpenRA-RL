@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -251,6 +252,130 @@ def server_status() -> Optional[dict]:
     return None
 
 
+# ── Replay viewer settings ───────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ReplayViewerSettings:
+    """Tunable replay viewer settings for quality/performance tradeoffs."""
+
+    width: int = 1280
+    height: int = 960
+    ui_scale: float = 1.0
+    viewport_distance: str = "Medium"
+    mute: bool = True
+    render_mode: str = "auto"  # auto | gpu | cpu
+    vnc_quality: int = 8
+    vnc_compression: int = 4
+    cpu_cores: int = 4  # Docker --cpus limit for software rendering (0 = all available)
+
+
+def _parse_resolution(value: str) -> tuple[int, int]:
+    """Parse a WxH resolution string."""
+    raw = value.strip().lower().replace(" ", "")
+    for sep in ("x", ","):
+        if sep in raw:
+            left, right = raw.split(sep, 1)
+            try:
+                w, h = int(left), int(right)
+            except ValueError:
+                break
+            if w < 320 or h < 240 or w > 7680 or h > 4320:
+                raise ValueError(f"resolution out of range (320x240..7680x4320): {value}")
+            return w, h
+    raise ValueError(f"resolution must be WxH (e.g. 960x540), got: {value!r}")
+
+
+def _normalize_render_mode(value: str) -> str:
+    """Validate and normalize render mode."""
+    mode = value.strip().lower()
+    if mode not in ("auto", "gpu", "cpu"):
+        raise ValueError(f"render mode must be auto/gpu/cpu, got: {value!r}")
+    return mode
+
+
+def _normalize_viewport(value: str) -> str:
+    """Validate and normalize viewport distance."""
+    mapping = {"close": "Close", "medium": "Medium", "far": "Far"}
+    key = value.strip().lower()
+    if key not in mapping:
+        raise ValueError(f"viewport must be close/medium/far, got: {value!r}")
+    return mapping[key]
+
+
+def load_replay_viewer_settings(
+    resolution: Optional[str] = None,
+    render_mode: Optional[str] = None,
+    vnc_quality: Optional[int] = None,
+    vnc_compression: Optional[int] = None,
+    cpu_cores: Optional[int] = None,
+) -> ReplayViewerSettings:
+    """Load replay viewer settings from CLI overrides → env vars → defaults."""
+    env = os.environ
+
+    res = resolution or env.get("OPENRA_RL_REPLAY_RESOLUTION", "1280x960")
+    w, h = _parse_resolution(res)
+
+    mode = _normalize_render_mode(
+        render_mode if render_mode is not None else env.get("OPENRA_RL_REPLAY_RENDER", "auto")
+    )
+
+    vq = vnc_quality if vnc_quality is not None else int(env.get("OPENRA_RL_REPLAY_VNC_QUALITY", "8"))
+    vc = vnc_compression if vnc_compression is not None else int(env.get("OPENRA_RL_REPLAY_VNC_COMPRESSION", "4"))
+    vq = max(0, min(9, vq))
+    vc = max(0, min(9, vc))
+
+    cores = cpu_cores if cpu_cores is not None else int(env.get("OPENRA_RL_REPLAY_CPU_CORES", "4"))
+    if cores <= 0:
+        cores = os.cpu_count() or 4
+    cores = max(1, min(32, cores))
+
+    ui_scale = float(env.get("OPENRA_RL_REPLAY_UI_SCALE", "1"))
+    viewport = _normalize_viewport(env.get("OPENRA_RL_REPLAY_VIEWPORT_DISTANCE", "medium"))
+    mute_raw = env.get("OPENRA_RL_REPLAY_MUTE", "true").strip().lower()
+    mute = mute_raw not in ("0", "false", "no", "off")
+
+    return ReplayViewerSettings(
+        width=w, height=h, ui_scale=ui_scale, viewport_distance=viewport,
+        mute=mute, render_mode=mode, vnc_quality=vq, vnc_compression=vc,
+        cpu_cores=cores,
+    )
+
+
+def _settings_env_args(settings: ReplayViewerSettings) -> list[str]:
+    """Convert settings to docker -e KEY=VAL args."""
+    return [
+        "-e", f"OPENRA_RL_REPLAY_RESOLUTION={settings.width}x{settings.height}",
+        "-e", f"OPENRA_RL_REPLAY_UI_SCALE={settings.ui_scale}",
+        "-e", f"OPENRA_RL_REPLAY_VIEWPORT_DISTANCE={settings.viewport_distance}",
+        "-e", f"OPENRA_RL_REPLAY_MUTE={'True' if settings.mute else 'False'}",
+        "-e", "SDL_AUDIODRIVER=dummy",
+        "-e", "OPENRA_DISPLAY_SCALE=1",
+    ]
+
+
+def _gpu_docker_args(mode: str, cpu_cores: int = 4) -> list[list[str]]:
+    """Return docker arg variants for GPU passthrough, in preference order.
+
+    auto: try GPU variants first, fall back to CPU.
+    gpu: only try GPU variants (fail if none work).
+    cpu: only try CPU (software rendering).
+    cpu_cores: number of llvmpipe threads for software rendering.
+    """
+    cpu = ["-e", "LIBGL_ALWAYS_SOFTWARE=1", "-e", f"LP_NUM_THREADS={cpu_cores}"]
+    gpu_variants = [
+        ["--gpus", "all"],                     # NVIDIA
+        ["--device", "/dev/dxg:/dev/dxg"],     # WSL2
+        ["--device", "/dev/dri:/dev/dri"],     # Linux DRI
+    ]
+    if mode == "cpu":
+        return [cpu]
+    if mode == "gpu":
+        return gpu_variants
+    # auto: try all GPU variants, then CPU fallback
+    return gpu_variants + [cpu]
+
+
 # ── Replay viewer ────────────────────────────────────────────────────
 
 
@@ -327,17 +452,49 @@ def is_replay_viewer_running() -> bool:
     return REPLAY_CONTAINER in result.stdout
 
 
-def start_replay_viewer(replay_path: str, port: int = 6080, version: Optional[str] = None) -> bool:
+def replay_viewer_exists() -> bool:
+    """Check if the replay viewer container exists (running or exited)."""
+    result = _run([
+        "docker", "ps", "-a", "--filter", f"name={REPLAY_CONTAINER}",
+        "--format", "{{.Names}}"
+    ])
+    return REPLAY_CONTAINER in result.stdout
+
+
+def get_replay_viewer_logs(tail: int = 200) -> str:
+    """Return recent replay viewer logs, or empty string if unavailable."""
+    if not replay_viewer_exists():
+        return ""
+    result = _run(["docker", "logs", "--tail", str(tail), REPLAY_CONTAINER])
+    if result.returncode != 0:
+        return result.stderr.strip() or result.stdout.strip()
+    return result.stdout.strip()
+
+
+def start_replay_viewer(
+    replay_path: str,
+    port: int = 6080,
+    version: Optional[str] = None,
+    settings: Optional[ReplayViewerSettings] = None,
+) -> bool:
     """Start the replay viewer container.
 
     Args:
         replay_path: Path to .orarep file (container path or local path).
         port: noVNC port to expose (default 6080).
         version: Docker image version to use (default: auto-detect from manifest).
+        settings: Replay viewer tuning (resolution, render mode, etc.).
     """
+    if settings is None:
+        settings = load_replay_viewer_settings()
+
     if is_replay_viewer_running():
         error("Replay viewer is already running. Stop it first with: openra-rl replay stop")
         return False
+
+    # Clean up stale (exited) container if it exists
+    if replay_viewer_exists():
+        _run(["docker", "rm", "-f", REPLAY_CONTAINER])
 
     # Auto-detect version from manifest if not specified
     if version is None:
@@ -354,8 +511,6 @@ def start_replay_viewer(replay_path: str, port: int = 6080, version: Optional[st
             return False
 
     # Determine if this is a local file or a container path.
-    # If the file exists on the host, mount it into the container.
-    # Otherwise, assume it's a path inside the game server container.
     local_file = None
     container_replay_path = replay_path
     local_path = Path(replay_path).resolve()
@@ -369,38 +524,51 @@ def start_replay_viewer(replay_path: str, port: int = 6080, version: Optional[st
 
     step(f"Starting replay viewer on port {port} ({image})...")
 
-    cmd = [
-        "docker", "run", "--rm", "-d",
+    # Build base docker command
+    base_cmd = [
+        "docker", "run", "-d",
         "-p", f"{port}:6080",
         "--name", REPLAY_CONTAINER,
         "--entrypoint", "/replay-viewer.sh",
     ]
+    base_cmd.extend(_settings_env_args(settings))
 
     if local_file:
-        # Mount the local replay file
-        cmd.extend(["-v", f"{local_file}:{container_replay_path}:ro"])
+        base_cmd.extend(["-v", f"{local_file}:{container_replay_path}:ro"])
     elif is_running():
-        # Share replay volume from game server container
-        cmd.extend(["--volumes-from", CONTAINER_NAME])
+        base_cmd.extend(["--volumes-from", CONTAINER_NAME])
 
-    cmd.extend([image, container_replay_path])
+    # Try GPU variants in order, fall back to CPU
+    last_stderr = ""
+    for gpu_args in _gpu_docker_args(settings.render_mode, cpu_cores=settings.cpu_cores):
+        is_gpu = "--gpus" in gpu_args or "--device" in gpu_args
+        # Limit CPU for software rendering to prevent runaway usage.
+        # llvmpipe busy-loops without GPU; --cpus caps Docker scheduler.
+        cpu_limit = [] if is_gpu else ["--cpus", str(settings.cpu_cores)]
+        cmd = base_cmd + cpu_limit + gpu_args + [image, container_replay_path]
+        result = _run(cmd)
+        if result.returncode == 0:
+            if is_gpu:
+                info("Rendering mode: GPU (hardware acceleration)")
+            else:
+                info(f"Rendering mode: CPU (software, {settings.cpu_cores} cores)")
+            success("Replay viewer started.")
+            return True
+        last_stderr = result.stderr.strip()
+        # Clean up the failed container before trying next variant
+        _run(["docker", "rm", "-f", REPLAY_CONTAINER])
 
-    result = _run(cmd)
-    if result.returncode != 0:
-        error(f"Failed to start replay viewer: {result.stderr.strip()}")
-        return False
-
-    success("Replay viewer started.")
-    return True
+    error(f"Failed to start replay viewer: {last_stderr}")
+    return False
 
 
 def stop_replay_viewer() -> bool:
-    """Stop the replay viewer container."""
-    if not is_replay_viewer_running():
+    """Stop and remove the replay viewer container."""
+    if not replay_viewer_exists():
         info("Replay viewer is not running.")
         return True
     step("Stopping replay viewer...")
-    result = _run(["docker", "stop", REPLAY_CONTAINER])
+    result = _run(["docker", "rm", "-f", REPLAY_CONTAINER])
     if result.returncode != 0:
         error(f"Failed to stop replay viewer: {result.stderr.strip()}")
         return False
