@@ -67,6 +67,26 @@ def main() -> None:
     watch_parser = replay_sub.add_parser("watch", help="Watch a replay in your browser (via VNC)")
     watch_parser.add_argument("file", nargs="?", default=None, help="Replay file (local path or container path; default: latest)")
     watch_parser.add_argument("--port", type=int, default=6080, help="noVNC port (default: 6080)")
+    watch_parser.add_argument(
+        "--resolution", default=None,
+        help="Replay viewer resolution WxH (default: 1280x960)",
+    )
+    watch_parser.add_argument(
+        "--render", dest="render_mode", choices=["auto", "gpu", "cpu"], default=None,
+        help="Render backend: auto tries GPU then CPU (default: auto)",
+    )
+    watch_parser.add_argument(
+        "--vnc-quality", type=int, default=None,
+        help="VNC quality 0-9, higher = sharper (default: 8)",
+    )
+    watch_parser.add_argument(
+        "--vnc-compression", type=int, default=None,
+        help="VNC compression 0-9, higher = smaller (default: 4)",
+    )
+    watch_parser.add_argument(
+        "--cpus", type=int, default=None,
+        help="CPU cores for software rendering (default: 4, 0 = all available).",
+    )
 
     replay_sub.add_parser("list", help="List available replays")
     replay_sub.add_parser("copy", help="Copy replays from Docker to ~/.openra-rl/replays/")
@@ -124,7 +144,15 @@ def main() -> None:
             server_parser.print_help()
     elif args.command == "replay":
         if args.replay_command == "watch":
-            commands.cmd_replay_watch(file=args.file, port=args.port)
+            commands.cmd_replay_watch(
+                file=args.file,
+                port=args.port,
+                resolution=args.resolution,
+                render_mode=args.render_mode,
+                vnc_quality=args.vnc_quality,
+                vnc_compression=args.vnc_compression,
+                cpu_cores=args.cpus,
+            )
         elif args.replay_command == "list":
             commands.cmd_replay_list()
         elif args.replay_command == "copy":
