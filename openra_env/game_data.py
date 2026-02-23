@@ -26,7 +26,7 @@ RA_UNITS: dict[str, dict] = {
     "e2": {
         "name": "Grenadier",
         "category": "infantry",
-        "cost": 160,
+        "cost": 150,
         "hp": 5000,
         "speed": 56,
         "armor": "none",
@@ -59,7 +59,7 @@ RA_UNITS: dict[str, dict] = {
     "e6": {
         "name": "Engineer",
         "category": "infantry",
-        "cost": 500,
+        "cost": 400,
         "hp": 4000,
         "speed": 56,
         "armor": "none",
@@ -70,7 +70,7 @@ RA_UNITS: dict[str, dict] = {
     "e7": {
         "name": "Tanya",
         "category": "infantry",
-        "cost": 1200,
+        "cost": 1800,
         "hp": 10000,
         "speed": 68,
         "armor": "none",
@@ -161,7 +161,7 @@ RA_UNITS: dict[str, dict] = {
     "2tnk": {
         "name": "Medium Tank",
         "category": "vehicle",
-        "cost": 800,
+        "cost": 850,
         "hp": 30000,
         "speed": 72,
         "armor": "heavy",
@@ -172,7 +172,7 @@ RA_UNITS: dict[str, dict] = {
     "3tnk": {
         "name": "Heavy Tank",
         "category": "vehicle",
-        "cost": 950,
+        "cost": 1150,
         "hp": 46000,
         "speed": 64,
         "armor": "heavy",
@@ -183,7 +183,7 @@ RA_UNITS: dict[str, dict] = {
     "4tnk": {
         "name": "Mammoth Tank",
         "category": "vehicle",
-        "cost": 1700,
+        "cost": 2000,
         "hp": 60000,
         "speed": 43,
         "armor": "heavy",
@@ -194,7 +194,7 @@ RA_UNITS: dict[str, dict] = {
     "v2rl": {
         "name": "V2 Rocket Launcher",
         "category": "vehicle",
-        "cost": 700,
+        "cost": 900,
         "hp": 15000,
         "speed": 72,
         "armor": "light",
@@ -205,7 +205,7 @@ RA_UNITS: dict[str, dict] = {
     "jeep": {
         "name": "Ranger",
         "category": "vehicle",
-        "cost": 600,
+        "cost": 500,
         "hp": 15000,
         "speed": 164,
         "armor": "light",
@@ -216,7 +216,7 @@ RA_UNITS: dict[str, dict] = {
     "apc": {
         "name": "APC",
         "category": "vehicle",
-        "cost": 800,
+        "cost": 850,
         "hp": 20000,
         "speed": 128,
         "armor": "heavy",
@@ -227,7 +227,7 @@ RA_UNITS: dict[str, dict] = {
     "arty": {
         "name": "Artillery",
         "category": "vehicle",
-        "cost": 600,
+        "cost": 850,
         "hp": 7500,
         "speed": 54,
         "armor": "light",
@@ -238,7 +238,7 @@ RA_UNITS: dict[str, dict] = {
     "harv": {
         "name": "Ore Truck",
         "category": "vehicle",
-        "cost": 1400,
+        "cost": 1100,
         "hp": 60000,
         "speed": 72,
         "armor": "heavy",
@@ -249,10 +249,10 @@ RA_UNITS: dict[str, dict] = {
     "mcv": {
         "name": "MCV",
         "category": "vehicle",
-        "cost": 2500,
+        "cost": 2000,
         "hp": 60000,
         "speed": 60,
-        "armor": "heavy",
+        "armor": "light",
         "side": "both",
         "prerequisites": ["weap", "fix"],
         "description": "Deploys into Construction Yard. Mobile base.",
@@ -260,7 +260,7 @@ RA_UNITS: dict[str, dict] = {
     "ftrk": {
         "name": "Flak Truck",
         "category": "vehicle",
-        "cost": 500,
+        "cost": 600,
         "hp": 15000,
         "speed": 113,
         "armor": "light",
@@ -282,10 +282,10 @@ RA_UNITS: dict[str, dict] = {
     "ttnk": {
         "name": "Tesla Tank",
         "category": "vehicle",
-        "cost": 1500,
+        "cost": 1350,
         "hp": 30000,
         "speed": 92,
-        "armor": "heavy",
+        "armor": "light",
         "side": "soviet",
         "prerequisites": ["weap", "stek", "tsla"],
         "description": "Tesla weapon on tracks. Effective vs all targets. Soviet only.",
@@ -293,7 +293,7 @@ RA_UNITS: dict[str, dict] = {
     "ctnk": {
         "name": "Chrono Tank",
         "category": "vehicle",
-        "cost": 1200,
+        "cost": 1350,
         "hp": 20000,
         "speed": 86,
         "armor": "light",
@@ -304,7 +304,7 @@ RA_UNITS: dict[str, dict] = {
     "stnk": {
         "name": "Phase Transport",
         "category": "vehicle",
-        "cost": 900,
+        "cost": 1000,
         "hp": 11000,
         "speed": 128,
         "armor": "light",
@@ -315,7 +315,7 @@ RA_UNITS: dict[str, dict] = {
     "qtnk": {
         "name": "MAD Tank",
         "category": "vehicle",
-        "cost": 2300,
+        "cost": 2000,
         "hp": 22000,
         "speed": 46,
         "armor": "heavy",
@@ -326,7 +326,7 @@ RA_UNITS: dict[str, dict] = {
     "dtrk": {
         "name": "Demolition Truck",
         "category": "vehicle",
-        "cost": 1500,
+        "cost": 2500,
         "hp": 11000,
         "speed": 113,
         "armor": "light",
@@ -337,10 +337,10 @@ RA_UNITS: dict[str, dict] = {
     "mgg": {
         "name": "Mobile Gap Generator",
         "category": "vehicle",
-        "cost": 600,
+        "cost": 1000,
         "hp": 11000,
         "speed": 72,
-        "armor": "light",
+        "armor": "heavy",
         "side": "allied",
         "prerequisites": ["weap", "atek"],
         "description": "Creates mobile shroud area. Allied only.",
@@ -348,10 +348,10 @@ RA_UNITS: dict[str, dict] = {
     "mrj": {
         "name": "Mobile Radar Jammer",
         "category": "vehicle",
-        "cost": 600,
+        "cost": 1000,
         "hp": 11000,
         "speed": 68,
-        "armor": "light",
+        "armor": "heavy",
         "side": "allied",
         "prerequisites": ["weap", "atek"],
         "description": "Jams enemy radar in area. Allied only.",
@@ -359,7 +359,7 @@ RA_UNITS: dict[str, dict] = {
     "truk": {
         "name": "Supply Truck",
         "category": "vehicle",
-        "cost": 800,
+        "cost": 500,
         "hp": 11000,
         "speed": 113,
         "armor": "light",
@@ -372,7 +372,7 @@ RA_UNITS: dict[str, dict] = {
     "heli": {
         "name": "Longbow",
         "category": "aircraft",
-        "cost": 1200,
+        "cost": 2000,
         "hp": 12000,
         "speed": 149,
         "armor": "light",
@@ -383,7 +383,7 @@ RA_UNITS: dict[str, dict] = {
     "hind": {
         "name": "Hind",
         "category": "aircraft",
-        "cost": 1200,
+        "cost": 1500,
         "hp": 12000,
         "speed": 112,
         "armor": "light",
@@ -394,7 +394,7 @@ RA_UNITS: dict[str, dict] = {
     "mh60": {
         "name": "Black Hawk",
         "category": "aircraft",
-        "cost": 1200,
+        "cost": 1500,
         "hp": 12000,
         "speed": 112,
         "armor": "light",
@@ -416,7 +416,7 @@ RA_UNITS: dict[str, dict] = {
     "yak": {
         "name": "Yak",
         "category": "aircraft",
-        "cost": 800,
+        "cost": 1350,
         "hp": 6000,
         "speed": 178,
         "armor": "light",
@@ -462,7 +462,7 @@ RA_UNITS: dict[str, dict] = {
     "ca": {
         "name": "Cruiser",
         "category": "ship",
-        "cost": 2000,
+        "cost": 2400,
         "hp": 80000,
         "speed": 44,
         "armor": "heavy",
@@ -484,7 +484,7 @@ RA_UNITS: dict[str, dict] = {
     "lst": {
         "name": "Transport",
         "category": "ship",
-        "cost": 700,
+        "cost": 500,
         "hp": 40000,
         "speed": 115,
         "armor": "heavy",
@@ -511,7 +511,7 @@ RA_UNITS: dict[str, dict] = {
 RA_BUILDINGS: dict[str, dict] = {
     "fact": {
         "name": "Construction Yard",
-        "cost": 2500,
+        "cost": 2000,
         "hp": 150000,
         "power": 0,
         "side": "both",
@@ -561,7 +561,7 @@ RA_BUILDINGS: dict[str, dict] = {
     },
     "proc": {
         "name": "Ore Refinery",
-        "cost": 2000,
+        "cost": 1400,
         "hp": 90000,
         "power": -30,
         "side": "both",
@@ -581,7 +581,7 @@ RA_BUILDINGS: dict[str, dict] = {
     },
     "dome": {
         "name": "Radar Dome",
-        "cost": 1000,
+        "cost": 1500,
         "hp": 100000,
         "power": -40,
         "side": "both",
@@ -621,7 +621,7 @@ RA_BUILDINGS: dict[str, dict] = {
     },
     "hpad": {
         "name": "Helipad",
-        "cost": 1500,
+        "cost": 500,
         "hp": 80000,
         "power": -10,
         "side": "allied",
@@ -631,7 +631,7 @@ RA_BUILDINGS: dict[str, dict] = {
     },
     "afld": {
         "name": "Airfield",
-        "cost": 1000,
+        "cost": 500,
         "hp": 100000,
         "power": -20,
         "side": "soviet",
@@ -641,7 +641,7 @@ RA_BUILDINGS: dict[str, dict] = {
     },
     "spen": {
         "name": "Sub Pen",
-        "cost": 650,
+        "cost": 800,
         "hp": 100000,
         "power": -20,
         "side": "soviet",
@@ -652,7 +652,7 @@ RA_BUILDINGS: dict[str, dict] = {
     },
     "syrd": {
         "name": "Naval Yard",
-        "cost": 650,
+        "cost": 1000,
         "hp": 100000,
         "power": -20,
         "side": "allied",
@@ -685,7 +685,7 @@ RA_BUILDINGS: dict[str, dict] = {
     # Defenses
     "pbox": {
         "name": "Pillbox",
-        "cost": 400,
+        "cost": 600,
         "hp": 40000,
         "power": 0,
         "side": "allied",
@@ -695,7 +695,7 @@ RA_BUILDINGS: dict[str, dict] = {
     },
     "hbox": {
         "name": "Camo Pillbox",
-        "cost": 600,
+        "cost": 750,
         "hp": 40000,
         "power": 0,
         "side": "allied",
@@ -705,7 +705,7 @@ RA_BUILDINGS: dict[str, dict] = {
     },
     "gun": {
         "name": "Turret",
-        "cost": 600,
+        "cost": 800,
         "hp": 40000,
         "power": -20,
         "side": "allied",
@@ -725,7 +725,7 @@ RA_BUILDINGS: dict[str, dict] = {
     },
     "tsla": {
         "name": "Tesla Coil",
-        "cost": 1500,
+        "cost": 1200,
         "hp": 40000,
         "power": -75,
         "side": "soviet",
@@ -735,7 +735,7 @@ RA_BUILDINGS: dict[str, dict] = {
     },
     "agun": {
         "name": "AA Gun",
-        "cost": 600,
+        "cost": 800,
         "hp": 40000,
         "power": -50,
         "side": "allied",
@@ -745,7 +745,7 @@ RA_BUILDINGS: dict[str, dict] = {
     },
     "sam": {
         "name": "SAM Site",
-        "cost": 750,
+        "cost": 700,
         "hp": 40000,
         "power": -20,
         "side": "soviet",
@@ -755,7 +755,7 @@ RA_BUILDINGS: dict[str, dict] = {
     },
     "gap": {
         "name": "Gap Generator",
-        "cost": 500,
+        "cost": 800,
         "hp": 50000,
         "power": -60,
         "side": "allied",
@@ -767,7 +767,7 @@ RA_BUILDINGS: dict[str, dict] = {
     # Superweapons
     "iron": {
         "name": "Iron Curtain",
-        "cost": 2800,
+        "cost": 2000,
         "hp": 100000,
         "power": -200,
         "side": "soviet",
@@ -778,7 +778,7 @@ RA_BUILDINGS: dict[str, dict] = {
     },
     "pdox": {
         "name": "Chronosphere",
-        "cost": 2800,
+        "cost": 1500,
         "hp": 100000,
         "power": -200,
         "side": "allied",
