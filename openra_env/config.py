@@ -54,27 +54,6 @@ class RewardConfig(BaseModel):
     defeat: float = -1.0
 
 
-class RewardVectorConfig(BaseModel):
-    """Configuration for the multi-dimensional reward vector.
-
-    When enabled, each step returns an 8-dimensional reward vector
-    (combat, economy, infrastructure, intelligence, composition,
-    tempo, disruption, outcome) alongside the scalar reward.
-    """
-
-    enabled: bool = False  # Off by default for backward compatibility
-    weights: dict[str, float] = Field(default_factory=lambda: {
-        "combat": 0.30,
-        "economy": 0.15,
-        "infrastructure": 0.10,
-        "intelligence": 0.10,
-        "composition": 0.10,
-        "tempo": 0.10,
-        "disruption": 0.15,
-        "outcome": 1.00,
-    })
-
-
 class ToolCategoriesConfig(BaseModel):
     read: bool = True
     knowledge: bool = True
@@ -146,7 +125,6 @@ class OpenRARLConfig(BaseModel):
     opponent: OpponentConfig = Field(default_factory=OpponentConfig)
     planning: PlanningConfig = Field(default_factory=PlanningConfig)
     reward: RewardConfig = Field(default_factory=RewardConfig)
-    reward_vector: RewardVectorConfig = Field(default_factory=RewardVectorConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)

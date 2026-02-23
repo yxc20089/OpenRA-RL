@@ -1,19 +1,11 @@
 """Reward computation for OpenRA-RL.
 
-Two reward systems:
-
-1. **Scalar reward** (OpenRARewardFunction) — Legacy 6-component shaped reward.
-   Used when reward_vector.enabled=False (default).
-
-2. **Reward vector** (RewardVectorComputer from openra-rl-util) — 7+1 dimensional
-   skill-based signal. Enabled via reward_vector.enabled=True in config.
-   Can be collapsed to scalar via configurable weights.
+Configurable multi-component reward function that combines
+survival, economic, military, and strategic signals.
 """
 
 from dataclasses import dataclass
 from typing import Optional
-
-from openra_rl_util.reward_vector import RewardVector, RewardVectorComputer
 
 
 @dataclass
@@ -43,37 +35,24 @@ class RewardState:
 class OpenRARewardFunction:
     """Computes shaped rewards from OpenRA game observations.
 
-    Supports two modes:
-    - Scalar: weighted sum of 6 simple components (default)
-    - Vector: 8-dimensional reward via RewardVectorComputer (when enabled)
-
-    The vector mode provides richer training signal for RL, decomposing
-    reward into combat, economy, infrastructure, intelligence, composition,
-    tempo, disruption, and outcome dimensions.
+    The reward is a weighted sum of:
+    - Survival: small positive reward per tick alive
+    - Economic efficiency: reward for increasing cash/resources
+    - Aggression: reward for destroying enemy units/buildings
+    - Defense: penalty for losing own units/buildings
+    - Victory/Defeat: large terminal reward
     """
 
-    def __init__(
-        self,
-        weights: Optional[RewardWeights] = None,
-        vector_enabled: bool = False,
-        vector_weights: Optional[dict[str, float]] = None,
-    ):
+    def __init__(self, weights: Optional[RewardWeights] = None):
         self.weights = weights or RewardWeights()
         self._state = RewardState()
-
-        # Reward vector mode
-        self.vector_enabled = vector_enabled
-        self._vector_computer = RewardVectorComputer() if vector_enabled else None
-        self._vector_weights = vector_weights
 
     def reset(self) -> None:
         """Reset tracking state for a new episode."""
         self._state = RewardState()
-        if self._vector_computer is not None:
-            self._vector_computer.reset()
 
     def compute(self, obs_dict: dict) -> float:
-        """Compute scalar reward from an observation dictionary.
+        """Compute reward from an observation dictionary.
 
         Args:
             obs_dict: Observation data with economy, military, done, result fields.
@@ -129,32 +108,3 @@ class OpenRARewardFunction:
         self._state.prev_army_value = military.get("army_value", 0)
 
         return reward
-
-    def compute_vector(self, obs_dict: dict) -> Optional[RewardVector]:
-        """Compute multi-dimensional reward vector.
-
-        Returns None if vector mode is not enabled.
-
-        Args:
-            obs_dict: Full observation dictionary.
-
-        Returns:
-            RewardVector with 8 dimensions, or None if disabled.
-        """
-        if self._vector_computer is None:
-            return None
-        return self._vector_computer.compute(obs_dict)
-
-    def compute_all(self, obs_dict: dict) -> tuple[float, Optional[dict[str, float]]]:
-        """Compute both scalar reward and optional reward vector dict.
-
-        Convenience method for the environment step() to get both signals.
-
-        Returns:
-            (scalar_reward, reward_vector_dict_or_None)
-        """
-        scalar = self.compute(obs_dict)
-        vector = self.compute_vector(obs_dict)
-        if vector is not None:
-            return scalar, vector.as_dict()
-        return scalar, None
