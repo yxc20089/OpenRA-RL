@@ -5,7 +5,7 @@ the OpenEnv client-server boundary.
 """
 
 from enum import Enum
-from typing import List
+from typing import Dict, List, Optional
 
 from pydantic import Field
 
@@ -189,6 +189,12 @@ class OpenRAObservation(Observation):
     # Spatial map tensor (base64-encoded float32 array for JSON transport)
     spatial_map: str = Field(default="", description="Base64-encoded spatial tensor: H×W×C float32 array")
     spatial_channels: int = Field(default=0, description="Number of spatial channels")
+
+    # Multi-dimensional reward vector (when reward_vector.enabled=True)
+    reward_vector: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="8-dimensional reward: combat, economy, infrastructure, intelligence, composition, tempo, disruption, outcome",
+    )
 
     # Inherited from Observation:
     # done: bool = False

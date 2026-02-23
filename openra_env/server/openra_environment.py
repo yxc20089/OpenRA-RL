@@ -144,7 +144,11 @@ class OpenRAEnvironment(MCPEnvironment):
             victory=cfg.reward.victory,
             defeat=cfg.reward.defeat,
         )
-        self._reward_fn = OpenRARewardFunction(weights=rw)
+        self._reward_fn = OpenRARewardFunction(
+            weights=rw,
+            vector_enabled=cfg.reward_vector.enabled,
+            vector_weights=cfg.reward_vector.weights if cfg.reward_vector.enabled else None,
+        )
         self._state = OpenRAState()
         self._last_obs: Optional[dict] = None
         self._unit_groups: dict[str, list[int]] = {}  # named groups of unit IDs
@@ -2535,9 +2539,9 @@ class OpenRAEnvironment(MCPEnvironment):
         self._last_obs = self._build_initial_obs_from_state(game_state)
 
         # Compute initial reward (should be 0)
-        reward = self._reward_fn.compute(self._last_obs)
+        reward, reward_vec = self._reward_fn.compute_all(self._last_obs)
 
-        return self._build_observation(self._last_obs, reward)
+        return self._build_observation(self._last_obs, reward, reward_vec)
 
     def _step_impl(
         self,
@@ -2552,8 +2556,8 @@ class OpenRAEnvironment(MCPEnvironment):
             )
             obs_dict = future.result(timeout=300)
             self._last_obs = obs_dict
-            reward = self._reward_fn.compute(obs_dict)
-            return self._build_observation(obs_dict, reward)
+            reward, reward_vec = self._reward_fn.compute_all(obs_dict)
+            return self._build_observation(obs_dict, reward, reward_vec)
 
         return Observation(
             done=False,
@@ -2565,7 +2569,9 @@ class OpenRAEnvironment(MCPEnvironment):
     def state(self) -> OpenRAState:
         return self._state
 
-    def _build_observation(self, obs_dict: dict, reward: float) -> OpenRAObservation:
+    def _build_observation(
+        self, obs_dict: dict, reward: float, reward_vec: dict | None = None,
+    ) -> OpenRAObservation:
         """Convert a raw observation dict to an OpenRAObservation model."""
         return OpenRAObservation(
             tick=obs_dict["tick"],
@@ -2583,6 +2589,7 @@ class OpenRAEnvironment(MCPEnvironment):
             result=obs_dict.get("result", ""),
             spatial_map=obs_dict.get("spatial_map", ""),
             spatial_channels=obs_dict.get("spatial_channels", 0),
+            reward_vector=reward_vec,
         )
 
     def close(self) -> None:
