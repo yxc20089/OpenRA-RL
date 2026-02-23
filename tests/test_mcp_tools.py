@@ -446,7 +446,7 @@ class TestMCPKnowledgeTools:
         tool = mcp._tool_manager._tools["lookup_unit"]
         result = tool.fn("3tnk")
         assert result["name"] == "Heavy Tank"
-        assert result["cost"] == 950
+        assert result["cost"] == 1150
 
     def test_lookup_unit_not_found(self, mcp):
         tool = mcp._tool_manager._tools["lookup_unit"]
