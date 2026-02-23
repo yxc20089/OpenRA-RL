@@ -18,7 +18,6 @@ from openra_env.config import (
     OpponentConfig,
     PlanningConfig,
     RewardConfig,
-    RewardVectorConfig,
     ToolCategoriesConfig,
     ToolsConfig,
     _coerce_value,
@@ -400,45 +399,6 @@ class TestBackwardsCompat:
         assert rc.defense == rw.defense
         assert rc.victory == rw.victory
         assert rc.defeat == rw.defeat
-
-
-class TestRewardVectorConfig:
-    """Test reward vector configuration."""
-
-    def test_disabled_by_default(self):
-        cfg = RewardVectorConfig()
-        assert cfg.enabled is False
-
-    def test_default_weights(self):
-        cfg = RewardVectorConfig()
-        assert cfg.weights["combat"] == 0.30
-        assert cfg.weights["economy"] == 0.15
-        assert cfg.weights["outcome"] == 1.00
-        assert len(cfg.weights) == 8
-
-    def test_present_in_root_config(self):
-        cfg = OpenRARLConfig()
-        assert hasattr(cfg, "reward_vector")
-        assert isinstance(cfg.reward_vector, RewardVectorConfig)
-        assert cfg.reward_vector.enabled is False
-
-    def test_enable_via_yaml(self):
-        with _clean_env():
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-                yaml.dump({"reward_vector": {"enabled": True}}, f)
-                f.flush()
-                cfg = load_config(config_path=f.name)
-                assert cfg.reward_vector.enabled is True
-
-    def test_custom_weights_via_yaml(self):
-        with _clean_env():
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-                yaml.dump({"reward_vector": {"enabled": True, "weights": {"combat": 0.5}}}, f)
-                f.flush()
-                cfg = load_config(config_path=f.name)
-                assert cfg.reward_vector.weights["combat"] == 0.5
 
 
 # ── Validation Errors ─────────────────────────────────────────────────
