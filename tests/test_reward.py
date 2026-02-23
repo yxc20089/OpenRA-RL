@@ -3,6 +3,7 @@
 import pytest
 
 from openra_env.reward import OpenRARewardFunction, RewardState, RewardWeights
+from openra_rl_util.reward_vector import RewardVector
 
 
 def make_obs(
@@ -164,3 +165,95 @@ class TestOpenRARewardFunction:
         reward = rf.compute({})
         # Should handle missing keys gracefully, just survival
         assert reward == pytest.approx(0.001)
+
+
+class TestRewardVectorIntegration:
+    """Test reward vector mode integration."""
+
+    def test_vector_disabled_by_default(self):
+        rf = OpenRARewardFunction()
+        assert rf.vector_enabled is False
+        assert rf.compute_vector(make_obs()) is None
+
+    def test_vector_enabled(self):
+        rf = OpenRARewardFunction(vector_enabled=True)
+        assert rf.vector_enabled is True
+        v = rf.compute_vector(make_full_obs())
+        assert isinstance(v, RewardVector)
+
+    def test_compute_all_without_vector(self):
+        rf = OpenRARewardFunction()
+        scalar, vec_dict = rf.compute_all(make_obs())
+        assert isinstance(scalar, float)
+        assert vec_dict is None
+
+    def test_compute_all_with_vector(self):
+        rf = OpenRARewardFunction(vector_enabled=True)
+        scalar, vec_dict = rf.compute_all(make_full_obs())
+        assert isinstance(scalar, float)
+        assert isinstance(vec_dict, dict)
+        assert "combat" in vec_dict
+        assert "economy" in vec_dict
+        assert "outcome" in vec_dict
+        assert len(vec_dict) == 8
+
+    def test_vector_reset(self):
+        rf = OpenRARewardFunction(vector_enabled=True)
+        rf.compute_all(make_full_obs())
+        rf.reset()
+        # After reset, should compute cleanly
+        _, vec_dict = rf.compute_all(make_full_obs())
+        assert vec_dict is not None
+
+    def test_vector_win_outcome(self):
+        rf = OpenRARewardFunction(vector_enabled=True)
+        rf.compute_vector(make_full_obs())  # baseline
+        v = rf.compute_vector(make_full_obs(done=True, result="win"))
+        assert v.outcome == 1.0
+
+    def test_vector_lose_outcome(self):
+        rf = OpenRARewardFunction(vector_enabled=True)
+        rf.compute_vector(make_full_obs())  # baseline
+        v = rf.compute_vector(make_full_obs(done=True, result="lose"))
+        assert v.outcome == -1.0
+
+    def test_vector_combat_from_kills(self):
+        rf = OpenRARewardFunction(vector_enabled=True)
+        rf.compute_vector(make_full_obs())  # baseline
+        v = rf.compute_vector(make_full_obs(kills_cost=5000))
+        assert v.combat > 0
+
+    def test_vector_dimensions_bounded(self):
+        rf = OpenRARewardFunction(vector_enabled=True)
+        v = rf.compute_vector(make_full_obs())
+        for name, val in v.as_dict().items():
+            assert -1.0 <= val <= 1.0, f"{name} = {val} out of bounds"
+
+
+def make_full_obs(
+    cash=5000, kills_cost=0, deaths_cost=0, assets_value=0,
+    done=False, result="", harvester_count=1,
+):
+    """Create a full observation dict suitable for RewardVectorComputer."""
+    return {
+        "military": {
+            "units_killed": 0, "units_lost": 0,
+            "buildings_killed": 0, "buildings_lost": 0,
+            "army_value": 0, "active_unit_count": 0,
+            "kills_cost": kills_cost, "deaths_cost": deaths_cost,
+            "assets_value": assets_value, "experience": 0, "order_count": 0,
+        },
+        "economy": {
+            "cash": cash, "ore": 0,
+            "power_provided": 100, "power_drained": 0,
+            "resource_capacity": 2000, "harvester_count": harvester_count,
+        },
+        "units": [],
+        "buildings": [],
+        "visible_enemies": [],
+        "visible_enemy_buildings": [],
+        "production_queues": [],
+        "done": done,
+        "result": result,
+        "tick": 0,
+    }
