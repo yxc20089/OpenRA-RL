@@ -1,0 +1,28 @@
+# Build artifacts (Dockerfile builds fresh from source)
+OpenRA/bin/
+OpenRA/obj/
+
+# Replay files
+*.orarep
+replays/
+
+# Log files
+*.log
+
+# Documents
+documents/
+
+# Dev/test artifacts
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+.env
+.eggs/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.DS_Store

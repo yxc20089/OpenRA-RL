@@ -1,3 +1,17 @@
+---
+title: OpenRA-RL
+emoji: 🎮
+colorFrom: red
+colorTo: blue
+sdk: docker
+app_port: 8000
+tags:
+  - openenv
+  - reinforcement-learning
+  - rts
+pinned: false
+---
+
 # OpenRA-RL
 
 Play [Red Alert](https://www.openra.net/) with AI agents. LLMs, scripted bots, or RL — your agent commands armies in the classic RTS through a Python API.
