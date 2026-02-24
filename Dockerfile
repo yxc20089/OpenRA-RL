@@ -105,10 +105,11 @@ COPY openra_env/ /app/openra_env/
 COPY proto/ /app/proto/
 COPY pyproject.toml /app/
 
-# Create OpenRA support directory and pre-install RA game content
-# (required for replay viewer which uses Game.Platform=Default with full UI)
+# Create OpenRA support directory and pre-install RA game content (best-effort).
+# Only needed for the replay viewer (Game.Platform=Default with full UI).
+# The RL environment works without this content (headless mode).
 RUN mkdir -p /root/.config/openra/Content/ra/v2/expand /root/.config/openra/Content/ra/v2/cnc && \
-    curl -sL -o /tmp/ra-quickinstall.zip \
+    ( curl -sfL --max-time 30 -o /tmp/ra-quickinstall.zip \
         https://openra.baxxster.no/openra/ra-quickinstall.zip && \
     apt-get update && apt-get install -y --no-install-recommends unzip && \
     unzip -o /tmp/ra-quickinstall.zip -d /tmp/ra-content && \
@@ -116,7 +117,8 @@ RUN mkdir -p /root/.config/openra/Content/ra/v2/expand /root/.config/openra/Cont
     cp /tmp/ra-content/expand/* /root/.config/openra/Content/ra/v2/expand/ && \
     cp /tmp/ra-content/cnc/* /root/.config/openra/Content/ra/v2/cnc/ && \
     rm -rf /tmp/ra-quickinstall.zip /tmp/ra-content && \
-    apt-get purge -y unzip && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+    apt-get purge -y unzip && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* \
+    ) || echo "WARNING: RA content download failed (replay viewer will be unavailable)"
 
 # Copy entrypoints (fix Windows CRLF line endings)
 COPY docker/entrypoint.sh /entrypoint.sh
