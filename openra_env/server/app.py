@@ -251,7 +251,7 @@ footer {
       DOCUMENTATION
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
     </a>
-    <a href="https://huggingface.co/spaces/openra-rl/OpenRA-Bench" class="btn-ghost">
+    <a href="https://openra-rl-openra-bench.hf.space" class="btn-ghost">
       LEADERBOARD
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6-6 6 6"/><path d="M12 3v18"/><path d="M3 21h18"/></svg>
     </a>
@@ -354,7 +354,7 @@ footer {
       <ul>
         <li><a href="https://www.openra.net/"><span class="chevron"></span>OpenRA Engine</a></li>
         <li><a href="https://huggingface.co/openra-rl"><span class="chevron"></span>HuggingFace</a></li>
-        <li><a href="https://huggingface.co/spaces/openra-rl/OpenRA-Bench"><span class="chevron"></span>Leaderboard</a></li>
+        <li><a href="https://openra-rl-openra-bench.hf.space"><span class="chevron"></span>Leaderboard</a></li>
       </ul>
     </div>
   </div>
