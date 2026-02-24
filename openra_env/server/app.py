@@ -116,7 +116,7 @@ async def _run_try_agent(opponent: str):
 
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
     if not api_key:
-        yield _sse("error", {"message": "Server not configured for demo play (no API key)."})
+        yield _sse("error_event", {"message": "Server not configured for demo play (no API key)."})
         return
 
     llm_config = LLMConfig(
@@ -224,7 +224,7 @@ async def _run_try_agent(opponent: str):
                 try:
                     response = await chat_completion(messages, openai_tools, llm_config)
                 except Exception as e:
-                    yield _sse("error", {"message": f"LLM error: {e}"})
+                    yield _sse("error_event", {"message": f"LLM error: {e}"})
                     break
 
                 total_api_calls += 1
@@ -277,7 +277,7 @@ async def _run_try_agent(opponent: str):
                     ).lower():
                         consecutive_errors += 1
                         if consecutive_errors >= 3:
-                            yield _sse("error", {"message": "Game connection lost."})
+                            yield _sse("error_event", {"message": "Game connection lost."})
                             game_done = True
 
                     result_str = (
@@ -387,7 +387,7 @@ async def _run_try_agent(opponent: str):
                 pass
 
     except Exception as e:
-        yield _sse("error", {"message": str(e)})
+        yield _sse("error_event", {"message": str(e)})
 
 
 @app.get("/try-agent")
@@ -969,6 +969,12 @@ function startGame() {
   const scorecard = document.getElementById('scorecard');
   const opponent = document.getElementById('opponent').value;
 
+  // Close previous connection if any
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+  }
+
   // Reset UI
   logEl.innerHTML = '';
   scorecard.style.display = 'none';
@@ -978,55 +984,47 @@ function startGame() {
 
   log('Connecting to game server...', 'log-status');
 
-  // Use fetch with streaming for SSE
-  fetch('/try-agent?opponent=' + encodeURIComponent(opponent))
-    .then(response => {
-      if (!response.ok) {
-        log('Server error: ' + response.status, 'log-error');
-        resetBtn();
-        return;
-      }
+  // Use EventSource for reliable SSE streaming through proxies
+  eventSource = new EventSource('/try-agent?opponent=' + encodeURIComponent(opponent));
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let currentEvent = '';
+  eventSource.addEventListener('status', function(e) {
+    try { handleEvent('status', JSON.parse(e.data)); } catch(ex) {}
+  });
+  eventSource.addEventListener('turn', function(e) {
+    try { handleEvent('turn', JSON.parse(e.data)); } catch(ex) {}
+  });
+  eventSource.addEventListener('llm', function(e) {
+    try { handleEvent('llm', JSON.parse(e.data)); } catch(ex) {}
+  });
+  eventSource.addEventListener('tool_call', function(e) {
+    try { handleEvent('tool_call', JSON.parse(e.data)); } catch(ex) {}
+  });
+  eventSource.addEventListener('game_state', function(e) {
+    try { handleEvent('game_state', JSON.parse(e.data)); } catch(ex) {}
+  });
+  eventSource.addEventListener('done', function(e) {
+    try { handleEvent('done', JSON.parse(e.data)); } catch(ex) {}
+  });
+  eventSource.addEventListener('final', function(e) {
+    try { handleEvent('final', JSON.parse(e.data)); } catch(ex) {}
+  });
+  eventSource.addEventListener('commentary', function(e) {
+    try { handleEvent('commentary', JSON.parse(e.data)); } catch(ex) {}
+  });
+  eventSource.addEventListener('error_event', function(e) {
+    try { handleEvent('error', JSON.parse(e.data)); } catch(ex) {}
+  });
+  eventSource.addEventListener('_stream_end', function(e) {
+    eventSource.close();
+    eventSource = null;
+    resetBtn();
+  });
 
-      function processChunk() {
-        reader.read().then(({done, value}) => {
-          if (done) {
-            resetBtn();
-            return;
-          }
-
-          buffer += decoder.decode(value, {stream: true});
-          const lines = buffer.split('\\n');
-          buffer = lines.pop();
-
-          for (const line of lines) {
-            if (line.startsWith('event: ')) {
-              currentEvent = line.slice(7).trim();
-            } else if (line.startsWith('data: ')) {
-              try {
-                const data = JSON.parse(line.slice(6));
-                handleEvent(currentEvent, data);
-              } catch(e) {}
-            }
-          }
-
-          processChunk();
-        }).catch(err => {
-          log('Connection lost: ' + err.message, 'log-error');
-          resetBtn();
-        });
-      }
-
-      processChunk();
-    })
-    .catch(err => {
-      log('Failed to connect: ' + err.message, 'log-error');
-      resetBtn();
-    });
+  eventSource.onerror = function() {
+    eventSource.close();
+    eventSource = null;
+    resetBtn();
+  };
 }
 
 function handleEvent(type, data) {
@@ -1060,7 +1058,7 @@ function handleEvent(type, data) {
         log('  [COMMENTARY] ' + data.text, 'log-commentary');
       }
       break;
-    case 'error':
+    case 'error_event':
       log('Error: ' + (data.message || 'Unknown'), 'log-error');
       break;
   }
