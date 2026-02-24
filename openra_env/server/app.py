@@ -1071,6 +1071,7 @@ function handleEvent(type, data) {
       break;
     case 'final':
       showScorecard(data);
+      resetBtn();
       break;
     case 'commentary':
       if (data.text) {
