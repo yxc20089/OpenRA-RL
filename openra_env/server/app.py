@@ -987,12 +987,6 @@ function startGame() {
   const scorecard = document.getElementById('scorecard');
   const opponent = document.getElementById('opponent').value;
 
-  // Close previous connection if any
-  if (eventSource) {
-    eventSource.close();
-    eventSource = null;
-  }
-
   // Reset UI
   logEl.innerHTML = '';
   scorecard.style.display = 'none';
@@ -1002,47 +996,54 @@ function startGame() {
 
   log('Connecting to game server...', 'log-status');
 
-  // Use EventSource for reliable SSE streaming through proxies
-  eventSource = new EventSource('/try-agent?opponent=' + encodeURIComponent(opponent));
+  fetch('/try-agent?opponent=' + encodeURIComponent(opponent))
+    .then(response => {
+      if (!response.ok) {
+        log('Server error: ' + response.status, 'log-error');
+        resetBtn();
+        return;
+      }
 
-  eventSource.addEventListener('status', function(e) {
-    try { handleEvent('status', JSON.parse(e.data)); } catch(ex) {}
-  });
-  eventSource.addEventListener('turn', function(e) {
-    try { handleEvent('turn', JSON.parse(e.data)); } catch(ex) {}
-  });
-  eventSource.addEventListener('llm', function(e) {
-    try { handleEvent('llm', JSON.parse(e.data)); } catch(ex) {}
-  });
-  eventSource.addEventListener('tool_call', function(e) {
-    try { handleEvent('tool_call', JSON.parse(e.data)); } catch(ex) {}
-  });
-  eventSource.addEventListener('game_state', function(e) {
-    try { handleEvent('game_state', JSON.parse(e.data)); } catch(ex) {}
-  });
-  eventSource.addEventListener('done', function(e) {
-    try { handleEvent('done', JSON.parse(e.data)); } catch(ex) {}
-  });
-  eventSource.addEventListener('final', function(e) {
-    try { handleEvent('final', JSON.parse(e.data)); } catch(ex) {}
-  });
-  eventSource.addEventListener('commentary', function(e) {
-    try { handleEvent('commentary', JSON.parse(e.data)); } catch(ex) {}
-  });
-  eventSource.addEventListener('error_event', function(e) {
-    try { handleEvent('error', JSON.parse(e.data)); } catch(ex) {}
-  });
-  eventSource.addEventListener('_stream_end', function(e) {
-    eventSource.close();
-    eventSource = null;
-    resetBtn();
-  });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let currentEvent = '';
 
-  eventSource.onerror = function() {
-    eventSource.close();
-    eventSource = null;
-    resetBtn();
-  };
+      function processChunk() {
+        reader.read().then(({done, value}) => {
+          if (done) {
+            resetBtn();
+            return;
+          }
+
+          buffer += decoder.decode(value, {stream: true});
+          const lines = buffer.split('\\n');
+          buffer = lines.pop();
+
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              currentEvent = line.slice(7).trim();
+            } else if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                handleEvent(currentEvent, data);
+              } catch(e) {}
+            }
+          }
+
+          processChunk();
+        }).catch(err => {
+          log('Connection lost: ' + err.message, 'log-error');
+          resetBtn();
+        });
+      }
+
+      processChunk();
+    })
+    .catch(err => {
+      log('Failed to connect: ' + err.message, 'log-error');
+      resetBtn();
+    });
 }
 
 function handleEvent(type, data) {
