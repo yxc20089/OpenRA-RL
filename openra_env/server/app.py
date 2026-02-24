@@ -134,6 +134,7 @@ async def _run_try_agent(opponent: str):
         model="stepfun/step-3.5-flash",
         base_url="https://openrouter.ai/api/v1/chat/completions",
         max_tokens=_COMMENTARY_MAX_TOKENS,
+        request_timeout_s=15.0,
         extra_headers={
             "HTTP-Referer": "https://openra-rl.dev",
             "X-Title": "OpenRA-RL Commentary",
@@ -306,7 +307,6 @@ async def _run_try_agent(opponent: str):
                             })
 
                 # Generate commentary for this turn
-                yield _sse("commentary", {"text": f"[debug] pre-check: tool_calls={len(tool_calls)}, game_done={game_done}"})
                 if tool_calls and not game_done:
                     try:
                         action_summaries = []
