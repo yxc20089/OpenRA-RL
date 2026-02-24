@@ -526,10 +526,11 @@ async def chat_completion(
     payload = {
         "model": llm_config.model,
         "messages": clean_messages,
-        "tools": tools,
-        "tool_choice": "auto",
         "max_tokens": llm_config.max_tokens,
     }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
     if llm_config.temperature is not None:
         payload["temperature"] = llm_config.temperature
     if llm_config.top_p is not None:

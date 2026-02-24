@@ -404,6 +404,8 @@ async def try_agent(
     elif _broadcaster.has_replay:
         await queue.put(_sse("status", {"message": "Replaying last game..."}))
         await _broadcaster.replay_to(queue)
+        # Replay is finished — close stream so client re-enables the button
+        await queue.put(_sse("_stream_end", {}))
     else:
         await _broadcaster.start_game(opponent)
 
@@ -1090,9 +1092,32 @@ function resetBtn() {
   btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> WATCH AI PLAY';
   document.getElementById('opponent').disabled = false;
 }
+
+// Auto-connect if a game is already running
+fetch('/try-status')
+  .then(r => r.json())
+  .then(status => {
+    if (status.game_running || status.has_replay) {
+      if (status.opponent) {
+        document.getElementById('opponent').value = status.opponent;
+      }
+      startGame();
+    }
+  })
+  .catch(() => {});
 </script>
 </body>
 </html>"""
+
+
+@app.get("/try-status")
+async def try_status():
+    """Check if a game is currently running or has a replay available."""
+    return {
+        "game_running": _broadcaster.game_running,
+        "has_replay": _broadcaster.has_replay,
+        "opponent": _broadcaster._opponent if (_broadcaster.game_running or _broadcaster.has_replay) else "",
+    }
 
 
 @app.get("/try", response_class=HTMLResponse)
