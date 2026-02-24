@@ -68,24 +68,13 @@ async def _generate_commentary(user_content: str, llm_config, broadcaster) -> No
                 timeout=llm_config.request_timeout_s,
             )
 
-        if resp.status_code != 200:
-            broadcaster._broadcast(_sse("commentary", {
-                "text": f"[debug] API {resp.status_code}: {resp.text[:200]}",
-            }))
-            return
-
-        data = resp.json()
-        msg = data["choices"][0]["message"]
-        text = msg.get("content") or ""
-        if text:
-            broadcaster._broadcast(_sse("commentary", {"text": text.strip()}))
-        else:
-            # Debug: show what the model actually returned
-            broadcaster._broadcast(_sse("commentary", {
-                "text": f"[debug] empty content. keys={list(msg.keys())}, finish={data['choices'][0].get('finish_reason')}, raw={json.dumps(msg)[:300]}",
-            }))
-    except Exception as exc:
-        broadcaster._broadcast(_sse("commentary", {"text": f"[debug] error: {exc}"}))
+        if resp.status_code == 200:
+            data = resp.json()
+            text = data["choices"][0]["message"].get("content") or ""
+            if text:
+                broadcaster._broadcast(_sse("commentary", {"text": text.strip()}))
+    except Exception:
+        pass  # Commentary is non-essential
 
 
 class TryGameBroadcaster:
