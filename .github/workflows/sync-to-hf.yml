@@ -10,20 +10,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           lfs: true
       - name: Push to Hugging Face Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # HF rejects binary files in history. Create a squashed branch
-          # with only the current tree state and push that.
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Create an orphan branch with just the current tree (no history)
+          git checkout --orphan hf-sync
+          git commit -m "Sync from GitHub ${GITHUB_SHA::7}"
           git remote add hf https://openra-rl:$HF_TOKEN@huggingface.co/spaces/openra-rl/OpenRA-RL
-          git fetch hf main || true
-          # Create a new commit on top of HF's main with our current tree
-          git checkout -b hf-sync hf/main 2>/dev/null || git checkout --orphan hf-sync
-          git checkout main -- .
-          git add -A
-          git diff --cached --quiet && echo "No changes to sync" && exit 0
-          git commit -m "Sync from GitHub $(git -C . rev-parse --short HEAD)"
-          git push hf hf-sync:main
+          git push hf hf-sync:main --force
