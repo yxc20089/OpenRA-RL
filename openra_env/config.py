@@ -123,6 +123,7 @@ class LLMConfig(BaseModel):
     max_retries: int = 4
     retry_backoff_s: int = 10
     request_timeout_s: float = 120.0
+    reasoning_effort: Optional[str] = None  # "none", "low", "medium", "high"
     extra_headers: dict[str, str] = Field(
         default_factory=lambda: {
             "HTTP-Referer": "https://github.com/openra-rl",

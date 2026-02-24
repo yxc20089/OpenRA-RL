@@ -34,7 +34,7 @@ _COMMENTARY_SYSTEM_PROMPT = (
     "explaining what the AI is doing and why, in an engaging style. "
     "Keep it concise and accessible to viewers who may not know RTS games well."
 )
-_COMMENTARY_MAX_TOKENS = 512
+_COMMENTARY_MAX_TOKENS = 150
 
 
 def _sse(event_type: str, data: dict) -> str:
@@ -58,6 +58,9 @@ async def _generate_commentary(user_content: str, llm_config, broadcaster) -> No
                 {"role": "user", "content": user_content},
             ],
             "max_tokens": llm_config.max_tokens,
+            "reasoning": {"effort": "none"},
+            "temperature": 0.6,
+            "top_p": 0.95,
         }
 
         async with _httpx.AsyncClient() as client:
@@ -70,15 +73,7 @@ async def _generate_commentary(user_content: str, llm_config, broadcaster) -> No
 
         if resp.status_code == 200:
             data = resp.json()
-            msg = data["choices"][0]["message"]
-            text = msg.get("content") or ""
-            # Reasoning models put thinking in 'reasoning', fall back to it
-            if not text:
-                reasoning = msg.get("reasoning") or ""
-                if reasoning:
-                    # Extract last sentence(s) as the summary
-                    sentences = [s.strip() for s in reasoning.replace("\n", " ").split(".") if s.strip()]
-                    text = ". ".join(sentences[-2:]) + "." if sentences else ""
+            text = data["choices"][0]["message"].get("content") or ""
             if text:
                 broadcaster._broadcast(_sse("commentary", {"text": text.strip()}))
     except Exception:
@@ -167,6 +162,9 @@ async def _run_try_agent(opponent: str):
         model="stepfun/step-3.5-flash",
         base_url="https://openrouter.ai/api/v1/chat/completions",
         max_tokens=1500,
+        temperature=1.0,
+        top_p=0.95,
+        reasoning_effort="low",
         extra_headers={
             "HTTP-Referer": "https://openra-rl.dev",
             "X-Title": "OpenRA-RL Try Agent",

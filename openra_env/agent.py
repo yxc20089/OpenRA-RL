@@ -535,6 +535,8 @@ async def chat_completion(
         payload["temperature"] = llm_config.temperature
     if llm_config.top_p is not None:
         payload["top_p"] = llm_config.top_p
+    if llm_config.reasoning_effort is not None:
+        payload["reasoning"] = {"effort": llm_config.reasoning_effort}
 
     headers = dict(llm_config.extra_headers)
     if llm_config.api_key:
