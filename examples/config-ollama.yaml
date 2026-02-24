@@ -3,11 +3,11 @@
 
 llm:
   base_url: "http://localhost:11434/v1/chat/completions"
-  model: "llama3.1:70b"
+  model: "qwen3:32b"
   api_key: ""                         # No key needed for Ollama
   max_tokens: 2000
   extra_headers: {}
-  request_timeout_s: 180.0            # Local models can be slower
+  request_timeout_s: 300.0            # Local models need more time (auto-set if <= 120)
 
 agent:
   max_time_s: 3600                    # 1 hour (local models are slower)
