@@ -34,7 +34,7 @@ _COMMENTARY_SYSTEM_PROMPT = (
     "explaining what the AI is doing and why, in an engaging style. "
     "Keep it concise and accessible to viewers who may not know RTS games well."
 )
-_COMMENTARY_MAX_TOKENS = 150
+_COMMENTARY_MAX_TOKENS = 512
 
 
 def _sse(event_type: str, data: dict) -> str:
@@ -70,7 +70,15 @@ async def _generate_commentary(user_content: str, llm_config, broadcaster) -> No
 
         if resp.status_code == 200:
             data = resp.json()
-            text = data["choices"][0]["message"].get("content") or ""
+            msg = data["choices"][0]["message"]
+            text = msg.get("content") or ""
+            # Reasoning models put thinking in 'reasoning', fall back to it
+            if not text:
+                reasoning = msg.get("reasoning") or ""
+                if reasoning:
+                    # Extract last sentence(s) as the summary
+                    sentences = [s.strip() for s in reasoning.replace("\n", " ").split(".") if s.strip()]
+                    text = ". ".join(sentences[-2:]) + "." if sentences else ""
             if text:
                 broadcaster._broadcast(_sse("commentary", {"text": text.strip()}))
     except Exception:
