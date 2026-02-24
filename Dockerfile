@@ -13,7 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY OpenRA /src/openra
+# Clone OpenRA source from GitHub (works on HF Spaces where submodules aren't initialized)
+ARG OPENRA_REPO=https://github.com/yxc20089/OpenRA.git
+RUN git clone --depth=1 "$OPENRA_REPO" /src/openra
 WORKDIR /src/openra
 
 # Fix Windows CRLF line endings in shell scripts (git autocrlf on Windows adds \r)
