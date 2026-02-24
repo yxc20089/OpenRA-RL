@@ -902,11 +902,11 @@ async def run_agent(config, verbose: bool = False):
                 try:
                     response = await chat_completion(messages, openai_tools, llm_config, verbose)
                     break
-                except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+                except (httpx.ReadTimeout, httpx.ConnectTimeout):
                     timeout_s = int(llm_config.request_timeout_s)
                     print(f"\n  [ERROR] Request timed out after {timeout_s}s.")
                     if is_local:
-                        print(f"  [HINT] Local models can be slow. Increase timeout in config.yaml:")
+                        print("  [HINT] Local models can be slow. Increase timeout in config.yaml:")
                         print(f"         llm.request_timeout_s: {timeout_s * 2}")
                     break
                 except RuntimeError as e:
