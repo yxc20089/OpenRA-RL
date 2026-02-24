@@ -507,6 +507,7 @@ footer {
       <span>OPENRA<span class="rl">-RL</span></span>
     </a>
     <div class="nav-links">
+      <a href="/try" style="color:#ef4444;font-weight:700;">TRY</a>
       <a href="https://openra-rl.dev/docs/getting-started">DOCS</a>
       <a href="/docs">API</a>
       <a href="https://github.com/yxc20089/OpenRA-RL">GITHUB</a>
@@ -527,7 +528,11 @@ footer {
     Connect via WebSocket or HTTP, send actions, observe the battlefield.
   </div>
   <div class="buttons">
-    <a href="https://openra-rl.dev/docs/getting-started" class="btn-soviet">
+    <a href="/try" class="btn-soviet">
+      WATCH AI PLAY
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+    </a>
+    <a href="https://openra-rl.dev/docs/getting-started" class="btn-ghost">
       DOCUMENTATION
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
     </a>
@@ -647,6 +652,321 @@ footer {
 async def root():
     """Landing page for the HuggingFace Space."""
     return LANDING_PAGE
+
+
+# ── Try Page: Watch AI Play ──────────────────────────────────────────────────
+
+TRY_PAGE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Try &mdash; Watch AI Play Red Alert</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Teko:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Share Tech Mono', monospace;
+  background: radial-gradient(circle at center, #1a0505 0%, #050505 100%);
+  color: #d1d5db;
+  min-height: 100vh;
+}
+a { color: #d1d5db; text-decoration: none; transition: color .2s; }
+a:hover { color: #fff; }
+h1, h2, h3, .font-teko {
+  font-family: 'Teko', sans-serif;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.scanlines {
+  background: linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0) 50%, rgba(0,0,0,0.2) 50%, rgba(0,0,0,0.2));
+  background-size: 100% 4px;
+  position: fixed; inset: 0; pointer-events: none; z-index: 50;
+}
+.terminal-text { color: #84cc16; text-shadow: 0 0 5px rgba(132,204,22,.5); }
+.alert-text { color: #ef4444; text-shadow: 0 0 8px rgba(239,68,68,.8); }
+
+nav {
+  border-bottom: 2px solid #991b1b;
+  background: rgba(0,0,0,.9);
+  position: sticky; top: 0; z-index: 40;
+  backdrop-filter: blur(4px);
+}
+.nav-inner {
+  max-width: 72rem; margin: 0 auto; padding: 0 1.5rem;
+  display: flex; align-items: center; justify-content: space-between; height: 4rem;
+}
+.nav-logo { display: flex; align-items: center; gap: .6rem; }
+.nav-logo svg { width: 2rem; height: 2rem; color: #dc2626; animation: spin 4s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.nav-logo span { font-family: 'Teko', sans-serif; font-size: 1.8rem; font-weight: 700; color: #fff; letter-spacing: .15em; }
+.nav-logo .rl { color: #dc2626; }
+.nav-links { display: flex; gap: 1.5rem; align-items: center; }
+.nav-links a { font-family: 'Teko', sans-serif; font-size: 1.15rem; letter-spacing: .1em; color: #9ca3af; text-transform: uppercase; }
+.nav-links a:hover { color: #fff; }
+
+.container { max-width: 56rem; margin: 0 auto; padding: 2rem 1.5rem; }
+.header { text-align: center; margin-bottom: 2rem; }
+.header h1 { font-size: 2.5rem; color: #fff; margin-bottom: .5rem; }
+.header p { color: #9ca3af; font-size: .95rem; }
+
+.controls {
+  display: flex; gap: 1rem; align-items: center; justify-content: center;
+  margin-bottom: 1.5rem; flex-wrap: wrap;
+}
+.controls select {
+  font-family: 'Share Tech Mono', monospace;
+  background: #121212; color: #d1d5db; border: 2px solid #525252;
+  padding: .5rem 1rem; font-size: 1rem; cursor: pointer;
+}
+.controls select:hover { border-color: #737373; }
+.btn-soviet {
+  display: inline-flex; align-items: center; gap: .5rem;
+  background: #dc2626; border: 2px solid #f87171;
+  box-shadow: 4px 4px 0 #000; transition: all .1s;
+  color: #fff; font-family: 'Teko', sans-serif;
+  font-size: 1.6rem; padding: .4rem 1.8rem;
+  text-transform: uppercase; cursor: pointer;
+}
+.btn-soviet:hover { transform: translate(2px,2px); box-shadow: 2px 2px 0 #000; background: #ef4444; }
+.btn-soviet:disabled { opacity: .5; cursor: not-allowed; transform: none; box-shadow: 4px 4px 0 #000; }
+
+.game-log {
+  background: #0a0a0a; border: 2px solid #262626; border-left: 4px solid #dc2626;
+  padding: 1rem 1.2rem; font-size: .82rem; line-height: 1.7;
+  height: 420px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+  margin-bottom: 1.5rem;
+}
+.game-log .log-status { color: #84cc16; }
+.game-log .log-turn { color: #facc15; }
+.game-log .log-llm { color: #c084fc; }
+.game-log .log-tool { color: #38bdf8; }
+.game-log .log-state { color: #6b7280; }
+.game-log .log-done { color: #ef4444; font-weight: bold; }
+.game-log .log-error { color: #ef4444; }
+
+.scorecard {
+  background: #121212; border: 2px solid #262626; padding: 1.5rem;
+  display: none;
+}
+.scorecard h2 { color: #fff; font-size: 1.8rem; margin-bottom: 1rem; }
+.scorecard table { width: 100%; border-collapse: collapse; }
+.scorecard td { padding: .4rem .8rem; border-bottom: 1px solid #1a1a1a; font-size: .85rem; }
+.scorecard td:first-child { color: #9ca3af; }
+.scorecard td:last-child { color: #fff; text-align: right; }
+.scorecard .result-win { color: #22c55e; font-size: 1.2rem; font-weight: bold; }
+.scorecard .result-loss { color: #ef4444; font-size: 1.2rem; font-weight: bold; }
+
+footer {
+  background: #000; border-top: 2px solid #7f1d1d;
+  margin-top: 3rem; padding: 1.5rem;
+  text-align: center; font-size: .8rem; color: #6b7280;
+}
+</style>
+</head>
+<body>
+<div class="scanlines"></div>
+
+<nav>
+  <div class="nav-inner">
+    <a href="/" class="nav-logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square" stroke-linejoin="miter">
+        <circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6" stroke-opacity="0.5"/>
+        <circle cx="12" cy="12" r="2" fill="currentColor"/><path d="M12 12l8.5-8.5"/>
+        <path d="M12 2v10H2" stroke-opacity="0.5" stroke-dasharray="2 2"/>
+      </svg>
+      <span>OPENRA<span class="rl">-RL</span></span>
+    </a>
+    <div class="nav-links">
+      <a href="/try" style="color:#ef4444;font-weight:700;">TRY</a>
+      <a href="https://openra-rl.dev/docs/getting-started">DOCS</a>
+      <a href="/docs">API</a>
+      <a href="https://github.com/yxc20089/OpenRA-RL">GITHUB</a>
+    </div>
+  </div>
+</nav>
+
+<div class="container">
+  <div class="header">
+    <h1 class="alert-text">Watch AI Play</h1>
+    <p>A pre-configured LLM agent plays Red Alert against the built-in AI. No setup needed.</p>
+  </div>
+
+  <div class="controls">
+    <select id="opponent">
+      <option value="Easy">Easy</option>
+      <option value="Normal" selected>Normal</option>
+      <option value="Hard">Hard</option>
+    </select>
+    <button id="playBtn" class="btn-soviet" onclick="startGame()">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+      WATCH AI PLAY
+    </button>
+  </div>
+
+  <div id="gameLog" class="game-log">Waiting to start...\n</div>
+
+  <div id="scorecard" class="scorecard">
+    <h2>Scorecard</h2>
+    <table id="scorecardTable"></table>
+  </div>
+</div>
+
+<footer>&copy; 2025 OpenRA-RL Contributors &mdash; <a href="/">Home</a></footer>
+
+<script>
+let eventSource = null;
+
+function log(msg, cls) {
+  const el = document.getElementById('gameLog');
+  const span = document.createElement('span');
+  span.className = cls || '';
+  span.textContent = msg + '\\n';
+  el.appendChild(span);
+  el.scrollTop = el.scrollHeight;
+}
+
+function startGame() {
+  const btn = document.getElementById('playBtn');
+  const logEl = document.getElementById('gameLog');
+  const scorecard = document.getElementById('scorecard');
+  const opponent = document.getElementById('opponent').value;
+
+  // Reset UI
+  logEl.innerHTML = '';
+  scorecard.style.display = 'none';
+  btn.disabled = true;
+  btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> RUNNING...';
+
+  log('Connecting to game server...', 'log-status');
+
+  // Use fetch with streaming for SSE
+  fetch('/try-agent?opponent=' + encodeURIComponent(opponent))
+    .then(response => {
+      if (response.status === 409) {
+        log('A game is already in progress. Please wait and try again.', 'log-error');
+        resetBtn();
+        return;
+      }
+      if (!response.ok) {
+        log('Server error: ' + response.status, 'log-error');
+        resetBtn();
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let currentEvent = '';
+
+      function processChunk() {
+        reader.read().then(({done, value}) => {
+          if (done) {
+            resetBtn();
+            return;
+          }
+
+          buffer += decoder.decode(value, {stream: true});
+          const lines = buffer.split('\\n');
+          buffer = lines.pop();
+
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              currentEvent = line.slice(7).trim();
+            } else if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                handleEvent(currentEvent, data);
+              } catch(e) {}
+            }
+          }
+
+          processChunk();
+        }).catch(err => {
+          log('Connection lost: ' + err.message, 'log-error');
+          resetBtn();
+        });
+      }
+
+      processChunk();
+    })
+    .catch(err => {
+      log('Failed to connect: ' + err.message, 'log-error');
+      resetBtn();
+    });
+}
+
+function handleEvent(type, data) {
+  switch(type) {
+    case 'status':
+      log(data.message, 'log-status');
+      break;
+    case 'turn':
+      log('[Turn ' + data.turn + '] API calls: ' + data.api_calls + ' | ' + data.elapsed + 's', 'log-turn');
+      break;
+    case 'llm':
+      if (data.content) {
+        const text = data.content.length > 300 ? data.content.slice(0, 300) + '...' : data.content;
+        log('  AI: ' + text, 'log-llm');
+      }
+      break;
+    case 'tool_call':
+      log('  >> ' + data.name + '(' + (data.args || '') + ')', 'log-tool');
+      break;
+    case 'game_state':
+      log('  tick=' + data.tick + ' units=' + data.units + ' buildings=' + data.buildings + ' $' + data.cash, 'log-state');
+      break;
+    case 'done':
+      log('\\nGAME OVER: ' + (data.result || '?').toUpperCase() + ' (tick ' + data.tick + ')', 'log-done');
+      break;
+    case 'final':
+      showScorecard(data);
+      break;
+    case 'error':
+      log('Error: ' + (data.message || 'Unknown'), 'log-error');
+      break;
+  }
+}
+
+function showScorecard(data) {
+  const sc = document.getElementById('scorecard');
+  const tbl = document.getElementById('scorecardTable');
+  const result = (data.result || 'ongoing').toUpperCase();
+  const cls = result === 'WIN' ? 'result-win' : 'result-loss';
+
+  tbl.innerHTML =
+    '<tr><td>Result</td><td class="' + cls + '">' + result + '</td></tr>' +
+    '<tr><td>Game Ticks</td><td>' + data.tick + '</td></tr>' +
+    '<tr><td>LLM Turns</td><td>' + data.turns + '</td></tr>' +
+    '<tr><td>Tool Calls</td><td>' + data.tool_calls + '</td></tr>' +
+    '<tr><td>Duration</td><td>' + data.elapsed + 's</td></tr>' +
+    '<tr><td>Units Killed</td><td>' + data.units_killed + '</td></tr>' +
+    '<tr><td>Units Lost</td><td>' + data.units_lost + '</td></tr>' +
+    '<tr><td>Kill Value</td><td>$' + data.kills_cost + '</td></tr>' +
+    '<tr><td>Death Value</td><td>$' + data.deaths_cost + '</td></tr>' +
+    '<tr><td>Cash Remaining</td><td>$' + data.cash + '</td></tr>' +
+    '<tr><td>Own Units</td><td>' + data.units + '</td></tr>' +
+    '<tr><td>Own Buildings</td><td>' + data.buildings + '</td></tr>';
+
+  sc.style.display = 'block';
+}
+
+function resetBtn() {
+  const btn = document.getElementById('playBtn');
+  btn.disabled = false;
+  btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> WATCH AI PLAY';
+}
+</script>
+</body>
+</html>"""
+
+
+@app.get("/try", response_class=HTMLResponse)
+async def try_page():
+    """Interactive page to watch an LLM agent play Red Alert."""
+    return TRY_PAGE
 
 
 def main():
