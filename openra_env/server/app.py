@@ -57,8 +57,8 @@ async def _generate_commentary(user_content: str, llm_config, broadcaster) -> No
                 {"role": "system", "content": _COMMENTARY_SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            "max_tokens": llm_config.max_tokens,
-            "reasoning": {"effort": "none"},
+            "max_tokens": 400,
+            "reasoning": {"effort": "low"},
             "temperature": 0.6,
             "top_p": 0.95,
         }
@@ -72,27 +72,20 @@ async def _generate_commentary(user_content: str, llm_config, broadcaster) -> No
             )
 
         if resp.status_code != 200:
-            broadcaster._broadcast(_sse("commentary", {
-                "text": f"[debug] API {resp.status_code}: {resp.text[:200]}",
-            }))
             return
         data = resp.json()
         msg = data["choices"][0]["message"]
         text = msg.get("content") or ""
         if not text:
-            # Fall back to reasoning field for reasoning models
+            # Reasoning models may put output in 'reasoning' if content is empty
             text = msg.get("reasoning") or ""
             if text:
                 sentences = [s.strip() for s in text.replace("\n", " ").split(".") if s.strip()]
                 text = ". ".join(sentences[-2:]) + "." if sentences else ""
         if text:
             broadcaster._broadcast(_sse("commentary", {"text": text.strip()}))
-        else:
-            broadcaster._broadcast(_sse("commentary", {
-                "text": f"[debug] empty. keys={list(msg.keys())} finish={data['choices'][0].get('finish_reason')}",
-            }))
-    except Exception as exc:
-        broadcaster._broadcast(_sse("commentary", {"text": f"[debug] error: {exc}"}))
+    except Exception:
+        pass  # Commentary is non-essential
 
 
 class TryGameBroadcaster:
