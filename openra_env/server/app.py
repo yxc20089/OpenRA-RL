@@ -42,6 +42,41 @@ def _sse(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
 
 
+async def _generate_commentary(user_content: str, llm_config, broadcaster) -> None:
+    """Generate commentary in the background and broadcast it."""
+    import httpx as _httpx
+
+    try:
+        headers = dict(llm_config.extra_headers)
+        if llm_config.api_key:
+            headers["Authorization"] = f"Bearer {llm_config.api_key}"
+
+        payload = {
+            "model": llm_config.model,
+            "messages": [
+                {"role": "system", "content": _COMMENTARY_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            "max_tokens": llm_config.max_tokens,
+        }
+
+        async with _httpx.AsyncClient() as client:
+            resp = await client.post(
+                llm_config.base_url,
+                headers=headers,
+                json=payload,
+                timeout=llm_config.request_timeout_s,
+            )
+
+        if resp.status_code == 200:
+            data = resp.json()
+            text = data["choices"][0]["message"].get("content", "")
+            if text:
+                broadcaster._broadcast(_sse("commentary", {"text": text.strip()}))
+    except Exception:
+        pass  # Commentary is non-essential
+
+
 class TryGameBroadcaster:
     """Manages a single game broadcast to multiple SSE subscribers."""
 
@@ -306,48 +341,24 @@ async def _run_try_agent(opponent: str):
                                 "cash": result.get("economy", {}).get("cash", 0),
                             })
 
-                # Generate commentary for this turn
+                # Fire-and-forget async commentary (doesn't block game loop)
                 if tool_calls and not game_done:
-                    try:
-                        action_summaries = []
-                        for tc in tool_calls:
-                            fn = tc["function"]["name"]
-                            try:
-                                fa = json.loads(tc["function"].get("arguments", "{}"))
-                            except (json.JSONDecodeError, TypeError):
-                                fa = {}
-                            action_summaries.append(f"{fn}({json.dumps(fa)})")
-
-                        commentary_state = ""
+                    action_summaries = []
+                    for tc in tool_calls:
+                        fn = tc["function"]["name"]
                         try:
-                            cs = await env.call_tool("get_game_state")
-                            eco = cs.get("economy", {})
-                            mil = cs.get("military", {})
-                            commentary_state = (
-                                f"Tick {cs.get('tick', '?')}, "
-                                f"cash ${eco.get('cash', '?')}, "
-                                f"{cs.get('own_units', '?')} units, "
-                                f"{cs.get('own_buildings', '?')} buildings, "
-                                f"kills: {mil.get('units_killed', 0)}, "
-                                f"losses: {mil.get('units_lost', 0)}"
-                            )
-                        except Exception:
-                            pass
+                            fa = json.loads(tc["function"].get("arguments", "{}"))
+                        except (json.JSONDecodeError, TypeError):
+                            fa = {}
+                        action_summaries.append(f"{fn}({json.dumps(fa)})")
 
-                        commentary_msgs = [
-                            {"role": "system", "content": _COMMENTARY_SYSTEM_PROMPT},
-                            {"role": "user", "content": (
-                                f"Turn {turn} actions:\n"
-                                + "\n".join(f"- {a}" for a in action_summaries[:8])
-                                + (f"\n\nGame state: {commentary_state}" if commentary_state else "")
-                            )},
-                        ]
-                        cresp = await chat_completion(commentary_msgs, [], commentary_config)
-                        ctext = cresp["choices"][0]["message"].get("content", "")
-                        if ctext:
-                            yield _sse("commentary", {"text": ctext.strip()})
-                    except Exception as exc:
-                        yield _sse("commentary", {"text": f"[debug] commentary failed: {exc}"})
+                    commentary_user = (
+                        f"Turn {turn} actions:\n"
+                        + "\n".join(f"- {a}" for a in action_summaries[:8])
+                    )
+                    asyncio.create_task(_generate_commentary(
+                        commentary_user, commentary_config, _broadcaster,
+                    ))
 
                 if game_done:
                     break
