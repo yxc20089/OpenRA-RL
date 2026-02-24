@@ -142,8 +142,6 @@ async def _run_try_agent(opponent: str):
 
     # Configure opponent difficulty for the next game
     os.environ["BOT_TYPE"] = opponent.lower()
-    # Skip planning phase for faster demo
-    os.environ["PLANNING_ENABLED"] = "false"
 
     yield _sse("status", {"message": f"Launching game vs {opponent} AI..."})
 
@@ -157,6 +155,11 @@ async def _run_try_agent(opponent: str):
             # Discover tools
             mcp_tools = await env.list_tools()
             openai_tools = mcp_tools_to_openai(mcp_tools)
+
+            # Start + end planning to trigger session start (unpauses game)
+            yield _sse("status", {"message": "Starting game session..."})
+            await env.call_tool("start_planning_phase")
+            await env.call_tool("end_planning_phase", strategy="Demo game - aggressive rush")
             yield _sse("status", {"message": f"Game started. {len(mcp_tools)} tools available."})
 
             # Initialize conversation
