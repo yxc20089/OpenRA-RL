@@ -9,7 +9,7 @@ import os
 import time
 
 from fastapi import Query
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from openenv.core.env_server import create_app
 
 from openra_env.models import OpenRAAction, OpenRAObservation
@@ -25,14 +25,80 @@ app = create_app(
 
 # ── Try Agent: LLM demo endpoint ────────────────────────────────────────────
 
-_try_agent_lock = asyncio.Lock()
 _TRY_MAX_TURNS = 30
 _TRY_MAX_TIME = 300  # 5 minutes
+
+_COMMENTARY_SYSTEM_PROMPT = (
+    "You are a real-time commentator for an AI playing Command & Conquer: Red Alert. "
+    "Given the AI's recent actions and current game state, write 1-2 sentences "
+    "explaining what the AI is doing and why, in an engaging style. "
+    "Keep it concise and accessible to viewers who may not know RTS games well."
+)
+_COMMENTARY_MAX_TOKENS = 150
 
 
 def _sse(event_type: str, data: dict) -> str:
     """Format a Server-Sent Event."""
     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+
+class TryGameBroadcaster:
+    """Manages a single game broadcast to multiple SSE subscribers."""
+
+    def __init__(self):
+        self._event_history: list[str] = []
+        self._subscribers: set[asyncio.Queue] = set()
+        self._game_running: bool = False
+        self._game_task: asyncio.Task | None = None
+        self._opponent: str = ""
+        self._start_lock = asyncio.Lock()
+
+    @property
+    def game_running(self) -> bool:
+        return self._game_running
+
+    @property
+    def has_replay(self) -> bool:
+        return bool(self._event_history) and not self._game_running
+
+    def subscribe(self) -> asyncio.Queue:
+        queue: asyncio.Queue = asyncio.Queue()
+        self._subscribers.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue) -> None:
+        self._subscribers.discard(queue)
+
+    def _broadcast(self, event: str) -> None:
+        self._event_history.append(event)
+        for q in self._subscribers:
+            q.put_nowait(event)
+
+    async def replay_to(self, queue: asyncio.Queue) -> None:
+        for event in list(self._event_history):
+            await queue.put(event)
+
+    async def start_game(self, opponent: str) -> None:
+        async with self._start_lock:
+            if self._game_running:
+                return
+            self._event_history.clear()
+            self._opponent = opponent
+            self._game_running = True
+            self._game_task = asyncio.create_task(self._run_game(opponent))
+
+    async def _run_game(self, opponent: str) -> None:
+        try:
+            async for event in _run_try_agent(opponent):
+                self._broadcast(event)
+        finally:
+            self._game_running = False
+            sentinel = _sse("_stream_end", {})
+            for q in self._subscribers:
+                q.put_nowait(sentinel)
+
+
+_broadcaster = TryGameBroadcaster()
 
 
 async def _run_try_agent(opponent: str):
@@ -61,6 +127,16 @@ async def _run_try_agent(opponent: str):
         extra_headers={
             "HTTP-Referer": "https://openra-rl.dev",
             "X-Title": "OpenRA-RL Try Agent",
+        },
+    )
+    commentary_config = LLMConfig(
+        api_key=api_key,
+        model="stepfun/step-3.5-flash",
+        base_url="https://openrouter.ai/api/v1/chat/completions",
+        max_tokens=_COMMENTARY_MAX_TOKENS,
+        extra_headers={
+            "HTTP-Referer": "https://openra-rl.dev",
+            "X-Title": "OpenRA-RL Commentary",
         },
     )
 
@@ -226,6 +302,49 @@ async def _run_try_agent(opponent: str):
                                 "cash": result.get("economy", {}).get("cash", 0),
                             })
 
+                # Generate commentary for this turn
+                if tool_calls and not game_done:
+                    try:
+                        action_summaries = []
+                        for tc in tool_calls:
+                            fn = tc["function"]["name"]
+                            try:
+                                fa = json.loads(tc["function"].get("arguments", "{}"))
+                            except (json.JSONDecodeError, TypeError):
+                                fa = {}
+                            action_summaries.append(f"{fn}({json.dumps(fa)})")
+
+                        commentary_state = ""
+                        try:
+                            cs = await env.call_tool("get_game_state")
+                            eco = cs.get("economy", {})
+                            mil = cs.get("military", {})
+                            commentary_state = (
+                                f"Tick {cs.get('tick', '?')}, "
+                                f"cash ${eco.get('cash', '?')}, "
+                                f"{cs.get('own_units', '?')} units, "
+                                f"{cs.get('own_buildings', '?')} buildings, "
+                                f"kills: {mil.get('units_killed', 0)}, "
+                                f"losses: {mil.get('units_lost', 0)}"
+                            )
+                        except Exception:
+                            pass
+
+                        commentary_msgs = [
+                            {"role": "system", "content": _COMMENTARY_SYSTEM_PROMPT},
+                            {"role": "user", "content": (
+                                f"Turn {turn} actions:\n"
+                                + "\n".join(f"- {a}" for a in action_summaries[:8])
+                                + (f"\n\nGame state: {commentary_state}" if commentary_state else "")
+                            )},
+                        ]
+                        cresp = await chat_completion(commentary_msgs, [], commentary_config)
+                        ctext = cresp["choices"][0]["message"].get("content", "")
+                        if ctext:
+                            yield _sse("commentary", {"text": ctext.strip()})
+                    except Exception:
+                        pass  # Commentary is non-essential
+
                 if game_done:
                     break
 
@@ -272,23 +391,33 @@ async def _run_try_agent(opponent: str):
 async def try_agent(
     opponent: str = Query("Normal", pattern="^(Easy|Normal|Hard)$"),
 ):
-    """Run an LLM agent for one demo game. Returns an SSE event stream.
+    """SSE stream of an LLM agent playing Red Alert.
 
-    Only one game can run at a time. Returns 409 if a game is in progress.
+    Multiple viewers can watch simultaneously. The first request starts
+    a new game; subsequent requests join as spectators of the ongoing game.
     """
-    if _try_agent_lock.locked():
-        return JSONResponse(
-            status_code=409,
-            content={
-                "error": "game_in_progress",
-                "message": "A game is already running. Please wait.",
-            },
-        )
+    queue = _broadcaster.subscribe()
+
+    if _broadcaster.game_running:
+        await queue.put(_sse("status", {"message": "Joining ongoing game as spectator..."}))
+        await _broadcaster.replay_to(queue)
+    elif _broadcaster.has_replay:
+        await queue.put(_sse("status", {"message": "Replaying last game..."}))
+        await _broadcaster.replay_to(queue)
+    else:
+        await _broadcaster.start_game(opponent)
 
     async def stream():
-        async with _try_agent_lock:
-            async for event in _run_try_agent(opponent):
+        try:
+            while True:
+                event = await asyncio.wait_for(queue.get(), timeout=360)
+                if '"_stream_end"' in event:
+                    break
                 yield event
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            _broadcaster.unsubscribe(queue)
 
     return StreamingResponse(
         stream(),
@@ -746,6 +875,7 @@ nav {
 .game-log .log-state { color: #6b7280; }
 .game-log .log-done { color: #ef4444; font-weight: bold; }
 .game-log .log-error { color: #ef4444; }
+.game-log .log-commentary { color: #f59e0b; font-style: italic; padding-left: 1em; border-left: 2px solid #f59e0b; margin: 2px 0; }
 
 .scorecard {
   background: #121212; border: 2px solid #262626; padding: 1.5rem;
@@ -838,18 +968,14 @@ function startGame() {
   logEl.innerHTML = '';
   scorecard.style.display = 'none';
   btn.disabled = true;
-  btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> RUNNING...';
+  document.getElementById('opponent').disabled = true;
+  btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> WATCHING...';
 
   log('Connecting to game server...', 'log-status');
 
   // Use fetch with streaming for SSE
   fetch('/try-agent?opponent=' + encodeURIComponent(opponent))
     .then(response => {
-      if (response.status === 409) {
-        log('A game is already in progress. Please wait and try again.', 'log-error');
-        resetBtn();
-        return;
-      }
       if (!response.ok) {
         log('Server error: ' + response.status, 'log-error');
         resetBtn();
@@ -924,6 +1050,11 @@ function handleEvent(type, data) {
     case 'final':
       showScorecard(data);
       break;
+    case 'commentary':
+      if (data.text) {
+        log('  [COMMENTARY] ' + data.text, 'log-commentary');
+      }
+      break;
     case 'error':
       log('Error: ' + (data.message || 'Unknown'), 'log-error');
       break;
@@ -957,6 +1088,7 @@ function resetBtn() {
   const btn = document.getElementById('playBtn');
   btn.disabled = false;
   btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> WATCH AI PLAY';
+  document.getElementById('opponent').disabled = false;
 }
 </script>
 </body>
