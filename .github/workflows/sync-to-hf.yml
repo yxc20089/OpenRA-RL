@@ -15,4 +15,6 @@ jobs:
       - name: Push to Hugging Face Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: git push https://openra-rl:$HF_TOKEN@huggingface.co/spaces/openra-rl/OpenRA-RL main
+        run: |
+          git remote add hf https://openra-rl:$HF_TOKEN@huggingface.co/spaces/openra-rl/OpenRA-RL
+          git push hf main --force
