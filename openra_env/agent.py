@@ -567,7 +567,7 @@ async def chat_completion(
                 )
             if response.status_code == 429:
                 raise RuntimeError(
-                    f"Rate limited by LLM provider. Wait a minute and retry."
+                    "Rate limited by LLM provider. Wait a minute and retry."
                 )
             raise RuntimeError(f"LLM API error {response.status_code}: {error_text}")
 
