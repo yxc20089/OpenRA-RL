@@ -345,8 +345,8 @@ async def _run_try_agent(opponent: str):
                         ctext = cresp["choices"][0]["message"].get("content", "")
                         if ctext:
                             yield _sse("commentary", {"text": ctext.strip()})
-                    except Exception:
-                        pass  # Commentary is non-essential
+                    except Exception as exc:
+                        yield _sse("commentary", {"text": f"[debug] commentary failed: {exc}"})
 
                 if game_done:
                     break
