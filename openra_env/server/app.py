@@ -71,13 +71,28 @@ async def _generate_commentary(user_content: str, llm_config, broadcaster) -> No
                 timeout=llm_config.request_timeout_s,
             )
 
-        if resp.status_code == 200:
-            data = resp.json()
-            text = data["choices"][0]["message"].get("content") or ""
+        if resp.status_code != 200:
+            broadcaster._broadcast(_sse("commentary", {
+                "text": f"[debug] API {resp.status_code}: {resp.text[:200]}",
+            }))
+            return
+        data = resp.json()
+        msg = data["choices"][0]["message"]
+        text = msg.get("content") or ""
+        if not text:
+            # Fall back to reasoning field for reasoning models
+            text = msg.get("reasoning") or ""
             if text:
-                broadcaster._broadcast(_sse("commentary", {"text": text.strip()}))
-    except Exception:
-        pass  # Commentary is non-essential
+                sentences = [s.strip() for s in text.replace("\n", " ").split(".") if s.strip()]
+                text = ". ".join(sentences[-2:]) + "." if sentences else ""
+        if text:
+            broadcaster._broadcast(_sse("commentary", {"text": text.strip()}))
+        else:
+            broadcaster._broadcast(_sse("commentary", {
+                "text": f"[debug] empty. keys={list(msg.keys())} finish={data['choices'][0].get('finish_reason')}",
+            }))
+    except Exception as exc:
+        broadcaster._broadcast(_sse("commentary", {"text": f"[debug] error: {exc}"}))
 
 
 class TryGameBroadcaster:
