@@ -554,7 +554,7 @@ async def chat_completion(
         )
 
         if response.status_code != 200:
-            error_text = response.text[:500]
+            error_text = response.text[:2000]
             if response.status_code in (401, 403):
                 raise RuntimeError(
                     f"Authentication failed ({response.status_code}). "
@@ -679,8 +679,15 @@ async def run_agent(config, verbose: bool = False):
     max_turns = config.agent.max_turns
     max_time = config.agent.max_time_s
 
+    # Auto-increase timeout for local models (they're slower than cloud APIs)
+    is_local = any(h in llm_config.base_url for h in ("localhost", "127.0.0.1"))
+    if is_local and llm_config.request_timeout_s <= 120.0:
+        llm_config = llm_config.model_copy(update={"request_timeout_s": 300.0})
+
     print(f"Connecting to {url}...")
     print(f"Model: {llm_config.model} @ {llm_config.base_url}")
+    if is_local:
+        print(f"Timeout: {int(llm_config.request_timeout_s)}s (local model)")
 
     async with OpenRAMCPClient(base_url=url, message_timeout_s=300.0) as env:
         print("Resetting environment (launching OpenRA)...")
@@ -890,23 +897,31 @@ async def run_agent(config, verbose: bool = False):
             # Call LLM with retry for rate limits
             response = None
             max_retries = llm_config.max_retries
+            is_local = any(h in llm_config.base_url for h in ("localhost", "127.0.0.1"))
             for attempt in range(max_retries):
                 try:
                     response = await chat_completion(messages, openai_tools, llm_config, verbose)
                     break
-                except (RuntimeError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+                except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+                    timeout_s = int(llm_config.request_timeout_s)
+                    print(f"\n  [ERROR] Request timed out after {timeout_s}s.")
+                    if is_local:
+                        print(f"  [HINT] Local models can be slow. Increase timeout in config.yaml:")
+                        print(f"         llm.request_timeout_s: {timeout_s * 2}")
+                    break
+                except RuntimeError as e:
                     err_str = str(e)
-                    retriable = isinstance(e, (httpx.ReadTimeout, httpx.ConnectTimeout)) or \
-                        any(code in err_str for code in ("429", "500", "502", "503", "504"))
+                    retriable = any(code in err_str for code in ("429", "500", "502", "503", "504"))
                     if retriable and attempt < max_retries - 1:
                         wait = llm_config.retry_backoff_s * (attempt + 1)
                         print(f"\n  [RETRY] Provider error, waiting {wait}s ({attempt + 1}/{max_retries})...")
+                        print(f"          {e}")
                         await asyncio.sleep(wait)
                     else:
                         print(f"\n  [ERROR] API call failed: {e}")
                         break
             if response is None:
-                print("  [ERROR] All retries exhausted. Run with --verbose for details.")
+                print("  [ERROR] Stopping agent.")
                 break
 
             total_api_calls += 1
