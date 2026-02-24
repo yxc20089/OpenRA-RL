@@ -75,11 +75,15 @@ async def _generate_commentary(user_content: str, llm_config, broadcaster) -> No
             return
 
         data = resp.json()
-        text = data["choices"][0]["message"].get("content", "")
+        msg = data["choices"][0]["message"]
+        text = msg.get("content") or ""
         if text:
             broadcaster._broadcast(_sse("commentary", {"text": text.strip()}))
         else:
-            broadcaster._broadcast(_sse("commentary", {"text": "[debug] empty response"}))
+            # Debug: show what the model actually returned
+            broadcaster._broadcast(_sse("commentary", {
+                "text": f"[debug] empty content. keys={list(msg.keys())}, finish={data['choices'][0].get('finish_reason')}, raw={json.dumps(msg)[:300]}",
+            }))
     except Exception as exc:
         broadcaster._broadcast(_sse("commentary", {"text": f"[debug] error: {exc}"}))
 
