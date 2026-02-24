@@ -95,10 +95,6 @@ class TryGameBroadcaster:
     def game_running(self) -> bool:
         return self._game_running
 
-    @property
-    def has_replay(self) -> bool:
-        return bool(self._event_history) and not self._game_running
-
     def subscribe(self) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue()
         self._subscribers.add(queue)
@@ -422,11 +418,6 @@ async def try_agent(
     if _broadcaster.game_running:
         await queue.put(_sse("status", {"message": "Joining ongoing game as spectator..."}))
         await _broadcaster.replay_to(queue)
-    elif _broadcaster.has_replay:
-        await queue.put(_sse("status", {"message": "Replaying last game..."}))
-        await _broadcaster.replay_to(queue)
-        # Replay is finished — close stream so client re-enables the button
-        await queue.put(_sse("_stream_end", {}))
     else:
         await _broadcaster.start_game(opponent)
 
@@ -1114,11 +1105,11 @@ function resetBtn() {
   document.getElementById('opponent').disabled = false;
 }
 
-// Auto-connect if a game is already running
+// Auto-connect if a game is currently running
 fetch('/try-status')
   .then(r => r.json())
   .then(status => {
-    if (status.game_running || status.has_replay) {
+    if (status.game_running) {
       if (status.opponent) {
         document.getElementById('opponent').value = status.opponent;
       }
@@ -1133,11 +1124,10 @@ fetch('/try-status')
 
 @app.get("/try-status")
 async def try_status():
-    """Check if a game is currently running or has a replay available."""
+    """Check if a game is currently running."""
     return {
         "game_running": _broadcaster.game_running,
-        "has_replay": _broadcaster.has_replay,
-        "opponent": _broadcaster._opponent if (_broadcaster.game_running or _broadcaster.has_replay) else "",
+        "opponent": _broadcaster._opponent if _broadcaster.game_running else "",
     }
 
 
