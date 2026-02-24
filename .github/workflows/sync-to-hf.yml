@@ -16,5 +16,14 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          # HF rejects binary files in history. Create a squashed branch
+          # with only the current tree state and push that.
           git remote add hf https://openra-rl:$HF_TOKEN@huggingface.co/spaces/openra-rl/OpenRA-RL
-          git push hf main --force
+          git fetch hf main || true
+          # Create a new commit on top of HF's main with our current tree
+          git checkout -b hf-sync hf/main 2>/dev/null || git checkout --orphan hf-sync
+          git checkout main -- .
+          git add -A
+          git diff --cached --quiet && echo "No changes to sync" && exit 0
+          git commit -m "Sync from GitHub $(git -C . rev-parse --short HEAD)"
+          git push hf hf-sync:main
