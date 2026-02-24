@@ -306,6 +306,7 @@ async def _run_try_agent(opponent: str):
                             })
 
                 # Generate commentary for this turn
+                yield _sse("commentary", {"text": f"[debug] pre-check: tool_calls={len(tool_calls)}, game_done={game_done}"})
                 if tool_calls and not game_done:
                     try:
                         action_summaries = []
