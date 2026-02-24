@@ -15,3 +15,5 @@ venv/
 .mypy_cache/
 .DS_Store
 replays/
+documents/
+*.orarep
