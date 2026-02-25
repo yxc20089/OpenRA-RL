@@ -117,7 +117,7 @@ class OpenRAProcessManager:
         # Build bots configuration: slot:bottype,slot:bottype
         bots = f"{self.config.rl_slot}:rl-agent"
         if self.config.ai_slot:
-            # Map friendly names (easy/normal/hard) to OpenRA types (rush/normal/turtle)
+            # Map difficulty tiers to OpenRA bot types
             actual_type = BOT_TYPE_MAP.get(self.config.bot_type, self.config.bot_type)
             bots += f",{self.config.ai_slot}:{actual_type}"
 

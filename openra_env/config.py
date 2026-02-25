@@ -65,7 +65,7 @@ class RewardVectorConfig(BaseModel):
     tempo, disruption, outcome) alongside the scalar reward.
     """
 
-    enabled: bool = False  # Off by default for backward compatibility
+    enabled: bool = True  # 8-dimensional skill signal (combat, economy, etc.)
     weights: dict[str, float] = Field(default_factory=lambda: {
         "combat": 0.30,
         "economy": 0.15,
