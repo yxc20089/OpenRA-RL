@@ -41,6 +41,22 @@ opponent:
 #   victory: 1.0                      # Terminal win reward
 #   defeat: -1.0                      # Terminal loss penalty
 
+# ── Reward Vector ────────────────────────────────────────────────────
+# 8-dimensional skill signal computed per step alongside the scalar reward.
+# Dimensions: combat, economy, infrastructure, intelligence, composition,
+#             tempo, disruption, outcome
+# reward_vector:
+#   enabled: true                        # Enabled by default
+#   weights:                             # Per-dimension weights (for weighted sum)
+#     combat: 0.30
+#     economy: 0.15
+#     infrastructure: 0.10
+#     intelligence: 0.10
+#     composition: 0.10
+#     tempo: 0.10
+#     disruption: 0.15
+#     outcome: 1.00
+
 # ── MCP Tools ─────────────────────────────────────────────────────────
 # tools:
 #   categories:                       # Toggle tool groups (true/false)

@@ -279,6 +279,7 @@ class OpenRAEnvironment(MCPEnvironment):
         self._prev_buildings: dict[int, str] = {}  # actor_id → type for loss detection
         self._prev_unit_ids: dict[int, str] = {}  # actor_id → type for loss detection
         self._enemy_ever_seen: bool = False  # suppress NO SCOUTING after first contact
+        self._accumulated_reward_vector: dict[str, float] = {}  # running sum of reward vector
 
         # Planning phase configuration (from unified config)
         self._planning_enabled = cfg.planning.enabled
@@ -519,6 +520,25 @@ class OpenRAEnvironment(MCPEnvironment):
             if env._app_config.alerts.minimap:
                 minimap = _render_minimap(obs)
 
+            # Compute exploration % from spatial tensor channel 4 (fog)
+            explored_pct = 0.0
+            _map = obs.get("map_info", {})
+            _w, _h = _map.get("width", 0), _map.get("height", 0)
+            _sp = obs.get("spatial_map", "")
+            _ch = obs.get("spatial_channels", 0)
+            if _sp and _ch > 0 and _w > 0 and _h > 0:
+                import base64 as _b64
+                import struct as _st
+                try:
+                    _raw = _b64.b64decode(_sp)
+                    _explored = sum(
+                        1 for _i in range(_w * _h)
+                        if _st.unpack_from("f", _raw, (_i * _ch + 4) * 4)[0] > 0.25
+                    )
+                    explored_pct = round(100 * _explored / (_w * _h), 1)
+                except Exception:
+                    pass
+
             result = {
                 "tick": obs["tick"],
                 "done": obs["done"],
@@ -543,6 +563,8 @@ class OpenRAEnvironment(MCPEnvironment):
                 "enemy_summary": enemy_summary,
                 "enemy_buildings_summary": enemy_buildings_summary,
                 "minimap": minimap,
+                "explored_percent": explored_pct,
+                "reward_vector": dict(getattr(env, "_accumulated_reward_vector", {})),
                 "alerts": alert_texts,
                 "map": obs["map_info"],
             }
@@ -1274,6 +1296,16 @@ class OpenRAEnvironment(MCPEnvironment):
                 ],
                 "opponent_intel": opponent_profile,
                 "opponent_summary": opponent_summary,
+                "reward_dimensions": {
+                    "combat": "Cost-weighted damage exchange — kill expensive enemies, protect your own units",
+                    "economy": "Economic growth — build refineries, expand harvester fleet, deny enemy economy",
+                    "infrastructure": "Base building — unlock new building types, keep production active, maintain power",
+                    "intelligence": "Scouting & discovery — explore the map, spot enemy units and buildings",
+                    "composition": "Army mix quality — build units that counter the enemy's army composition",
+                    "tempo": "Action efficiency — keep units active, issue orders, avoid idle armies",
+                    "disruption": "Strategic sabotage — destroy enemy power plants, production, and tech buildings",
+                    "outcome": "Win (+1.0) or lose (-1.0)",
+                },
                 "instructions": env._app_config.prompts.planning_instructions,
             }
 
@@ -2825,6 +2857,7 @@ class OpenRAEnvironment(MCPEnvironment):
             opponent_type=f"bot_{self._config.bot_type}",
         )
         self._reward_fn.reset()
+        self._accumulated_reward_vector.clear()
         self._last_obs = None
         self._unit_groups.clear()
         self._pending_placements.clear()
@@ -2890,6 +2923,9 @@ class OpenRAEnvironment(MCPEnvironment):
             obs_dict = future.result(timeout=300)
             self._last_obs = obs_dict
             reward, reward_vec = self._reward_fn.compute_all(obs_dict)
+            if reward_vec:
+                for k, v in reward_vec.items():
+                    self._accumulated_reward_vector[k] = self._accumulated_reward_vector.get(k, 0.0) + v
             return self._build_observation(obs_dict, reward, reward_vec)
 
         return Observation(

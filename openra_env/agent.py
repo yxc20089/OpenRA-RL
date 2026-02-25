@@ -184,7 +184,7 @@ def format_state_briefing(state: dict) -> str:
 
     parts = [
         f"--- TURN BRIEFING (tick {tick}, ~{tick // 25}s game time) ---",
-        f"Funds: ${funds} (cash=${cash} + ore=${ore}) | Power: {state.get('power_balance', 0):+d} | Harvesters: {eco.get('harvester_count', 0)}",
+        f"Funds: ${funds} (cash=${cash} + ore=${ore}) | Power: {state.get('power_balance', 0):+d} | Harvesters: {eco.get('harvester_count', 0)} | Explored: {state.get('explored_percent', 0)}%",
     ]
 
     # Minimap (ASCII spatial overview)
@@ -975,6 +975,12 @@ async def run_agent(config, verbose: bool = False):
             print(f"  K/D cost ratio:   {mil.get('kills_cost', 0) / max(mil.get('deaths_cost', 1), 1):.2f}")
             print(f"  Own units:        {final.get('own_units', '?')}")
             print(f"  Own buildings:    {final.get('own_buildings', '?')}")
+            print(f"  Explored:         {final.get('explored_percent', 0)}%")
+            rv = final.get("reward_vector", {})
+            if rv:
+                print("  Reward vector:")
+                for dim, val in rv.items():
+                    print(f"    {dim:15s} {val:+.3f}")
             print()
         except Exception as e:
             print(f"  (could not get final state: {e})")

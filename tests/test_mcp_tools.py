@@ -4566,3 +4566,280 @@ class TestActionToCommandsValidation:
         result = env._action_to_commands({"tool": "cancel_production", "item_type": "e1"}, obs)
         assert len(result) == 1
         assert result[0].action == ActionType.CANCEL_PRODUCTION
+
+
+# ─── Exploration & Reward Vector Tests ──────────────────────────────────────
+
+
+class TestExplorationPercent:
+    """Test that get_game_state includes explored_percent from spatial tensor."""
+
+    def _make_env(self):
+        from openra_env.config import OpenRARLConfig
+        from fastmcp import FastMCP
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        env._app_config = OpenRARLConfig()
+        env._accumulated_reward_vector = {}
+        mcp = FastMCP("openra-test")
+        env._register_tools(mcp)
+        env._planning_active = False
+        env._planning_strategy = ""
+        env._planning_enabled = True
+        env._planning_max_turns = 10
+        env._planning_max_time_s = 60.0
+        env._planning_start_time = 0.0
+        env._planning_turns_used = 0
+        env._placement_results = []
+        env._prev_buildings = {}
+        env._prev_unit_ids = {}
+        return env, mcp
+
+    def test_explored_percent_no_spatial_data(self):
+        """Without spatial data, explored_percent should be 0."""
+        env, mcp = self._make_env()
+        env._last_obs = {
+            "tick": 50, "done": False, "result": "",
+            "economy": {"cash": 1000, "ore": 0, "power_provided": 100,
+                        "power_drained": 50, "resource_capacity": 5000,
+                        "harvester_count": 1},
+            "military": {"units_killed": 0, "units_lost": 0,
+                         "buildings_killed": 0, "buildings_lost": 0,
+                         "army_value": 0, "active_unit_count": 0},
+            "units": [], "buildings": [], "production": [],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+            "map_info": {"width": 4, "height": 4, "map_name": "Test"},
+            "spatial_channels": 0, "spatial_map": "",
+            "available_production": [],
+        }
+        tool = mcp._tool_manager._tools["get_game_state"]
+        result = tool.fn()
+        assert "explored_percent" in result
+        assert result["explored_percent"] == 0.0
+
+    def test_explored_percent_with_spatial_data(self):
+        """With spatial data, explored_percent should reflect fog channel."""
+        import base64
+        import struct
+
+        env, mcp = self._make_env()
+        w, h, ch = 4, 4, 9
+        # Build spatial tensor: 4x4 map, 9 channels
+        # Channel 4 is fog: >0.25 = explored
+        data = bytearray(w * h * ch * 4)
+        for i in range(w * h):
+            offset = (i * ch + 4) * 4
+            # Half explored (first 8 cells), half shroud (last 8)
+            val = 1.0 if i < 8 else 0.0
+            struct.pack_into("f", data, offset, val)
+
+        env._last_obs = {
+            "tick": 50, "done": False, "result": "",
+            "economy": {"cash": 1000, "ore": 0, "power_provided": 100,
+                        "power_drained": 50, "resource_capacity": 5000,
+                        "harvester_count": 1},
+            "military": {"units_killed": 0, "units_lost": 0,
+                         "buildings_killed": 0, "buildings_lost": 0,
+                         "army_value": 0, "active_unit_count": 0},
+            "units": [], "buildings": [], "production": [],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+            "map_info": {"width": w, "height": h, "map_name": "Test"},
+            "spatial_channels": ch,
+            "spatial_map": base64.b64encode(bytes(data)).decode(),
+            "available_production": [],
+        }
+        tool = mcp._tool_manager._tools["get_game_state"]
+        result = tool.fn()
+        assert result["explored_percent"] == 50.0
+
+    def test_explored_percent_fully_explored(self):
+        """All cells explored → 100%."""
+        import base64
+        import struct
+
+        env, mcp = self._make_env()
+        w, h, ch = 2, 2, 9
+        data = bytearray(w * h * ch * 4)
+        for i in range(w * h):
+            struct.pack_into("f", data, (i * ch + 4) * 4, 1.0)
+
+        env._last_obs = {
+            "tick": 10, "done": False, "result": "",
+            "economy": {"cash": 0, "ore": 0, "power_provided": 0,
+                        "power_drained": 0, "resource_capacity": 0,
+                        "harvester_count": 0},
+            "military": {"units_killed": 0, "units_lost": 0,
+                         "buildings_killed": 0, "buildings_lost": 0,
+                         "army_value": 0, "active_unit_count": 0},
+            "units": [], "buildings": [], "production": [],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+            "map_info": {"width": w, "height": h, "map_name": "Test"},
+            "spatial_channels": ch,
+            "spatial_map": base64.b64encode(bytes(data)).decode(),
+            "available_production": [],
+        }
+        tool = mcp._tool_manager._tools["get_game_state"]
+        result = tool.fn()
+        assert result["explored_percent"] == 100.0
+
+
+class TestRewardVectorAccumulation:
+    """Test that reward vector accumulates across steps and appears in get_game_state."""
+
+    def test_reward_vector_in_game_state(self):
+        """get_game_state should include reward_vector field."""
+        from openra_env.config import OpenRARLConfig
+        from fastmcp import FastMCP
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        env._app_config = OpenRARLConfig()
+        env._accumulated_reward_vector = {"combat": 0.5, "economy": 0.3}
+        mcp = FastMCP("openra-test")
+        env._register_tools(mcp)
+        env._planning_active = False
+        env._planning_strategy = ""
+        env._planning_enabled = True
+        env._planning_max_turns = 10
+        env._planning_max_time_s = 60.0
+        env._planning_start_time = 0.0
+        env._planning_turns_used = 0
+        env._placement_results = []
+        env._prev_buildings = {}
+        env._prev_unit_ids = {}
+        env._last_obs = {
+            "tick": 50, "done": False, "result": "",
+            "economy": {"cash": 1000, "ore": 0, "power_provided": 100,
+                        "power_drained": 50, "resource_capacity": 5000,
+                        "harvester_count": 1},
+            "military": {"units_killed": 0, "units_lost": 0,
+                         "buildings_killed": 0, "buildings_lost": 0,
+                         "army_value": 0, "active_unit_count": 0},
+            "units": [], "buildings": [], "production": [],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+            "map_info": {"width": 4, "height": 4, "map_name": "Test"},
+            "spatial_channels": 0, "spatial_map": "",
+            "available_production": [],
+        }
+        tool = mcp._tool_manager._tools["get_game_state"]
+        result = tool.fn()
+        assert "reward_vector" in result
+        assert result["reward_vector"]["combat"] == 0.5
+        assert result["reward_vector"]["economy"] == 0.3
+
+    def test_reward_vector_empty_when_no_steps(self):
+        """Before any steps, reward_vector should be empty dict."""
+        from openra_env.config import OpenRARLConfig
+        from fastmcp import FastMCP
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        env._app_config = OpenRARLConfig()
+        env._accumulated_reward_vector = {}
+        mcp = FastMCP("openra-test")
+        env._register_tools(mcp)
+        env._planning_active = False
+        env._planning_strategy = ""
+        env._planning_enabled = True
+        env._planning_max_turns = 10
+        env._planning_max_time_s = 60.0
+        env._planning_start_time = 0.0
+        env._planning_turns_used = 0
+        env._placement_results = []
+        env._prev_buildings = {}
+        env._prev_unit_ids = {}
+        env._last_obs = {
+            "tick": 0, "done": False, "result": "",
+            "economy": {"cash": 0, "ore": 0, "power_provided": 0,
+                        "power_drained": 0, "resource_capacity": 0,
+                        "harvester_count": 0},
+            "military": {"units_killed": 0, "units_lost": 0,
+                         "buildings_killed": 0, "buildings_lost": 0,
+                         "army_value": 0, "active_unit_count": 0},
+            "units": [], "buildings": [], "production": [],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+            "map_info": {"width": 4, "height": 4, "map_name": "Test"},
+            "spatial_channels": 0, "spatial_map": "",
+            "available_production": [],
+        }
+        tool = mcp._tool_manager._tools["get_game_state"]
+        result = tool.fn()
+        assert result["reward_vector"] == {}
+
+    def test_accumulated_vector_sums_correctly(self):
+        """Simulating multiple accumulation steps."""
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        env._accumulated_reward_vector = {}
+
+        # Step 1
+        vec1 = {"combat": 0.1, "economy": 0.2, "intelligence": 0.05}
+        for k, v in vec1.items():
+            env._accumulated_reward_vector[k] = env._accumulated_reward_vector.get(k, 0.0) + v
+
+        # Step 2
+        vec2 = {"combat": 0.3, "economy": -0.1, "tempo": 0.5}
+        for k, v in vec2.items():
+            env._accumulated_reward_vector[k] = env._accumulated_reward_vector.get(k, 0.0) + v
+
+        assert abs(env._accumulated_reward_vector["combat"] - 0.4) < 1e-9
+        assert abs(env._accumulated_reward_vector["economy"] - 0.1) < 1e-9
+        assert abs(env._accumulated_reward_vector["intelligence"] - 0.05) < 1e-9
+        assert abs(env._accumulated_reward_vector["tempo"] - 0.5) < 1e-9
+
+
+class TestStartPlanningRewardDimensions:
+    """Test that start_planning_phase includes reward_dimensions."""
+
+    def test_reward_dimensions_in_planning(self):
+        from openra_env.config import OpenRARLConfig
+        from openra_env.models import OpenRAState
+        from fastmcp import FastMCP
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        env._app_config = OpenRARLConfig()
+        env._accumulated_reward_vector = {}
+        mcp = FastMCP("openra-test")
+        env._planning_active = False
+        env._planning_strategy = ""
+        env._planning_enabled = True
+        env._planning_max_turns = 10
+        env._planning_max_time_s = 60.0
+        env._planning_start_time = 0.0
+        env._planning_turns_used = 0
+        env._player_faction = "russia"
+        env._enemy_faction = "england"
+        env._unit_groups = {}
+        env._pending_placements = {}
+        env._attempted_placements = {}
+        env._placement_results = []
+        env._PLACEABLE_QUEUE_TYPES = {"Building", "Defense"}
+        env._state = OpenRAState()
+
+        class FakeConfig:
+            bot_type = "normal"
+        env._config = FakeConfig()
+
+        env._register_tools(mcp)
+        env._last_obs = {
+            "tick": 0, "done": False, "result": "",
+            "economy": {"cash": 5000, "ore": 0, "power_provided": 100,
+                        "power_drained": 0, "resource_capacity": 5000,
+                        "harvester_count": 1},
+            "military": {"units_killed": 0, "units_lost": 0,
+                         "buildings_killed": 0, "buildings_lost": 0,
+                         "army_value": 0, "active_unit_count": 0},
+            "units": [],
+            "buildings": [
+                {"actor_id": 1, "type": "fact", "pos_x": 5120, "pos_y": 5120,
+                 "hp_percent": 1.0, "owner": "Multi0", "can_produce": ["powr"],
+                 "cell_x": 5, "cell_y": 5},
+            ],
+            "production": [],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+            "map_info": {"width": 64, "height": 64, "map_name": "Test"},
+            "spatial_channels": 0, "spatial_map": "",
+            "available_production": ["powr"],
+        }
+        tool = mcp._tool_manager._tools["start_planning_phase"]
+        result = tool.fn()
+        assert "reward_dimensions" in result
+        rd = result["reward_dimensions"]
+        assert "combat" in rd
+        assert "economy" in rd
+        assert "intelligence" in rd
+        assert "outcome" in rd
+        assert len(rd) == 8

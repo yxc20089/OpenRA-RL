@@ -410,9 +410,9 @@ class TestBackwardsCompat:
 class TestRewardVectorConfig:
     """Test reward vector configuration."""
 
-    def test_disabled_by_default(self):
+    def test_enabled_by_default(self):
         cfg = RewardVectorConfig()
-        assert cfg.enabled is False
+        assert cfg.enabled is True
 
     def test_default_weights(self):
         cfg = RewardVectorConfig()
@@ -425,7 +425,7 @@ class TestRewardVectorConfig:
         cfg = OpenRARLConfig()
         assert hasattr(cfg, "reward_vector")
         assert isinstance(cfg.reward_vector, RewardVectorConfig)
-        assert cfg.reward_vector.enabled is False
+        assert cfg.reward_vector.enabled is True
 
     def test_enable_via_yaml(self):
         with _clean_env():
