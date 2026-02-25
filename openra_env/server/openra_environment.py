@@ -1407,6 +1407,14 @@ class OpenRAEnvironment(MCPEnvironment):
                     raise
 
             env._state.game_tick = obs_dict["tick"]
+            # Accumulate reward vector if enabled
+            try:
+                _, reward_vec = env._reward_fn.compute_all(obs_dict)
+                if reward_vec:
+                    for k, v in reward_vec.items():
+                        env._accumulated_reward_vector[k] = env._accumulated_reward_vector.get(k, 0.0) + v
+            except Exception:
+                pass
             # Track losses and trigger auto-placement
             if env._app_config.alerts.loss_tracking:
                 env._update_loss_tracking()
