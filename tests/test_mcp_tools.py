@@ -3766,3 +3766,803 @@ class TestDefensePlacementBias:
         best = candidates[0]
         # Should bias toward bottom-right (enemy direction)
         assert best["cell_x"] >= 10 and best["cell_y"] >= 10
+
+
+# ─── Minimap Tests ──────────────────────────────────────────────────────────
+
+
+class TestRenderMinimap:
+    """Test _render_minimap() ASCII minimap generation."""
+
+    def _make_spatial(self, width, height, channels=9, fill=None):
+        """Build a spatial_map (base64 encoded float32 tensor).
+
+        fill: dict mapping (x, y, channel) -> float value.
+              All unset values default to 0.0.
+        """
+        import base64
+        import struct
+
+        data = bytearray(width * height * channels * 4)
+        fill = fill or {}
+        for (x, y, ch), val in fill.items():
+            idx = ((y * width + x) * channels + ch) * 4
+            struct.pack_into("f", data, idx, val)
+        return base64.b64encode(bytes(data)).decode()
+
+    def test_empty_obs_returns_empty(self):
+        from openra_env.server.openra_environment import _render_minimap
+        assert _render_minimap({}) == ""
+        assert _render_minimap({"map_info": {"width": 0, "height": 0}}) == ""
+
+    def test_no_spatial_data_returns_empty(self):
+        from openra_env.server.openra_environment import _render_minimap
+        obs = {
+            "map_info": {"width": 10, "height": 10},
+            "spatial_channels": 9,
+            "spatial_map": "",
+        }
+        assert _render_minimap(obs) == ""
+
+    def test_all_unexplored(self):
+        from openra_env.server.openra_environment import _render_minimap
+        # 4x4 map, all fog=0 -> all '#'
+        obs = {
+            "map_info": {"width": 4, "height": 4},
+            "spatial_channels": 9,
+            "spatial_map": self._make_spatial(4, 4),
+            "buildings": [], "units": [],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+        }
+        result = _render_minimap(obs, max_cols=4)
+        lines = result.strip().split("\n")
+        # header + 4 rows + legend = 6 lines
+        assert len(lines) == 6
+        for row in lines[1:5]:
+            assert all(c == "#" for c in row), f"Expected all '#', got: {row}"
+
+    def test_explored_shows_dot(self):
+        from openra_env.server.openra_environment import _render_minimap
+        # 4x4 map, all explored (fog ch4 > 0.25)
+        fill = {}
+        for y in range(4):
+            for x in range(4):
+                fill[(x, y, 4)] = 1.0  # fog = fully visible
+                fill[(x, y, 3)] = 1.0  # passable
+        obs = {
+            "map_info": {"width": 4, "height": 4},
+            "spatial_channels": 9,
+            "spatial_map": self._make_spatial(4, 4, fill=fill),
+            "buildings": [], "units": [],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+        }
+        result = _render_minimap(obs, max_cols=4)
+        lines = result.strip().split("\n")
+        for row in lines[1:5]:
+            assert all(c == "." for c in row), f"Expected '.', got: {row}"
+
+    def test_water_shows_tilde(self):
+        from openra_env.server.openra_environment import _render_minimap
+        fill = {}
+        for y in range(4):
+            for x in range(4):
+                fill[(x, y, 4)] = 1.0  # explored
+                fill[(x, y, 3)] = 0.0  # impassable (water)
+        obs = {
+            "map_info": {"width": 4, "height": 4},
+            "spatial_channels": 9,
+            "spatial_map": self._make_spatial(4, 4, fill=fill),
+            "buildings": [], "units": [],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+        }
+        result = _render_minimap(obs, max_cols=4)
+        lines = result.strip().split("\n")
+        for row in lines[1:5]:
+            assert all(c == "~" for c in row), f"Expected '~', got: {row}"
+
+    def test_resources_show_dollar(self):
+        from openra_env.server.openra_environment import _render_minimap
+        fill = {
+            (1, 1, 4): 1.0,  # explored
+            (1, 1, 3): 1.0,  # passable
+            (1, 1, 2): 0.5,  # has resources
+        }
+        obs = {
+            "map_info": {"width": 4, "height": 4},
+            "spatial_channels": 9,
+            "spatial_map": self._make_spatial(4, 4, fill=fill),
+            "buildings": [], "units": [],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+        }
+        result = _render_minimap(obs, max_cols=4)
+        lines = result.strip().split("\n")
+        assert lines[2][1] == "$"  # row 1, col 1
+
+    def test_own_building_overlay(self):
+        from openra_env.server.openra_environment import _render_minimap
+        fill = {}
+        for y in range(4):
+            for x in range(4):
+                fill[(x, y, 4)] = 1.0
+                fill[(x, y, 3)] = 1.0
+        obs = {
+            "map_info": {"width": 4, "height": 4},
+            "spatial_channels": 9,
+            "spatial_map": self._make_spatial(4, 4, fill=fill),
+            "buildings": [{"cell_x": 2, "cell_y": 1}],
+            "units": [],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+        }
+        result = _render_minimap(obs, max_cols=4)
+        lines = result.strip().split("\n")
+        assert lines[2][2] == "B"  # row 1, col 2
+
+    def test_own_unit_overlay(self):
+        from openra_env.server.openra_environment import _render_minimap
+        fill = {}
+        for y in range(4):
+            for x in range(4):
+                fill[(x, y, 4)] = 1.0
+                fill[(x, y, 3)] = 1.0
+        obs = {
+            "map_info": {"width": 4, "height": 4},
+            "spatial_channels": 9,
+            "spatial_map": self._make_spatial(4, 4, fill=fill),
+            "buildings": [],
+            "units": [{"cell_x": 0, "cell_y": 0}],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+        }
+        result = _render_minimap(obs, max_cols=4)
+        lines = result.strip().split("\n")
+        assert lines[1][0] == "@"  # row 0, col 0
+
+    def test_enemy_building_overlay(self):
+        from openra_env.server.openra_environment import _render_minimap
+        fill = {}
+        for y in range(4):
+            for x in range(4):
+                fill[(x, y, 4)] = 1.0
+                fill[(x, y, 3)] = 1.0
+        obs = {
+            "map_info": {"width": 4, "height": 4},
+            "spatial_channels": 9,
+            "spatial_map": self._make_spatial(4, 4, fill=fill),
+            "buildings": [],
+            "units": [],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [{"cell_x": 3, "cell_y": 3}],
+        }
+        result = _render_minimap(obs, max_cols=4)
+        lines = result.strip().split("\n")
+        assert lines[4][3] == "X"  # row 3, col 3
+
+    def test_enemy_unit_overlay(self):
+        from openra_env.server.openra_environment import _render_minimap
+        fill = {}
+        for y in range(4):
+            for x in range(4):
+                fill[(x, y, 4)] = 1.0
+                fill[(x, y, 3)] = 1.0
+        obs = {
+            "map_info": {"width": 4, "height": 4},
+            "spatial_channels": 9,
+            "spatial_map": self._make_spatial(4, 4, fill=fill),
+            "buildings": [],
+            "units": [],
+            "visible_enemies": [{"cell_x": 1, "cell_y": 2}],
+            "visible_enemy_buildings": [],
+        }
+        result = _render_minimap(obs, max_cols=4)
+        lines = result.strip().split("\n")
+        assert lines[3][1] == "!"  # row 2, col 1
+
+    def test_priority_enemy_over_own(self):
+        """Enemy unit should override own building at same cell."""
+        from openra_env.server.openra_environment import _render_minimap
+        fill = {}
+        for y in range(4):
+            for x in range(4):
+                fill[(x, y, 4)] = 1.0
+                fill[(x, y, 3)] = 1.0
+        obs = {
+            "map_info": {"width": 4, "height": 4},
+            "spatial_channels": 9,
+            "spatial_map": self._make_spatial(4, 4, fill=fill),
+            "buildings": [{"cell_x": 1, "cell_y": 1}],
+            "units": [{"cell_x": 1, "cell_y": 1}],
+            "visible_enemies": [{"cell_x": 1, "cell_y": 1}],
+            "visible_enemy_buildings": [],
+        }
+        result = _render_minimap(obs, max_cols=4)
+        lines = result.strip().split("\n")
+        assert lines[2][1] == "!"  # enemy unit wins
+
+    def test_downsampling(self):
+        """Large map should downsample to ~max_cols width."""
+        from openra_env.server.openra_environment import _render_minimap
+        fill = {}
+        for y in range(64):
+            for x in range(128):
+                fill[(x, y, 4)] = 1.0
+                fill[(x, y, 3)] = 1.0
+        obs = {
+            "map_info": {"width": 128, "height": 64},
+            "spatial_channels": 9,
+            "spatial_map": self._make_spatial(128, 64, fill=fill),
+            "buildings": [], "units": [],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+        }
+        result = _render_minimap(obs, max_cols=28)
+        lines = result.strip().split("\n")
+        # First line is header
+        assert "Map (" in lines[0]
+        # Data rows should be ~28 chars wide (ceil(128/5)=26)
+        data_rows = lines[1:-1]  # skip header and legend
+        for row in data_rows:
+            assert len(row) <= 28
+
+    def test_header_and_legend(self):
+        from openra_env.server.openra_environment import _render_minimap
+        obs = {
+            "map_info": {"width": 4, "height": 4},
+            "spatial_channels": 9,
+            "spatial_map": self._make_spatial(4, 4),
+            "buildings": [], "units": [],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+        }
+        result = _render_minimap(obs, max_cols=4)
+        assert result.startswith("Map (")
+        assert "YOUR:" in result
+        assert "ENEMY:" in result
+
+    def test_get_game_state_includes_minimap(self):
+        """get_game_state result should have minimap and enemy_buildings_summary."""
+        from openra_env.config import OpenRARLConfig
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        env._app_config = OpenRARLConfig()
+        from fastmcp import FastMCP
+        mcp = FastMCP("openra-test")
+        env._register_tools(mcp)
+        env._planning_active = False
+        env._planning_strategy = ""
+        env._planning_enabled = True
+        env._planning_max_turns = 10
+        env._planning_max_time_s = 60.0
+        env._planning_start_time = 0.0
+        env._planning_turns_used = 0
+
+        env._last_obs = {
+            "tick": 100, "done": False, "result": "",
+            "economy": {"cash": 1000, "ore": 0, "power_provided": 100,
+                        "power_drained": 50, "resource_capacity": 5000,
+                        "harvester_count": 1},
+            "military": {"units_killed": 0, "units_lost": 0,
+                         "buildings_killed": 0, "buildings_lost": 0,
+                         "army_value": 0, "active_unit_count": 0},
+            "units": [], "buildings": [], "production": [],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [
+                {"actor_id": 50, "type": "powr", "cell_x": 30, "cell_y": 30,
+                 "hp_percent": 1.0, "owner": "Multi1"},
+            ],
+            "map_info": {"width": 8, "height": 8, "map_name": "Test"},
+            "spatial_channels": 9,
+            "spatial_map": "",
+            "available_production": [],
+        }
+        tool = mcp._tool_manager._tools["get_game_state"]
+        result = tool.fn()
+        assert "minimap" in result
+        assert "enemy_buildings_summary" in result
+        assert len(result["enemy_buildings_summary"]) == 1
+        assert result["enemy_buildings_summary"][0]["type"] == "powr"
+
+    def test_minimap_disabled_by_config(self):
+        """When alerts.minimap=False, minimap should be empty."""
+        from openra_env.config import OpenRARLConfig
+        cfg = OpenRARLConfig()
+        cfg.alerts.minimap = False
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        env._app_config = cfg
+        from fastmcp import FastMCP
+        mcp = FastMCP("openra-test")
+        env._register_tools(mcp)
+        env._planning_active = False
+        env._planning_strategy = ""
+        env._planning_enabled = True
+        env._planning_max_turns = 10
+        env._planning_max_time_s = 60.0
+        env._planning_start_time = 0.0
+        env._planning_turns_used = 0
+
+        import base64
+        import struct
+        # 4x4 fully explored map
+        data = bytearray(4 * 4 * 9 * 4)
+        for y in range(4):
+            for x in range(4):
+                idx = ((y * 4 + x) * 9 + 4) * 4
+                struct.pack_into("f", data, idx, 1.0)
+                idx = ((y * 4 + x) * 9 + 3) * 4
+                struct.pack_into("f", data, idx, 1.0)
+        spatial = base64.b64encode(bytes(data)).decode()
+
+        env._last_obs = {
+            "tick": 100, "done": False, "result": "",
+            "economy": {"cash": 1000, "ore": 0, "power_provided": 100,
+                        "power_drained": 50, "resource_capacity": 5000,
+                        "harvester_count": 1},
+            "military": {"units_killed": 0, "units_lost": 0,
+                         "buildings_killed": 0, "buildings_lost": 0,
+                         "army_value": 0, "active_unit_count": 0},
+            "units": [], "buildings": [], "production": [],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+            "map_info": {"width": 4, "height": 4, "map_name": "Test"},
+            "spatial_channels": 9,
+            "spatial_map": spatial,
+            "available_production": [],
+        }
+        tool = mcp._tool_manager._tools["get_game_state"]
+        result = tool.fn()
+        assert result["minimap"] == ""
+
+
+class TestBriefingMinimap:
+    """Test format_state_briefing includes minimap and enemy buildings."""
+
+    def test_briefing_includes_minimap(self):
+        from openra_env.agent import format_state_briefing
+        state = {
+            "tick": 100, "economy": {"cash": 500, "ore": 0, "harvester_count": 1},
+            "power_balance": 10, "own_units": 0, "own_buildings": 0,
+            "units_summary": [], "buildings_summary": [],
+            "enemy_summary": [], "enemy_buildings_summary": [],
+            "production_items": [], "alerts": [],
+            "minimap": "Map (4x4, 1cell=1x1):\n....\n....\n....\n....\nYOUR: B=building @=unit | ENEMY: X=building !=unit | terrain: .=land ~=water $=ore #=unexplored",
+        }
+        text = format_state_briefing(state)
+        assert "Map (4x4" in text
+        assert "YOUR:" in text
+
+    def test_briefing_omits_empty_minimap(self):
+        from openra_env.agent import format_state_briefing
+        state = {
+            "tick": 100, "economy": {"cash": 500, "ore": 0, "harvester_count": 1},
+            "power_balance": 10, "own_units": 0, "own_buildings": 0,
+            "units_summary": [], "buildings_summary": [],
+            "enemy_summary": [], "enemy_buildings_summary": [],
+            "production_items": [], "alerts": [],
+            "minimap": "",
+        }
+        text = format_state_briefing(state)
+        assert "Map (" not in text
+
+    def test_briefing_includes_enemy_buildings(self):
+        from openra_env.agent import format_state_briefing
+        state = {
+            "tick": 100, "economy": {"cash": 500, "ore": 0, "harvester_count": 1},
+            "power_balance": 10, "own_units": 0, "own_buildings": 0,
+            "units_summary": [], "buildings_summary": [],
+            "enemy_summary": [],
+            "enemy_buildings_summary": [
+                {"id": 50, "type": "powr", "cell_x": 40, "cell_y": 40},
+                {"id": 51, "type": "fact", "cell_x": 42, "cell_y": 40},
+            ],
+            "production_items": [], "alerts": [],
+            "minimap": "",
+        }
+        text = format_state_briefing(state)
+        assert "powr" in text
+        assert "fact" in text
+        assert "center" in text  # center position shown
+
+    def test_briefing_enemy_units_and_buildings(self):
+        from openra_env.agent import format_state_briefing
+        state = {
+            "tick": 100, "economy": {"cash": 500, "ore": 0, "harvester_count": 1},
+            "power_balance": 10, "own_units": 0, "own_buildings": 0,
+            "units_summary": [], "buildings_summary": [],
+            "enemy_summary": [
+                {"id": 99, "type": "e1", "cell_x": 30, "cell_y": 30},
+            ],
+            "enemy_buildings_summary": [
+                {"id": 50, "type": "powr", "cell_x": 40, "cell_y": 40},
+            ],
+            "production_items": [], "alerts": [],
+            "minimap": "",
+        }
+        text = format_state_briefing(state)
+        assert "1xe1" in text
+        assert "1xpowr" in text
+
+
+# ─── Actor Existence & Production Queue Validation Tests ─────────────────────
+
+
+class TestActorValidation:
+    """Test that actor-based tools validate actor existence before sending commands."""
+
+    @pytest.fixture
+    def env_with_actors(self):
+        """Create env with known units and buildings."""
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
+        from fastmcp import FastMCP
+        mcp = FastMCP("openra-test")
+
+        env._planning_active = False
+        env._planning_strategy = ""
+        env._planning_enabled = False
+        env._planning_max_turns = 10
+        env._planning_max_time_s = 60.0
+        env._planning_start_time = 0.0
+        env._planning_turns_used = 0
+        env._pending_placements = {}
+        env._attempted_placements = {}
+        env._placement_results = []
+        env._player_faction = "england"
+
+        env._last_obs = {
+            "tick": 500,
+            "done": False,
+            "result": "",
+            "economy": {
+                "cash": 3000, "ore": 500, "power_provided": 200,
+                "power_drained": 80, "resource_capacity": 4000,
+                "harvester_count": 1,
+            },
+            "military": {
+                "units_killed": 0, "units_lost": 0,
+                "buildings_killed": 0, "buildings_lost": 0,
+                "army_value": 1000, "active_unit_count": 2,
+            },
+            "units": [
+                {
+                    "actor_id": 10, "type": "mcv", "pos_x": 1000, "pos_y": 2000,
+                    "cell_x": 10, "cell_y": 20, "hp_percent": 1.0,
+                    "is_idle": True, "current_activity": "",
+                    "owner": "Multi0", "can_attack": False, "facing": 0,
+                    "experience_level": 0, "stance": 3, "speed": 56,
+                    "attack_range": 0, "passenger_count": -1, "is_building": False,
+                },
+                {
+                    "actor_id": 20, "type": "harv", "pos_x": 2000, "pos_y": 3000,
+                    "cell_x": 20, "cell_y": 30, "hp_percent": 1.0,
+                    "is_idle": False, "current_activity": "Harvest",
+                    "owner": "Multi0", "can_attack": False, "facing": 0,
+                    "experience_level": 0, "stance": 3, "speed": 40,
+                    "attack_range": 0, "passenger_count": -1, "is_building": False,
+                },
+            ],
+            "buildings": [
+                {
+                    "actor_id": 100, "type": "fact", "pos_x": 500, "pos_y": 500,
+                    "hp_percent": 1.0, "owner": "Multi0", "is_producing": False,
+                    "production_progress": 0.0, "producing_item": "",
+                    "is_powered": True, "is_repairing": False, "sell_value": 500,
+                    "rally_x": -1, "rally_y": -1, "power_amount": 0,
+                    "can_produce": [], "cell_x": 5, "cell_y": 5,
+                },
+                {
+                    "actor_id": 101, "type": "powr", "pos_x": 600, "pos_y": 600,
+                    "hp_percent": 0.8, "owner": "Multi0", "is_producing": False,
+                    "production_progress": 0.0, "producing_item": "",
+                    "is_powered": True, "is_repairing": False, "sell_value": 150,
+                    "rally_x": -1, "rally_y": -1, "power_amount": 100,
+                    "can_produce": [], "cell_x": 6, "cell_y": 6,
+                },
+            ],
+            "production": [
+                {"type": "e1", "progress": 50, "paused": False},
+            ],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 128, "height": 128, "map_name": "Test Map"},
+            "available_production": ["e1", "e3", "powr", "tent", "proc"],
+        }
+
+        env._refresh_obs = lambda: None
+
+        env._register_tools(mcp)
+        return env, mcp
+
+    # ── deploy_unit ──
+
+    def test_deploy_unit_rejects_missing_actor(self, env_with_actors):
+        env, mcp = env_with_actors
+        tool = mcp._tool_manager._tools["deploy_unit"]
+        result = tool.fn(unit_id=999)
+        assert "error" in result
+        assert "999" in result["error"]
+        assert "your_units" in result
+
+    def test_deploy_unit_accepts_valid_actor(self, env_with_actors):
+        env, mcp = env_with_actors
+        env._execute_commands = lambda cmds: {"tick": 501, "done": False, "result": ""}
+        tool = mcp._tool_manager._tools["deploy_unit"]
+        result = tool.fn(unit_id=10)
+        assert "error" not in result
+
+    # ── sell_building ──
+
+    def test_sell_building_rejects_missing_actor(self, env_with_actors):
+        env, mcp = env_with_actors
+        tool = mcp._tool_manager._tools["sell_building"]
+        result = tool.fn(building_id=999)
+        assert "error" in result
+        assert "999" in result["error"]
+        assert "your_buildings" in result
+
+    def test_sell_building_accepts_valid_actor(self, env_with_actors):
+        env, mcp = env_with_actors
+        env._execute_commands = lambda cmds: {"tick": 501, "done": False, "result": ""}
+        tool = mcp._tool_manager._tools["sell_building"]
+        result = tool.fn(building_id=100)
+        assert "error" not in result
+
+    # ── repair_building ──
+
+    def test_repair_building_rejects_missing_actor(self, env_with_actors):
+        env, mcp = env_with_actors
+        tool = mcp._tool_manager._tools["repair_building"]
+        result = tool.fn(building_id=999)
+        assert "error" in result
+        assert "your_buildings" in result
+
+    def test_repair_building_accepts_valid_actor(self, env_with_actors):
+        env, mcp = env_with_actors
+        env._execute_commands = lambda cmds: {"tick": 501, "done": False, "result": ""}
+        tool = mcp._tool_manager._tools["repair_building"]
+        result = tool.fn(building_id=101)
+        assert "error" not in result
+
+    # ── set_rally_point ──
+
+    def test_set_rally_point_rejects_missing_actor(self, env_with_actors):
+        env, mcp = env_with_actors
+        tool = mcp._tool_manager._tools["set_rally_point"]
+        result = tool.fn(building_id=999, cell_x=10, cell_y=10)
+        assert "error" in result
+        assert "your_buildings" in result
+
+    def test_set_rally_point_accepts_valid_actor(self, env_with_actors):
+        env, mcp = env_with_actors
+        env._execute_commands = lambda cmds: {"tick": 501, "done": False, "result": ""}
+        tool = mcp._tool_manager._tools["set_rally_point"]
+        result = tool.fn(building_id=100, cell_x=10, cell_y=10)
+        assert "error" not in result
+
+    # ── harvest ──
+
+    def test_harvest_rejects_missing_actor(self, env_with_actors):
+        env, mcp = env_with_actors
+        tool = mcp._tool_manager._tools["harvest"]
+        result = tool.fn(unit_id=999)
+        assert "error" in result
+        assert "your_units" in result
+
+    def test_harvest_accepts_valid_actor(self, env_with_actors):
+        env, mcp = env_with_actors
+        env._execute_commands = lambda cmds: {"tick": 501, "done": False, "result": ""}
+        tool = mcp._tool_manager._tools["harvest"]
+        result = tool.fn(unit_id=20)
+        assert "error" not in result
+
+    # ── power_down ──
+
+    def test_power_down_rejects_missing_actor(self, env_with_actors):
+        env, mcp = env_with_actors
+        tool = mcp._tool_manager._tools["power_down"]
+        result = tool.fn(building_id=999)
+        assert "error" in result
+        assert "your_buildings" in result
+
+    def test_power_down_accepts_valid_actor(self, env_with_actors):
+        env, mcp = env_with_actors
+        env._execute_commands = lambda cmds: {"tick": 501, "done": False, "result": ""}
+        tool = mcp._tool_manager._tools["power_down"]
+        result = tool.fn(building_id=101)
+        assert "error" not in result
+
+    # ── set_primary ──
+
+    def test_set_primary_rejects_missing_actor(self, env_with_actors):
+        env, mcp = env_with_actors
+        tool = mcp._tool_manager._tools["set_primary"]
+        result = tool.fn(building_id=999)
+        assert "error" in result
+        assert "your_buildings" in result
+
+    def test_set_primary_accepts_valid_actor(self, env_with_actors):
+        env, mcp = env_with_actors
+        env._execute_commands = lambda cmds: {"tick": 501, "done": False, "result": ""}
+        tool = mcp._tool_manager._tools["set_primary"]
+        result = tool.fn(building_id=100)
+        assert "error" not in result
+
+    # ── cancel_production ──
+
+    def test_cancel_production_rejects_item_not_in_queue(self, env_with_actors):
+        env, mcp = env_with_actors
+        tool = mcp._tool_manager._tools["cancel_production"]
+        result = tool.fn(item_type="3tnk")
+        assert "error" in result
+        assert "3tnk" in result["error"]
+        assert "current_queue" in result
+
+    def test_cancel_production_accepts_item_in_queue(self, env_with_actors):
+        env, mcp = env_with_actors
+        env._execute_commands = lambda cmds: {"tick": 501, "done": False, "result": ""}
+        tool = mcp._tool_manager._tools["cancel_production"]
+        result = tool.fn(item_type="e1")
+        assert "error" not in result
+
+    def test_cancel_production_case_insensitive(self, env_with_actors):
+        env, mcp = env_with_actors
+        env._execute_commands = lambda cmds: {"tick": 501, "done": False, "result": ""}
+        tool = mcp._tool_manager._tools["cancel_production"]
+        result = tool.fn(item_type="E1")
+        assert "error" not in result
+
+
+class TestEmptyProductionValidation:
+    """Test that production tools reject commands when no production buildings exist."""
+
+    @pytest.fixture
+    def env_no_production(self):
+        """Create env with empty available_production (all factories destroyed)."""
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
+        from fastmcp import FastMCP
+        mcp = FastMCP("openra-test")
+
+        env._planning_active = False
+        env._planning_strategy = ""
+        env._planning_enabled = False
+        env._planning_max_turns = 10
+        env._planning_max_time_s = 60.0
+        env._planning_start_time = 0.0
+        env._planning_turns_used = 0
+        env._pending_placements = {}
+        env._attempted_placements = {}
+        env._placement_results = []
+        env._player_faction = "england"
+
+        env._last_obs = {
+            "tick": 8000,
+            "done": False,
+            "result": "",
+            "economy": {
+                "cash": 500, "ore": 100, "power_provided": 0,
+                "power_drained": 0, "resource_capacity": 4000,
+                "harvester_count": 0,
+            },
+            "military": {
+                "units_killed": 0, "units_lost": 3,
+                "buildings_killed": 0, "buildings_lost": 4,
+                "army_value": 0, "active_unit_count": 0,
+            },
+            "units": [],
+            "buildings": [],
+            "production": [],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 128, "height": 128, "map_name": "Test Map"},
+            "available_production": [],  # Empty! All production buildings destroyed.
+        }
+
+        env._refresh_obs = lambda: None
+        env._register_tools(mcp)
+        return env, mcp
+
+    def test_build_unit_empty_production_returns_error(self, env_no_production):
+        env, mcp = env_no_production
+        tool = mcp._tool_manager._tools["build_unit"]
+        result = tool.fn(unit_type="e1")
+        assert "error" in result
+        assert "No production" in result["error"]
+
+    def test_build_structure_empty_production_returns_error(self, env_no_production):
+        env, mcp = env_no_production
+        tool = mcp._tool_manager._tools["build_structure"]
+        result = tool.fn(building_type="powr")
+        assert "error" in result
+        assert "available_buildings" in result
+        assert result["available_buildings"] == []
+
+    def test_build_and_place_empty_production_returns_error(self, env_no_production):
+        env, mcp = env_no_production
+        tool = mcp._tool_manager._tools["build_and_place"]
+        result = tool.fn(building_type="powr")
+        assert "error" in result
+        assert "available_buildings" in result
+        assert result["available_buildings"] == []
+
+
+class TestActionToCommandsValidation:
+    """Test that _action_to_commands validates actors and production in batch/plan context."""
+
+    @pytest.fixture
+    def env_for_batch(self):
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
+        env._pending_placements = {}
+        return env
+
+    def test_build_unit_empty_production_returns_empty(self, env_for_batch):
+        env = env_for_batch
+        obs = {"available_production": [], "units": [], "buildings": [], "production": []}
+        result = env._action_to_commands({"tool": "build_unit", "unit_type": "e1"}, obs)
+        assert result == []
+
+    def test_build_unit_unavailable_returns_empty(self, env_for_batch):
+        env = env_for_batch
+        obs = {"available_production": ["e1", "e3"], "units": [], "buildings": [], "production": []}
+        result = env._action_to_commands({"tool": "build_unit", "unit_type": "3tnk"}, obs)
+        assert result == []
+
+    def test_build_unit_available_returns_commands(self, env_for_batch):
+        env = env_for_batch
+        obs = {"available_production": ["e1", "e3"], "units": [], "buildings": [], "production": []}
+        result = env._action_to_commands({"tool": "build_unit", "unit_type": "e1"}, obs)
+        assert len(result) == 1
+        assert result[0].action == ActionType.TRAIN
+
+    def test_build_structure_empty_production_returns_empty(self, env_for_batch):
+        env = env_for_batch
+        obs = {"available_production": [], "units": [], "buildings": [], "production": []}
+        result = env._action_to_commands({"tool": "build_structure", "building_type": "powr"}, obs)
+        assert result == []
+
+    def test_build_and_place_empty_production_returns_empty(self, env_for_batch):
+        env = env_for_batch
+        obs = {"available_production": [], "units": [], "buildings": [], "production": []}
+        result = env._action_to_commands({"tool": "build_and_place", "building_type": "powr", "cell_x": 5, "cell_y": 5}, obs)
+        assert result == []
+
+    def test_deploy_unit_missing_actor_returns_empty(self, env_for_batch):
+        env = env_for_batch
+        obs = {"units": [{"actor_id": 10, "type": "mcv"}], "buildings": [], "production": []}
+        result = env._action_to_commands({"tool": "deploy_unit", "unit_id": 999}, obs)
+        assert result == []
+
+    def test_deploy_unit_valid_actor_returns_command(self, env_for_batch):
+        env = env_for_batch
+        obs = {"units": [{"actor_id": 10, "type": "mcv"}], "buildings": [], "production": []}
+        result = env._action_to_commands({"tool": "deploy_unit", "unit_id": 10}, obs)
+        assert len(result) == 1
+        assert result[0].action == ActionType.DEPLOY
+
+    def test_repair_building_missing_actor_returns_empty(self, env_for_batch):
+        env = env_for_batch
+        obs = {"units": [], "buildings": [{"actor_id": 100, "type": "fact"}], "production": []}
+        result = env._action_to_commands({"tool": "repair_building", "building_id": 999}, obs)
+        assert result == []
+
+    def test_set_rally_point_missing_actor_returns_empty(self, env_for_batch):
+        env = env_for_batch
+        obs = {"units": [], "buildings": [{"actor_id": 100, "type": "fact"}], "production": []}
+        result = env._action_to_commands({"tool": "set_rally_point", "building_id": 999, "cell_x": 5, "cell_y": 5}, obs)
+        assert result == []
+
+    def test_harvest_missing_actor_returns_empty(self, env_for_batch):
+        env = env_for_batch
+        obs = {"units": [{"actor_id": 20, "type": "harv"}], "buildings": [], "production": []}
+        result = env._action_to_commands({"tool": "harvest", "unit_id": 999}, obs)
+        assert result == []
+
+    def test_cancel_production_item_not_in_queue_returns_empty(self, env_for_batch):
+        env = env_for_batch
+        obs = {"units": [], "buildings": [], "production": [{"type": "e1", "progress": 50}]}
+        result = env._action_to_commands({"tool": "cancel_production", "item_type": "3tnk"}, obs)
+        assert result == []
+
+    def test_cancel_production_item_in_queue_returns_command(self, env_for_batch):
+        env = env_for_batch
+        obs = {"units": [], "buildings": [], "production": [{"type": "e1", "progress": 50}]}
+        result = env._action_to_commands({"tool": "cancel_production", "item_type": "e1"}, obs)
+        assert len(result) == 1
+        assert result[0].action == ActionType.CANCEL_PRODUCTION

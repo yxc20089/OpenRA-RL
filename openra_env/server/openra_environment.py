@@ -72,6 +72,102 @@ def _estimate_move_ticks(speed: int, from_x: int, from_y: int, to_x: int, to_y: 
     return dist * 1024 // speed
 
 
+def _render_minimap(obs: dict, max_cols: int = 28) -> str:
+    """Render a compact ASCII minimap from spatial tensor + unit/building positions.
+
+    Downsamples the map to ~max_cols columns. Each cell shows the highest-priority
+    feature in its area using these characters (highest priority first):
+        ! = enemy unit, X = enemy building, @ = own unit, B = own building,
+        $ = resources (ore/gems), ~ = water/impassable, . = explored land,
+        # = unexplored (shroud)
+    """
+    import base64
+    import struct
+    from math import ceil
+
+    map_info = obs.get("map_info", {})
+    w = map_info.get("width", 0)
+    h = map_info.get("height", 0)
+    channels = obs.get("spatial_channels", 0)
+    spatial = obs.get("spatial_map", "")
+
+    if w == 0 or h == 0 or channels == 0 or not spatial:
+        return ""
+
+    try:
+        raw = base64.b64decode(spatial)
+    except Exception:
+        return ""
+
+    scale = max(1, ceil(w / max_cols))
+    grid_w = ceil(w / scale)
+    grid_h = ceil(h / scale)
+
+    # Initialize grid from spatial tensor
+    grid = []
+    for gy in range(grid_h):
+        row = []
+        for gx in range(grid_w):
+            # Sample center of each cell block
+            sx = gx * scale + scale // 2
+            sy = gy * scale + scale // 2
+            sx = min(sx, w - 1)
+            sy = min(sy, h - 1)
+            base_idx = (sy * w + sx) * channels
+
+            try:
+                fog = struct.unpack_from("f", raw, (base_idx + 4) * 4)[0]
+            except struct.error:
+                row.append("#")
+                continue
+
+            if fog <= 0.25:
+                row.append("#")
+            else:
+                try:
+                    passability = struct.unpack_from("f", raw, (base_idx + 3) * 4)[0]
+                except struct.error:
+                    passability = 1.0
+                if passability < 0.5:
+                    row.append("~")
+                else:
+                    try:
+                        resources = struct.unpack_from("f", raw, (base_idx + 2) * 4)[0]
+                    except struct.error:
+                        resources = 0.0
+                    row.append("$" if resources > 0 else ".")
+        grid.append(row)
+
+    # Overlay unit and building positions (priority: ! > X > @ > B)
+    _PRIORITY = {"B": 1, "@": 2, "X": 3, "!": 4}
+
+    def _overlay(items, char):
+        for item in items:
+            cx = item.get("cell_x", -1)
+            cy = item.get("cell_y", -1)
+            if cx < 0 or cy < 0:
+                continue
+            gx = cx // scale
+            gy = cy // scale
+            if 0 <= gx < grid_w and 0 <= gy < grid_h:
+                cur = grid[gy][gx]
+                if _PRIORITY.get(char, 0) >= _PRIORITY.get(cur, 0):
+                    grid[gy][gx] = char
+
+    _overlay(obs.get("buildings", []), "B")
+    _overlay(obs.get("units", []), "@")
+    _overlay(obs.get("visible_enemy_buildings", []), "X")
+    _overlay(obs.get("visible_enemies", []), "!")
+
+    lines = ["".join(row) for row in grid]
+    header = f"Map ({grid_w}x{grid_h}, 1cell={scale}x{scale}):"
+    legend = (
+        "YOUR: B=building @=unit | ENEMY: X=building !=unit | "
+        "terrain: .=land ~=water $=ore #=unexplored"
+    )
+    return header + "\n" + "\n".join(lines) + "\n" + legend
+
+
 class OpenRAEnvironment(MCPEnvironment):
     """OpenRA RL Environment with MCP tool support.
 
@@ -412,6 +508,16 @@ class OpenRAEnvironment(MCPEnvironment):
                  "cell_x": e["cell_x"], "cell_y": e["cell_y"]}
                 for e in obs["visible_enemies"]
             ]
+            enemy_buildings_summary = [
+                {"id": b["actor_id"], "type": b["type"],
+                 "cell_x": b["cell_x"], "cell_y": b["cell_y"]}
+                for b in obs.get("visible_enemy_buildings", [])
+            ]
+
+            # Render minimap (gated by config)
+            minimap = ""
+            if env._app_config.alerts.minimap:
+                minimap = _render_minimap(obs)
 
             result = {
                 "tick": obs["tick"],
@@ -435,6 +541,8 @@ class OpenRAEnvironment(MCPEnvironment):
                 "units_summary": units_summary,
                 "buildings_summary": buildings_summary,
                 "enemy_summary": enemy_summary,
+                "enemy_buildings_summary": enemy_buildings_summary,
+                "minimap": minimap,
                 "alerts": alert_texts,
                 "map": obs["map_info"],
             }
@@ -1358,7 +1466,13 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             if env._last_obs:
                 available = env._last_obs.get("available_production", [])
-                if available and unit_type not in available:
+                if not available:
+                    # No production buildings — nothing can be built
+                    return {
+                        "error": "No production buildings available. Build a Construction Yard (deploy MCV), Barracks, War Factory, etc. first.",
+                        "available_units": [],
+                    }
+                if unit_type not in available:
                     all_buildings = get_all_building_types()
                     avail_units = [u for u in available if u not in all_buildings]
                     diag = env._diagnose_unavailable(unit_type)
@@ -1406,7 +1520,12 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             if env._last_obs:
                 available = env._last_obs.get("available_production", [])
-                if available and building_type not in available:
+                if not available:
+                    return {
+                        "error": "No Construction Yard (fact) — requires MCV deployment to build.",
+                        "available_buildings": [],
+                    }
+                if building_type not in available:
                     all_buildings = get_all_building_types()
                     avail_bldgs = [b for b in available if b in all_buildings]
                     diag = env._diagnose_unavailable(building_type)
@@ -1461,7 +1580,12 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             if env._last_obs:
                 available = env._last_obs.get("available_production", [])
-                if available and building_type not in available:
+                if not available:
+                    return {
+                        "error": "No Construction Yard (fact) — requires MCV deployment to build.",
+                        "available_buildings": [],
+                    }
+                if building_type not in available:
                     all_buildings = get_all_building_types()
                     avail_bldgs = [b for b in available if b in all_buildings]
                     diag = env._diagnose_unavailable(building_type)
@@ -1541,24 +1665,49 @@ class OpenRAEnvironment(MCPEnvironment):
         @configurable_tool
         def cancel_production(item_type: str) -> dict:
             """Cancel production of an item currently in a production queue."""
+            env._refresh_obs()
+            obs = env._last_obs or {}
+            queue = obs.get("production", [])
+            in_queue = any(p.get("type", "").lower() == item_type.lower() for p in queue)
+            if not in_queue:
+                queued_items = [p.get("type", "") for p in queue]
+                return {"error": f"'{item_type}' is not in the production queue.", "current_queue": queued_items}
             commands = [CommandModel(action=ActionType.CANCEL_PRODUCTION, item_type=item_type)]
             return env._execute_commands(commands)
 
         @configurable_tool
         def deploy_unit(unit_id: int) -> dict:
             """Deploy a unit (e.g., MCV → Construction Yard)."""
+            env._refresh_obs()
+            obs = env._last_obs or {}
+            units = obs.get("units", [])
+            if not any(u.get("actor_id") == unit_id for u in units):
+                return {"error": f"Unit {unit_id} not found. It may have been destroyed.",
+                        "your_units": [{"id": u["actor_id"], "type": u["type"]} for u in units[:20]]}
             commands = [CommandModel(action=ActionType.DEPLOY, actor_id=unit_id)]
             return env._execute_commands(commands)
 
         @configurable_tool
         def sell_building(building_id: int) -> dict:
             """Sell a building for partial refund."""
+            env._refresh_obs()
+            obs = env._last_obs or {}
+            buildings = obs.get("buildings", [])
+            if not any(b.get("actor_id") == building_id for b in buildings):
+                return {"error": f"Building {building_id} not found. It may have been destroyed or sold.",
+                        "your_buildings": [{"id": b["actor_id"], "type": b["type"]} for b in buildings[:20]]}
             commands = [CommandModel(action=ActionType.SELL, actor_id=building_id)]
             return env._execute_commands(commands)
 
         @configurable_tool
         def repair_building(building_id: int) -> dict:
             """Toggle repair on a building. Costs credits over time."""
+            env._refresh_obs()
+            obs = env._last_obs or {}
+            buildings = obs.get("buildings", [])
+            if not any(b.get("actor_id") == building_id for b in buildings):
+                return {"error": f"Building {building_id} not found. It may have been destroyed or sold.",
+                        "your_buildings": [{"id": b["actor_id"], "type": b["type"]} for b in buildings[:20]]}
             commands = [CommandModel(action=ActionType.REPAIR, actor_id=building_id)]
             return env._execute_commands(commands)
 
@@ -1566,6 +1715,12 @@ class OpenRAEnvironment(MCPEnvironment):
         def set_rally_point(building_id: int, cell_x: int, cell_y: int) -> dict:
             """Set rally point for a production building. Newly produced units
             will move to this location."""
+            env._refresh_obs()
+            obs = env._last_obs or {}
+            buildings = obs.get("buildings", [])
+            if not any(b.get("actor_id") == building_id for b in buildings):
+                return {"error": f"Building {building_id} not found. It may have been destroyed or sold.",
+                        "your_buildings": [{"id": b["actor_id"], "type": b["type"]} for b in buildings[:20]]}
             commands = [CommandModel(action=ActionType.SET_RALLY_POINT, actor_id=building_id, target_x=cell_x, target_y=cell_y)]
             return env._execute_commands(commands)
 
@@ -1606,6 +1761,12 @@ class OpenRAEnvironment(MCPEnvironment):
         def harvest(unit_id: int, cell_x: int = 0, cell_y: int = 0) -> dict:
             """Send a harvester to collect ore. If cell_x/cell_y are provided,
             harvest at that location. Otherwise, auto-harvest nearest ore."""
+            env._refresh_obs()
+            obs = env._last_obs or {}
+            units = obs.get("units", [])
+            if not any(u.get("actor_id") == unit_id for u in units):
+                return {"error": f"Unit {unit_id} not found. It may have been destroyed.",
+                        "your_units": [{"id": u["actor_id"], "type": u["type"]} for u in units[:20]]}
             commands = [CommandModel(action=ActionType.HARVEST, actor_id=unit_id, target_x=cell_x, target_y=cell_y)]
             return env._execute_commands(commands)
 
@@ -1613,6 +1774,12 @@ class OpenRAEnvironment(MCPEnvironment):
         def power_down(building_id: int) -> dict:
             """Toggle power on/off for a building. Reduces power consumption
             but disables the building's function."""
+            env._refresh_obs()
+            obs = env._last_obs or {}
+            buildings = obs.get("buildings", [])
+            if not any(b.get("actor_id") == building_id for b in buildings):
+                return {"error": f"Building {building_id} not found. It may have been destroyed or sold.",
+                        "your_buildings": [{"id": b["actor_id"], "type": b["type"]} for b in buildings[:20]]}
             commands = [CommandModel(action=ActionType.POWER_DOWN, actor_id=building_id)]
             return env._execute_commands(commands)
 
@@ -1620,6 +1787,12 @@ class OpenRAEnvironment(MCPEnvironment):
         def set_primary(building_id: int) -> dict:
             """Set a production building as the primary producer. New units will
             exit from this building."""
+            env._refresh_obs()
+            obs = env._last_obs or {}
+            buildings = obs.get("buildings", [])
+            if not any(b.get("actor_id") == building_id for b in buildings):
+                return {"error": f"Building {building_id} not found. It may have been destroyed or sold.",
+                        "your_buildings": [{"id": b["actor_id"], "type": b["type"]} for b in buildings[:20]]}
             commands = [CommandModel(action=ActionType.SET_PRIMARY, actor_id=building_id)]
             return env._execute_commands(commands)
 
@@ -2116,15 +2289,22 @@ class OpenRAEnvironment(MCPEnvironment):
         if tool == "build_unit":
             unit_type = action.get("unit_type", "")
             available = obs.get("available_production", [])
-            if available and unit_type not in available:
+            if not available or unit_type not in available:
                 return []  # unavailable — batch() will mark as FAILED
             count = max(1, action.get("count", 1))
             return [CommandModel(action=ActionType.TRAIN, item_type=unit_type)
                     for _ in range(count)]
         elif tool == "build_structure":
-            return [CommandModel(action=ActionType.BUILD, item_type=action["building_type"])]
+            btype = action["building_type"]
+            available = obs.get("available_production", [])
+            if not available or btype not in available:
+                return []
+            return [CommandModel(action=ActionType.BUILD, item_type=btype)]
         elif tool == "build_and_place":
             btype = action["building_type"]
+            available = obs.get("available_production", [])
+            if not available or btype not in available:
+                return []
             self._pending_placements[btype] = {
                 "cell_x": action.get("cell_x", 0), "cell_y": action.get("cell_y", 0)
             }
@@ -2153,21 +2333,37 @@ class OpenRAEnvironment(MCPEnvironment):
             return [CommandModel(action=ActionType.SET_STANCE, actor_id=uid, target_x=stance_val)
                     for uid in unit_ids]
         elif tool == "deploy_unit":
-            return [CommandModel(action=ActionType.DEPLOY, actor_id=action["unit_id"])]
+            uid = action["unit_id"]
+            if not any(u.get("actor_id") == uid for u in obs.get("units", [])):
+                return []
+            return [CommandModel(action=ActionType.DEPLOY, actor_id=uid)]
         elif tool == "set_rally_point":
+            bid = action["building_id"]
+            if not any(b.get("actor_id") == bid for b in obs.get("buildings", [])):
+                return []
             return [CommandModel(action=ActionType.SET_RALLY_POINT,
-                                actor_id=action["building_id"],
+                                actor_id=bid,
                                 target_x=action["cell_x"], target_y=action["cell_y"])]
         elif tool == "repair_building":
-            return [CommandModel(action=ActionType.REPAIR, actor_id=action["building_id"])]
+            bid = action["building_id"]
+            if not any(b.get("actor_id") == bid for b in obs.get("buildings", [])):
+                return []
+            return [CommandModel(action=ActionType.REPAIR, actor_id=bid)]
         elif tool == "stop_units":
             return [CommandModel(action=ActionType.STOP, actor_id=uid) for uid in unit_ids]
         elif tool == "harvest":
-            return [CommandModel(action=ActionType.HARVEST, actor_id=action["unit_id"],
+            uid = action["unit_id"]
+            if not any(u.get("actor_id") == uid for u in obs.get("units", [])):
+                return []
+            return [CommandModel(action=ActionType.HARVEST, actor_id=uid,
                                 target_x=action.get("cell_x", 0),
                                 target_y=action.get("cell_y", 0))]
         elif tool == "cancel_production":
-            return [CommandModel(action=ActionType.CANCEL_PRODUCTION, item_type=action["item_type"])]
+            item = action["item_type"]
+            queue = obs.get("production", [])
+            if not any(p.get("type", "").lower() == item.lower() for p in queue):
+                return []
+            return [CommandModel(action=ActionType.CANCEL_PRODUCTION, item_type=item)]
         elif tool == "surrender":
             return [CommandModel(action=ActionType.SURRENDER)]
         else:

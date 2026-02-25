@@ -35,9 +35,10 @@ class GameConfig(BaseModel):
 
 
 class OpponentConfig(BaseModel):
-    # bot_type: friendly names (easy/normal/hard) mapped to OpenRA types (rush/normal/turtle)
+    # bot_type: difficulty tiers (beginner/easy/medium/hard/brutal)
+    # or raw OpenRA play styles (rush/normal/turtle/naval)
     # ai_slot: player slot for AI; set to "" to disable enemy spawning
-    bot_type: str = "normal"
+    bot_type: str = "easy"
     ai_slot: str = "Multi0"
 
 
@@ -112,6 +113,7 @@ class AlertsConfig(BaseModel):
     no_defenses: bool = True
     no_scouting: bool = True
     loss_tracking: bool = True
+    minimap: bool = True  # Show ASCII minimap in turn briefing
     max_alerts: int = 0  # 0 = unlimited; set >0 to cap alerts per turn
 
 

@@ -18,10 +18,14 @@ DEFAULT_OPENRA_PATH = os.environ.get("OPENRA_PATH", "/opt/openra")
 
 # Map user-friendly difficulty names to actual OpenRA bot type strings.
 # Users can set either the friendly name or the raw OpenRA name.
+# Difficulty tiers: beginner < easy < medium < hard < brutal
+# Play styles (raw pass-through): rush, normal, turtle, naval
 BOT_TYPE_MAP: dict[str, str] = {
-    "easy": "rush",
-    "normal": "normal",
-    "hard": "turtle",
+    "beginner": "beginner",
+    "easy": "easy",
+    "medium": "medium",
+    "hard": "normal",
+    "brutal": "rush",
 }
 
 
