@@ -13,16 +13,17 @@ game:
 #   map_name: "singles.oramap"        # Map to play
 #   grpc_port: 9999                   # gRPC bridge port
 #   headless: true                    # Use Null renderer (no GPU)
-#   record_replays: false             # Save .orarep replay files ($RECORD_REPLAYS)
+  record_replays: true                # Save .orarep replay files ($RECORD_REPLAYS)
 #   seed: null                        # RNG seed for reproducibility (null = random)
 #   max_ticks: 0                      # End game after N ticks (0 = unlimited)
 #   max_wall_time_s: 0                # End game after N seconds (0 = unlimited)
 
 # ── Opponent ──────────────────────────────────────────────────────────
 # Enemy bot always spawns by default. Set ai_slot to "" to disable.
-# bot_type accepts friendly names (easy/normal/hard) or OpenRA names (rush/normal/turtle/naval).
+# Difficulty tiers: beginner / easy / medium / hard / brutal
+# Raw play styles also accepted: rush / normal / turtle / naval
 opponent:
-  bot_type: "easy"                    # easy=rush, normal=normal, hard=turtle ($BOT_TYPE)
+  bot_type: "beginner"                # Difficulty tier ($BOT_TYPE)
   ai_slot: "Multi0"                   # AI player slot; "" to disable enemy ($AI_SLOT)
 
 # ── Planning Phase ────────────────────────────────────────────────────
@@ -73,6 +74,7 @@ opponent:
 #   no_defenses: true
 #   no_scouting: true
 #   loss_tracking: true
+#   minimap: true                    # Show ASCII minimap in turn briefing
 #   max_alerts: 0                    # Max alerts per turn (0 = unlimited)
 
 # ── LLM Model ────────────────────────────────────────────────────────

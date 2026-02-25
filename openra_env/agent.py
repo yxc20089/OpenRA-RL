@@ -187,6 +187,11 @@ def format_state_briefing(state: dict) -> str:
         f"Funds: ${funds} (cash=${cash} + ore=${ore}) | Power: {state.get('power_balance', 0):+d} | Harvesters: {eco.get('harvester_count', 0)}",
     ]
 
+    # Minimap (ASCII spatial overview)
+    minimap = state.get("minimap", "")
+    if minimap:
+        parts.append(minimap)
+
     # Base center from buildings
     buildings = state.get("buildings_summary", [])
     if buildings:
@@ -240,19 +245,32 @@ def format_state_briefing(state: dict) -> str:
     else:
         parts.append(f"Buildings: {state.get('own_buildings', '?')} ({', '.join(state.get('building_types', []))})")
 
-    # Enemy summary with IDs and positions
+    # Enemy summary with IDs and positions (units + buildings)
     enemies = state.get("enemy_summary", [])
-    if enemies:
-        eby_type = defaultdict(list)
-        for e in enemies:
-            eby_type[e["type"]].append(e)
+    enemy_bldgs = state.get("enemy_buildings_summary", [])
+    if enemies or enemy_bldgs:
         enemy_parts = []
-        for etype, es in eby_type.items():
-            entries = ",".join(f"{e['id']}@({e['cell_x']},{e['cell_y']})" for e in es)
-            enemy_parts.append(f"{len(es)}x{etype}[{entries}]")
-        # Average position
-        avg_x = sum(e["cell_x"] for e in enemies) // len(enemies)
-        avg_y = sum(e["cell_y"] for e in enemies) // len(enemies)
+        if enemies:
+            eby_type = defaultdict(list)
+            for e in enemies:
+                eby_type[e["type"]].append(e)
+            for etype, es in eby_type.items():
+                entries = ",".join(f"{e['id']}@({e['cell_x']},{e['cell_y']})" for e in es)
+                enemy_parts.append(f"{len(es)}x{etype}[{entries}]")
+        if enemy_bldgs:
+            ebby_type = defaultdict(list)
+            for b in enemy_bldgs:
+                ebby_type[b["type"]].append(b)
+            for btype, bs in ebby_type.items():
+                entries = ",".join(f"{b['id']}@({b['cell_x']},{b['cell_y']})" for b in bs)
+                enemy_parts.append(f"{len(bs)}x{btype}[{entries}]")
+        # Average position of all visible enemies
+        all_enemy_pos = (
+            [(e["cell_x"], e["cell_y"]) for e in enemies]
+            + [(b["cell_x"], b["cell_y"]) for b in enemy_bldgs]
+        )
+        avg_x = sum(p[0] for p in all_enemy_pos) // len(all_enemy_pos)
+        avg_y = sum(p[1] for p in all_enemy_pos) // len(all_enemy_pos)
         parts.append(f"Enemies: {' '.join(enemy_parts)} center ({avg_x},{avg_y})")
     else:
         n_enemy = state.get("visible_enemy_units", 0)

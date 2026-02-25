@@ -10,38 +10,125 @@ from typing import Optional
 # ── Opponent Profiles ──────────────────────────────────────────────────────
 
 AI_PROFILES: dict[str, dict] = {
+    "beginner": {
+        "difficulty": "Beginner",
+        "display_name": "Beginner AI",
+        "aggressiveness": "minimal",
+        "expansion_tendency": "none",
+        "unit_diversity": "very_low",
+        "build_order_quality": "very_poor",
+        "estimated_win_rate_vs_new_player": 0.10,
+        "typical_first_attack_tick": 150000,
+        "behavioral_traits": [
+            "Almost never attacks — first attack after 100+ minutes",
+            "Builds only basic infantry (rifle soldiers, grenadiers)",
+            "No vehicles, no aircraft, no navy",
+            "Tiny squads of 3-5 units that pose almost no threat",
+            "Stays at starting base, never expands",
+            "Extremely slow economy — one refinery, one harvester",
+            "Does not repair damaged buildings",
+            "Very slow construction speed — 8x slower than normal AI",
+            "Does not use superweapons or advanced tech",
+            "Barely defends base — minimal turrets placed very late",
+        ],
+        "recommended_counters": [
+            "Any military force will win — even 3-4 infantry can overwhelm",
+            "Take your time building economy and army — no rush needed",
+            "Good difficulty for learning basic game mechanics",
+            "Practice build orders without pressure",
+        ],
+        "typical_army_composition": {
+            "infantry": 1.0,
+            "vehicles": 0.0,
+            "aircraft": 0.0,
+            "ships": 0.0,
+        },
+        "recent_match_history": [
+            {"result": "loss", "duration_ticks": 8000, "score": 400},
+            {"result": "loss", "duration_ticks": 6000, "score": 300},
+            {"result": "loss", "duration_ticks": 10000, "score": 600},
+        ],
+    },
     "easy": {
         "difficulty": "Easy",
         "display_name": "Easy AI",
         "aggressiveness": "low",
-        "expansion_tendency": "none",
+        "expansion_tendency": "very_low",
         "unit_diversity": "low",
         "build_order_quality": "poor",
-        "estimated_win_rate_vs_new_player": 0.30,
-        "typical_first_attack_tick": 3000,
+        "estimated_win_rate_vs_new_player": 0.25,
+        "typical_first_attack_tick": 80000,
         "behavioral_traits": [
-            "Defensive posture — rarely attacks unprovoked",
-            "Builds basic units only (infantry, light vehicles)",
-            "Stays at starting base, does not expand",
-            "Slow economy — builds one refinery, few harvesters",
-            "Weak at defending against multi-pronged attacks",
-            "Does not rebuild destroyed buildings quickly",
+            "Passive — first attack after ~50 minutes of game time",
+            "Builds basic infantry and some light vehicles (light tanks, APCs)",
+            "No aircraft, no navy, no advanced tech",
+            "Small attack squads of 8-12 units",
+            "Rarely expands beyond starting base",
+            "Slow economy — 1-2 refineries with 2-4 harvesters",
+            "Repairs buildings slowly (5x slower than normal)",
+            "Moderate construction speed — 3x slower than normal AI",
+            "Limited unit caps — cannot mass large armies",
+            "Defenses delayed but eventually builds pillboxes and turrets",
         ],
         "recommended_counters": [
-            "Rush with early infantry to overwhelm before defenses go up",
-            "Any tank force will crush their army",
-            "No need to scout urgently — they won't attack early",
+            "Build a small army of 10-15 units and attack before their defenses solidify",
+            "Any combined arms force (infantry + tanks) will overwhelm them",
+            "Economy is their weakness — denying resources cripples them further",
+            "No need to rush — focus on good build order first",
         ],
         "typical_army_composition": {
-            "infantry": 0.7,
-            "vehicles": 0.2,
+            "infantry": 0.6,
+            "vehicles": 0.4,
             "aircraft": 0.0,
-            "ships": 0.1,
+            "ships": 0.0,
         },
         "recent_match_history": [
-            {"result": "loss", "duration_ticks": 4500, "score": 1200},
-            {"result": "loss", "duration_ticks": 6000, "score": 1800},
-            {"result": "win", "duration_ticks": 12000, "score": 3500},
+            {"result": "loss", "duration_ticks": 5000, "score": 800},
+            {"result": "loss", "duration_ticks": 7000, "score": 1200},
+            {"result": "win", "duration_ticks": 15000, "score": 2500},
+        ],
+    },
+    "medium": {
+        "difficulty": "Medium",
+        "display_name": "Medium AI",
+        "aggressiveness": "moderate",
+        "expansion_tendency": "moderate",
+        "unit_diversity": "moderate",
+        "build_order_quality": "decent",
+        "estimated_win_rate_vs_new_player": 0.50,
+        "typical_first_attack_tick": 5000,
+        "behavioral_traits": [
+            "Moderately aggressive — sends first attack around tick 5000 (~3 minutes)",
+            "Builds a balanced ground force (infantry, tanks, artillery)",
+            "No aircraft or naval units — ground-focused only",
+            "Medium-sized attack squads of 20-35 units",
+            "Will expand to a second base if resources allow",
+            "Decent economy — 2-3 refineries with up to 6 harvesters",
+            "Repairs buildings at normal speed",
+            "Slightly slower construction than Hard/Brutal AI",
+            "Builds advanced tech eventually (tech centers delayed ~8 minutes)",
+            "Uses superweapons if available but slowly",
+            "Limited production capacity — fewer factories than Hard AI",
+        ],
+        "recommended_counters": [
+            "Build early defenses — first attack comes around tick 5000",
+            "Scout by tick 2000 to identify expansion attempts",
+            "Match their economy with 2+ refineries minimum",
+            "Combined arms with anti-armor focus works well",
+            "Their lack of air power means you can skip AA early",
+            "Deny expansion to keep resource advantage",
+        ],
+        "typical_army_composition": {
+            "infantry": 0.35,
+            "vehicles": 0.65,
+            "aircraft": 0.0,
+            "ships": 0.0,
+        },
+        "recent_match_history": [
+            {"result": "win", "duration_ticks": 7000, "score": 3200},
+            {"result": "loss", "duration_ticks": 9000, "score": 3800},
+            {"result": "win", "duration_ticks": 8000, "score": 4200},
+            {"result": "loss", "duration_ticks": 10000, "score": 3500},
         ],
     },
     "normal": {
@@ -135,8 +222,8 @@ def get_opponent_profile(difficulty: str) -> Optional[dict]:
     """Get the opponent intelligence profile for a given AI difficulty.
 
     Args:
-        difficulty: One of "easy", "normal", "hard". Also accepts
-                   "bot_easy", "bot_normal", "bot_hard" (strips prefix).
+        difficulty: One of "beginner", "easy", "medium", "normal", "hard".
+                   Also accepts "bot_" prefix (strips it).
 
     Returns:
         Profile dict or None if not found.

@@ -40,7 +40,7 @@ class TestDefaults:
         cfg = OpenRARLConfig()
         assert cfg.game.mod == "ra"
         assert cfg.game.grpc_port == 9999
-        assert cfg.opponent.bot_type == "normal"
+        assert cfg.opponent.bot_type == "easy"
         assert cfg.planning.enabled is True
         assert cfg.reward.victory == 1.0
         assert cfg.llm.model == "qwen/qwen3-coder-next"
@@ -734,7 +734,7 @@ class TestOpponentConfig:
         """Default opponent config spawns an enemy in Multi0."""
         cfg = OpponentConfig()
         assert cfg.ai_slot == "Multi0"
-        assert cfg.bot_type == "normal"
+        assert cfg.bot_type == "easy"
 
     def test_disable_enemy_via_empty_slot(self):
         cfg = OpponentConfig(ai_slot="")
@@ -749,32 +749,30 @@ class TestOpponentConfig:
 
 
 class TestBotTypeMapping:
-    def test_easy_maps_to_rush(self):
+    def test_beginner_maps_to_beginner(self):
         from openra_env.server.openra_process import BOT_TYPE_MAP
-        assert BOT_TYPE_MAP["easy"] == "rush"
+        assert BOT_TYPE_MAP["beginner"] == "beginner"
 
-    def test_normal_maps_to_normal(self):
+    def test_easy_maps_to_easy(self):
         from openra_env.server.openra_process import BOT_TYPE_MAP
-        assert BOT_TYPE_MAP["normal"] == "normal"
+        assert BOT_TYPE_MAP["easy"] == "easy"
 
-    def test_hard_maps_to_turtle(self):
+    def test_medium_maps_to_medium(self):
         from openra_env.server.openra_process import BOT_TYPE_MAP
-        assert BOT_TYPE_MAP["hard"] == "turtle"
+        assert BOT_TYPE_MAP["medium"] == "medium"
+
+    def test_hard_maps_to_normal(self):
+        from openra_env.server.openra_process import BOT_TYPE_MAP
+        assert BOT_TYPE_MAP["hard"] == "normal"
+
+    def test_brutal_maps_to_rush(self):
+        from openra_env.server.openra_process import BOT_TYPE_MAP
+        assert BOT_TYPE_MAP["brutal"] == "rush"
 
     def test_raw_names_pass_through(self):
         from openra_env.server.openra_process import BOT_TYPE_MAP
-        for raw in ["rush", "turtle", "naval"]:
+        for raw in ["rush", "normal", "turtle", "naval", "beginner", "easy", "medium"]:
             assert BOT_TYPE_MAP.get(raw, raw) == raw
-
-    def test_build_command_maps_easy(self):
-        from openra_env.server.openra_process import OpenRAConfig, OpenRAProcessManager
-        openra_path = str(Path(__file__).parent.parent / "OpenRA")
-        config = OpenRAConfig(openra_path=openra_path, bot_type="easy")
-        manager = OpenRAProcessManager(config)
-        cmd = manager._build_command()
-        bots_arg = [a for a in cmd if "Launch.Bots" in a][0]
-        assert "rush" in bots_arg
-        assert "easy" not in bots_arg
 
     def test_build_command_maps_hard(self):
         from openra_env.server.openra_process import OpenRAConfig, OpenRAProcessManager
@@ -783,7 +781,18 @@ class TestBotTypeMapping:
         manager = OpenRAProcessManager(config)
         cmd = manager._build_command()
         bots_arg = [a for a in cmd if "Launch.Bots" in a][0]
-        assert "turtle" in bots_arg
+        assert "normal" in bots_arg
+        assert "hard" not in bots_arg
+
+    def test_build_command_maps_brutal(self):
+        from openra_env.server.openra_process import OpenRAConfig, OpenRAProcessManager
+        openra_path = str(Path(__file__).parent.parent / "OpenRA")
+        config = OpenRAConfig(openra_path=openra_path, bot_type="brutal")
+        manager = OpenRAProcessManager(config)
+        cmd = manager._build_command()
+        bots_arg = [a for a in cmd if "Launch.Bots" in a][0]
+        assert "rush" in bots_arg
+        assert "brutal" not in bots_arg
 
     def test_build_command_no_enemy_with_empty_slot(self):
         from openra_env.server.openra_process import OpenRAConfig, OpenRAProcessManager

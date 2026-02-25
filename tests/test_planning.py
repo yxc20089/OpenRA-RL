@@ -16,7 +16,9 @@ from openra_env.opponent_intel import (
 
 class TestAIProfiles:
     def test_all_difficulties_present(self):
+        assert "beginner" in AI_PROFILES
         assert "easy" in AI_PROFILES
+        assert "medium" in AI_PROFILES
         assert "normal" in AI_PROFILES
         assert "hard" in AI_PROFILES
 
@@ -70,18 +72,24 @@ class TestAIProfiles:
 
     def test_difficulty_ordering(self):
         """Harder difficulties should have higher win rates and earlier attacks."""
+        beginner = AI_PROFILES["beginner"]
         easy = AI_PROFILES["easy"]
+        medium = AI_PROFILES["medium"]
         normal = AI_PROFILES["normal"]
         hard = AI_PROFILES["hard"]
-        assert easy["estimated_win_rate_vs_new_player"] < normal["estimated_win_rate_vs_new_player"]
+        assert beginner["estimated_win_rate_vs_new_player"] < easy["estimated_win_rate_vs_new_player"]
+        assert easy["estimated_win_rate_vs_new_player"] < medium["estimated_win_rate_vs_new_player"]
+        assert medium["estimated_win_rate_vs_new_player"] < normal["estimated_win_rate_vs_new_player"]
         assert normal["estimated_win_rate_vs_new_player"] < hard["estimated_win_rate_vs_new_player"]
-        assert easy["typical_first_attack_tick"] > normal["typical_first_attack_tick"]
+        assert beginner["typical_first_attack_tick"] > easy["typical_first_attack_tick"]
+        assert easy["typical_first_attack_tick"] > medium["typical_first_attack_tick"]
+        assert medium["typical_first_attack_tick"] > normal["typical_first_attack_tick"]
         assert normal["typical_first_attack_tick"] > hard["typical_first_attack_tick"]
 
 
 class TestGetOpponentProfile:
     def test_get_by_difficulty(self):
-        for key in ("easy", "normal", "hard"):
+        for key in ("beginner", "easy", "medium", "normal", "hard"):
             profile = get_opponent_profile(key)
             assert profile is not None
             assert profile["difficulty"].lower() == key
