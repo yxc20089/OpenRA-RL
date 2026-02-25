@@ -35,6 +35,8 @@ class GameConfig(BaseModel):
 
 
 class OpponentConfig(BaseModel):
+    # bot_type: friendly names (easy/normal/hard) mapped to OpenRA types (rush/normal/turtle)
+    # ai_slot: player slot for AI; set to "" to disable enemy spawning
     bot_type: str = "normal"
     ai_slot: str = "Multi0"
 
@@ -110,6 +112,7 @@ class AlertsConfig(BaseModel):
     no_defenses: bool = True
     no_scouting: bool = True
     loss_tracking: bool = True
+    max_alerts: int = 0  # 0 = unlimited; set >0 to cap alerts per turn
 
 
 class LLMConfig(BaseModel):
@@ -120,6 +123,8 @@ class LLMConfig(BaseModel):
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     keep_last_messages: int = 40
+    compression_strategy: str = "sliding_window"  # "sliding_window" or "none"
+    compression_trigger: int = 0  # 0 = keep_last_messages * 2
     max_retries: int = 4
     retry_backoff_s: int = 10
     request_timeout_s: float = 120.0
@@ -138,6 +143,140 @@ class AgentConfig(BaseModel):
     max_time_s: int = 1800
     verbose: bool = False
     log_file: str = ""
+    system_prompt: str = ""  # deprecated — use prompts.system_prompt
+    system_prompt_file: str = ""  # deprecated — use prompts.system_prompt_file
+
+
+class AlertPromptsConfig(BaseModel):
+    """Templates for in-game alert messages.
+
+    All templates use Python str.format() placeholders (e.g. {balance}).
+    """
+
+    under_attack: str = "UNDER ATTACK: enemy {type} id={id} near base"
+    under_attack_mass: str = "UNDER ATTACK: {count} enemies near base ({breakdown})"
+    damaged: str = "DAMAGED: {type} id={id} at {hp} HP"
+    low_power: str = "LOW POWER: {balance} — production runs at 1/3 speed"
+    power_tight: str = "POWER TIGHT: {balance} surplus — next building may cause low power"
+    idle_funds: str = "IDLE FUNDS: ${funds} available, {harvesters} harvester(s)"
+    ore_full: str = "ORE FULL: {ore}/{cap} storage — income is being lost"
+    idle_production: str = "IDLE PRODUCTION: no active production queue"
+    stalled: str = "STALLED: {item}@{progress} — $0 funds, production paused"
+    building_stuck: str = "BUILDING STUCK: {building} — auto-placement failing"
+    ready_to_place: str = "READY TO PLACE: {building} — completed, awaiting placement"
+    stance: str = "STANCE: {count} combat unit(s) on ReturnFire (only fire when fired upon)"
+    idle_army: str = "IDLE ARMY: {count} combat units idle"
+    no_defenses: str = "NO DEFENSES: no defense structures built"
+    no_scouting: str = (
+        "NO SCOUTING: enemy not found — {explored} of map explored, "
+        "{idle} idle combat units available"
+    )
+
+
+class CompressionConfig(BaseModel):
+    """Controls what context is preserved in history compression summaries."""
+    include_strategy: bool = True  # Preserve planning strategy
+    include_military: bool = True  # Include kill/death counts
+    include_production: bool = True  # Track what was produced
+
+
+class PromptsConfig(BaseModel):
+    """All LLM-facing text, configurable for customization.
+
+    Templates use Python str.format() placeholders. Override individual
+    fields in config.yaml, or point prompts_file to a YAML with all prompts.
+    """
+
+    # ── System prompt ────────────────────────────────────────────────
+    system_prompt: str = ""  # inline override (highest priority)
+    system_prompt_file: str = ""  # path to .txt file override
+    prompts_file: str = ""  # path to YAML with all prompts below
+
+    # ── Planning phase ───────────────────────────────────────────────
+    # Variables: {max_turns}, {map_name}, {map_width}, {map_height},
+    #   {base_x}, {base_y}, {enemy_x}, {enemy_y}, {faction}, {side},
+    #   {opponent_summary}, {planning_nudge}
+    planning_prompt: str = (
+        "## PRE-GAME PLANNING PHASE\n"
+        "You have {max_turns} turns to plan.\n\n"
+        "### Map Intel\n"
+        "Map: {map_name} ({map_width}x{map_height})\n"
+        "Your base: ({base_x}, {base_y})\n"
+        "Enemy estimated: ({enemy_x}, {enemy_y})\n"
+        "Your faction: {faction} ({side})\n\n"
+        "### Opponent Intelligence\n{opponent_summary}\n\n"
+        "{planning_nudge}"
+    )
+    planning_nudge: str = "Call end_planning_phase(strategy='...') when ready to start."
+    planning_instructions: str = (
+        "Planning phase active. Available tools: get_faction_briefing "
+        "(all unit/building stats), get_map_analysis (terrain/resources), "
+        "get_opponent_intel (enemy profile), batch_lookup (multi-item queries). "
+        "Call end_planning_phase(strategy=...) to begin gameplay."
+    )
+    planning_complete: str = "Planning complete. Game is now live."
+
+    # ── Game start ───────────────────────────────────────────────────
+    # Variables: {strategy_section}, {briefing}, {barracks_type}, {mcv_note}
+    game_start: str = (
+        "Game started!{strategy_section}\n\n{briefing}\n\n"
+        "Your barracks type is '{barracks_type}'.{mcv_note}"
+    )
+
+    # ── Agent nudges ─────────────────────────────────────────────────
+    no_tool_nudge: str = "No tool was called. A tool call is required each turn."
+    continue_nudge: str = "The game is still in progress."
+    compression_suffix: str = "Game continues from current state."
+    sanitize_bridge: str = "Acknowledged. Continuing."
+
+    # ── Tool warnings ────────────────────────────────────────────────
+    # Variables: {building}, {drain}, {balance}
+    power_warning: str = (
+        "POWER WARNING: {building} drains {drain} power. "
+        "Balance will be {balance}."
+    )
+    # Variables: {available}, {item}, {cost}
+    insufficient_funds: str = (
+        "Insufficient funds: ${available} available, "
+        "{item} costs ${cost}."
+    )
+
+    # ── Placement feedback ───────────────────────────────────────────
+    placement_success: str = "AUTO-PLACED: {building}"
+    placement_failed: str = "PLACEMENT FAILED: {building} — {reason}. Auto-cancelling."
+    placement_water: str = "WATER BUILDING: {building} requires water tiles for placement."
+
+    # ── Build confirmations ───────────────────────────────────────────
+    # Variables: {building}, {cost}, {ticks}, {seconds}
+    build_queued: str = (
+        "'{building}' (${cost}) queued, auto-places on completion. "
+        "~{ticks} ticks (~{seconds}s)."
+    )
+    build_structure_queued: str = (
+        "'{building}' (${cost}) queued. ~{ticks} ticks (~{seconds}s) to complete."
+    )
+    # Variables: {count}, {unit}, {cost}, {ticks_each}, {ticks_total}, {seconds_total}
+    build_unit_queued: str = (
+        "{count}x '{unit}' (${cost} each) queued. "
+        "~{ticks_each} ticks per unit, ~{ticks_total} ticks (~{seconds_total}s) total."
+    )
+
+    # ── Build guards ──────────────────────────────────────────────────
+    # Variables: {building}
+    build_already_pending: str = "'{building}' is already queued and pending auto-placement."
+    place_auto_managed: str = (
+        "'{building}' is queued via build_and_place — placement is automatic."
+    )
+
+    # ── Movement feedback ────────────────────────────────────────────
+    # Variables: {ticks}, {seconds}
+    move_eta: str = "Units moving. Slowest arrives in ~{ticks} ticks (~{seconds}s)."
+
+    # ── Compression ──────────────────────────────────────────────────
+    compression: CompressionConfig = Field(default_factory=CompressionConfig)
+
+    # ── Alerts ───────────────────────────────────────────────────────
+    alerts: AlertPromptsConfig = Field(default_factory=AlertPromptsConfig)
 
 
 class OpenRARLConfig(BaseModel):
@@ -152,12 +291,22 @@ class OpenRARLConfig(BaseModel):
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    prompts: PromptsConfig = Field(default_factory=PromptsConfig)
 
     @model_validator(mode="after")
     def sync_planning_tools(self) -> "OpenRARLConfig":
         """Auto-disable planning tools when planning is disabled."""
         if not self.planning.enabled:
             self.tools.categories.planning = False
+        return self
+
+    @model_validator(mode="after")
+    def migrate_system_prompt(self) -> "OpenRARLConfig":
+        """Backward compat: copy agent.system_prompt* to prompts.* if prompts.* empty."""
+        if not self.prompts.system_prompt and self.agent.system_prompt:
+            self.prompts.system_prompt = self.agent.system_prompt
+        if not self.prompts.system_prompt_file and self.agent.system_prompt_file:
+            self.prompts.system_prompt_file = self.agent.system_prompt_file
         return self
 
 
@@ -252,6 +401,10 @@ _ENV_VAR_MAP: list[tuple[str, str]] = [
     ("OPENRA_URL", "agent.server_url"),
     ("MAX_TIME", "agent.max_time_s"),
     ("LLM_AGENT_LOG", "agent.log_file"),
+    ("SYSTEM_PROMPT_FILE", "agent.system_prompt_file"),
+    # prompts
+    ("SYSTEM_PROMPT_FILE", "prompts.system_prompt_file"),  # also maps to prompts.*
+    ("PROMPTS_FILE", "prompts.prompts_file"),
 ]
 
 

@@ -51,6 +51,27 @@ from openra_env.server.openra_process import OpenRAConfig, OpenRAProcessManager
 logger = logging.getLogger(__name__)
 
 
+def _estimate_build_ticks(cost: int) -> int:
+    """Estimate build time in ticks from item cost.
+
+    OpenRA formula: cost * BuildDurationModifier / 100.
+    Buildable.BuildDurationModifier defaults to 60,
+    ProductionQueue.BuildDurationModifier defaults to 100.
+    """
+    return cost * 60 // 100
+
+
+def _estimate_move_ticks(speed: int, from_x: int, from_y: int, to_x: int, to_y: int) -> int:
+    """Estimate movement time in ticks from unit speed and Manhattan distance.
+
+    OpenRA MobileInfo.Speed is WDist/tick. 1 cell = 1024 WDist.
+    """
+    if speed <= 0:
+        return 0
+    dist = abs(to_x - from_x) + abs(to_y - from_y)
+    return dist * 1024 // speed
+
+
 class OpenRAEnvironment(MCPEnvironment):
     """OpenRA RL Environment with MCP tool support.
 
@@ -71,7 +92,7 @@ class OpenRAEnvironment(MCPEnvironment):
         map_name: str = "singles.oramap",
         grpc_port: int = 9999,
         bot_type: str = "normal",
-        ai_slot: str = "",
+        ai_slot: str = "Multi0",
         reward_weights: Optional[RewardWeights] = None,
         record_replays: bool = False,
         planning_enabled: bool = True,
@@ -97,7 +118,7 @@ class OpenRAEnvironment(MCPEnvironment):
                 overrides.setdefault("game", {})["record_replays"] = True
             if bot_type != "normal":
                 overrides.setdefault("opponent", {})["bot_type"] = bot_type
-            if ai_slot:
+            if ai_slot != "Multi0":
                 overrides.setdefault("opponent", {})["ai_slot"] = ai_slot
             if not planning_enabled:
                 overrides.setdefault("planning", {})["enabled"] = False
@@ -153,6 +174,7 @@ class OpenRAEnvironment(MCPEnvironment):
         self._last_obs: Optional[dict] = None
         self._unit_groups: dict[str, list[int]] = {}  # named groups of unit IDs
         self._pending_placements: dict[str, dict] = {}  # building_type → {cell_x, cell_y}
+        self._move_targets: dict[int, tuple[int, int]] = {}  # unit_id → (target_x, target_y)
         self._attempted_placements: dict[str, int] = {}  # building_type → attempt_count (for failure detection)
         self._placement_results: list[str] = []  # alerts from auto-placement attempts
         self._player_faction: str = ""
@@ -208,6 +230,7 @@ class OpenRAEnvironment(MCPEnvironment):
             # Compute alerts (each type gated by config)
             alerts = []
             acfg = env._app_config.alerts
+            pcfg = env._app_config.prompts.alerts
 
             # Under attack: enemy units near our buildings
             if acfg.under_attack:
@@ -221,60 +244,55 @@ class OpenRAEnvironment(MCPEnvironment):
                             break
                 if len(attackers) <= 3:
                     for enemy in attackers:
-                        alerts.append(
-                            f"UNDER ATTACK: enemy {enemy['type']} id={enemy['actor_id']} "
-                            f"near base"
-                        )
+                        alerts.append((1, pcfg.under_attack.format(
+                            type=enemy["type"], id=enemy["actor_id"])))
                 elif attackers:
                     from collections import Counter
                     type_counts = Counter(e["type"] for e in attackers)
                     breakdown = ", ".join(f"{cnt}x {t}" for t, cnt in type_counts.most_common())
-                    alerts.append(f"UNDER ATTACK: {len(attackers)} enemies near base ({breakdown})")
+                    alerts.append((1, pcfg.under_attack_mass.format(
+                        count=len(attackers), breakdown=breakdown)))
 
             # Damaged buildings
             if acfg.damaged_building:
                 for bldg in obs["buildings"]:
                     if bldg["hp_percent"] < 0.5:
-                        alerts.append(f"DAMAGED: {bldg['type']} at {bldg['hp_percent']:.0%} HP — repair_building({bldg['actor_id']})")
+                        alerts.append((5, pcfg.damaged.format(
+                            type=bldg["type"], id=bldg["actor_id"],
+                            hp=f"{bldg['hp_percent']:.0%}")))
 
-            # Power crisis — 1/3 speed is devastating
+            # Power crisis
             if acfg.low_power:
                 if power_balance < 0:
-                    alerts.append(
-                        f"LOW POWER: {power_balance:+d} — ALL production slowed to 1/3 speed! "
-                        f"Build powr IMMEDIATELY, it is your #1 priority"
-                    )
+                    alerts.append((2, pcfg.low_power.format(
+                        balance=f"{power_balance:+d}")))
                 elif 0 <= power_balance < 30:
                     building_power = any(
                         p["item"] in ("powr", "apwr")
                         for p in obs["production"]
                     )
                     if not building_power:
-                        alerts.append(
-                            f"POWER TIGHT: only {power_balance:+d} surplus — "
-                            f"build powr before adding more buildings"
-                        )
+                        alerts.append((6, pcfg.power_tight.format(
+                            balance=f"{power_balance:+d}")))
 
             # Idle funds with few harvesters
             if acfg.idle_funds:
                 total_funds = eco["cash"] + eco.get("ore", 0)
                 if total_funds > 2000 and eco["harvester_count"] < 2:
-                    alerts.append(f"IDLE FUNDS: ${total_funds} with {eco['harvester_count']} harvester(s) — build refinery or harvester")
+                    alerts.append((6, pcfg.idle_funds.format(
+                        funds=total_funds, harvesters=eco["harvester_count"])))
 
             # Ore storage near capacity — income is being wasted
             if acfg.ore_full:
                 ore = eco.get("ore", 0)
                 res_cap = eco.get("resource_capacity", 0)
                 if res_cap > 0 and ore >= res_cap * 0.9:
-                    alerts.append(
-                        f"ORE FULL: {ore}/{res_cap} storage used — "
-                        f"build silo ($150, +1500 capacity) or refinery to avoid wasting income"
-                    )
+                    alerts.append((4, pcfg.ore_full.format(ore=ore, cap=res_cap)))
 
             # Nothing being produced
             if acfg.idle_production:
                 if not obs["production"] and len(obs["buildings"]) >= 3:
-                    alerts.append("IDLE PRODUCTION: nothing being built or trained — queue something")
+                    alerts.append((4, pcfg.idle_production))
 
             # Production stalled due to $0 funds
             if acfg.production_stalled:
@@ -285,11 +303,8 @@ class OpenRAEnvironment(MCPEnvironment):
                 if total_funds == 0 and current_progress:
                     for item, prog in current_progress.items():
                         if item in last_progress and abs(prog - last_progress[item]) < 0.01:
-                            alerts.append(
-                                f"STALLED: {item}@{prog:.0%} — $0 funds, "
-                                f"construction pauses without income. "
-                                f"Cancel or build refinery/harvester first."
-                            )
+                            alerts.append((2, pcfg.stalled.format(
+                                item=item, progress=f"{prog:.0%}")))
                             break  # one alert is enough
                 env._last_production_progress = current_progress
 
@@ -301,14 +316,14 @@ class OpenRAEnvironment(MCPEnvironment):
                     if p["queue_type"] in env._PLACEABLE_QUEUE_TYPES and p["progress"] >= 0.99:
                         btype = p["item"]
                         if btype in attempted:
-                            alerts.append(f"BUILDING STUCK: {btype} placement failing — call get_valid_placements(\"{btype}\") or cancel_production(\"{btype}\")")
+                            alerts.append((3, pcfg.building_stuck.format(building=btype)))
                         elif btype not in pending:
-                            alerts.append(f"READY TO PLACE: {btype} — call place_building()")
+                            alerts.append((3, pcfg.ready_to_place.format(building=btype)))
 
             # Auto-placement results from build_and_place (always shown — these are action feedback)
             placement_results = getattr(env, "_placement_results", [])
             if placement_results:
-                alerts.extend(placement_results)
+                alerts.extend((3, msg) for msg in placement_results)
                 placement_results.clear()
 
             # Combat units on default ReturnFire stance
@@ -318,23 +333,20 @@ class OpenRAEnvironment(MCPEnvironment):
                     if u.get("can_attack") and u.get("stance", 1) == 1
                 )
                 if returnfire_count > 0:
-                    alerts.append(f"STANCE WARNING: {returnfire_count} combat unit(s) on ReturnFire — set to attack_anything")
+                    alerts.append((7, pcfg.stance.format(count=returnfire_count)))
 
-            # Idle army — nudge to attack or scout
+            # Idle army
             if acfg.idle_army:
                 idle_combat = [u for u in obs["units"] if u.get("can_attack") and u.get("is_idle")]
                 if len(idle_combat) >= 4:
-                    alerts.append(
-                        f"IDLE ARMY: {len(idle_combat)} combat units idle — "
-                        f"attack_move toward enemy or scout unexplored areas"
-                    )
+                    alerts.append((7, pcfg.idle_army.format(count=len(idle_combat))))
 
-            # No defenses — nudge to build turrets
+            # No defenses
             if acfg.no_defenses:
                 _DEFENSE_BUILDINGS = {"gun", "ftur", "tsla", "sam", "agun", "pbox", "hbox"}
                 building_types = {b["type"] for b in obs["buildings"]}
                 if len(obs["buildings"]) >= 4 and not (building_types & _DEFENSE_BUILDINGS):
-                    alerts.append("NO DEFENSES: build gun turrets or SAM sites to protect your base")
+                    alerts.append((7, pcfg.no_defenses))
 
             # Track enemy discovery history
             if obs.get("visible_enemies") or obs.get("visible_enemy_buildings"):
@@ -362,17 +374,34 @@ class OpenRAEnvironment(MCPEnvironment):
                                 _expl_pct = f"{round(100 * _explored / (_sw * _sh), 1)}%"
                             except Exception:
                                 pass
-                        alerts.append(
-                            f"NO SCOUTING: enemy not found — {_expl_pct} of map explored, {idle_combat} idle combat units available"
-                        )
+                        alerts.append((7, pcfg.no_scouting.format(
+                            explored=_expl_pct, idle=idle_combat)))
+
+            # Sort alerts by priority and apply cap
+            alerts.sort(key=lambda x: x[0])
+            max_a = env._app_config.alerts.max_alerts
+            if max_a > 0 and len(alerts) > max_a:
+                alerts = alerts[:max_a]
+            alert_texts = [text for _, text in alerts]
 
             # Compact summaries with actor IDs for planning
-            units_summary = [
-                {"id": u["actor_id"], "type": u["type"], "idle": u["is_idle"],
-                 "can_attack": u["can_attack"], "stance": u["stance"],
-                 "cell_x": u["cell_x"], "cell_y": u["cell_y"]}
-                for u in obs["units"]
-            ]
+            units_summary = []
+            for u in obs["units"]:
+                uid = u["actor_id"]
+                entry = {"id": uid, "type": u["type"], "idle": u["is_idle"],
+                         "can_attack": u["can_attack"], "stance": u["stance"],
+                         "cell_x": u["cell_x"], "cell_y": u["cell_y"],
+                         "activity": u["current_activity"]}
+                # Clear stale move targets for idle units
+                move_targets = getattr(env, "_move_targets", {})
+                if u["is_idle"] and uid in move_targets:
+                    del move_targets[uid]
+                # Attach tracked destination
+                if uid in move_targets:
+                    tx, ty = move_targets[uid]
+                    entry["target_x"] = tx
+                    entry["target_y"] = ty
+                units_summary.append(entry)
             buildings_summary = [
                 {"id": b["actor_id"], "type": b["type"],
                  "cell_x": b["cell_x"], "cell_y": b["cell_y"]}
@@ -398,12 +427,15 @@ class OpenRAEnvironment(MCPEnvironment):
                 "visible_enemy_units": len(obs["visible_enemies"]),
                 "visible_enemy_buildings": len(obs.get("visible_enemy_buildings", [])),
                 "production_queues": len(obs["production"]),
-                "production_items": [f"{p['item']}@{p['progress']:.0%}" for p in obs["production"]],
+                "production_items": [
+                    f"{p['item']}@{p['progress']:.0%}(~{p.get('remaining_ticks', 0)} ticks)"
+                    for p in obs["production"]
+                ],
                 "available_production": obs.get("available_production", []),
                 "units_summary": units_summary,
                 "buildings_summary": buildings_summary,
                 "enemy_summary": enemy_summary,
-                "alerts": alerts,
+                "alerts": alert_texts,
                 "map": obs["map_info"],
             }
 
@@ -1035,12 +1067,12 @@ class OpenRAEnvironment(MCPEnvironment):
             """Begin the pre-game planning phase. Returns map metadata, faction info,
             opponent intelligence, tech tree, and available units/buildings.
 
-            During planning, use game knowledge tools (lookup_unit, lookup_building,
-            lookup_tech_tree, lookup_faction) and get_opponent_intel() to formulate
-            your strategy. End planning with end_planning_phase(strategy=...).
+            Available knowledge tools during planning: get_faction_briefing,
+            get_map_analysis, get_opponent_intel, batch_lookup, lookup_unit,
+            lookup_building, lookup_tech_tree, lookup_faction.
 
             Planning has a turn limit and time limit. If exceeded, planning ends
-            automatically."""
+            automatically. Call end_planning_phase(strategy=...) to finish."""
             if not env._planning_enabled:
                 return {
                     "planning_enabled": False,
@@ -1134,15 +1166,7 @@ class OpenRAEnvironment(MCPEnvironment):
                 ],
                 "opponent_intel": opponent_profile,
                 "opponent_summary": opponent_summary,
-                "instructions": (
-                    "You are in PLANNING MODE. Formulate your strategy before the game begins. "
-                    "Use get_faction_briefing() for ALL unit/building stats in one call, "
-                    "get_map_analysis() for terrain/resource intel, "
-                    "and get_opponent_intel() for enemy behavioral profile. "
-                    "Use batch_lookup() to look up multiple items at once. "
-                    "When ready, call end_planning_phase(strategy='your strategy here') "
-                    "to begin gameplay."
-                ),
+                "instructions": env._app_config.prompts.planning_instructions,
             }
 
         @configurable_tool
@@ -1193,7 +1217,7 @@ class OpenRAEnvironment(MCPEnvironment):
                 "economy": obs.get("economy", {}),
                 "own_units": len(obs.get("units", [])),
                 "own_buildings": len(obs.get("buildings", [])),
-                "message": "Planning complete. Game is live. Deploy your MCV and execute your strategy!",
+                "message": env._app_config.prompts.planning_complete,
             }
 
         @configurable_tool
@@ -1220,10 +1244,12 @@ class OpenRAEnvironment(MCPEnvironment):
 
         @configurable_tool
         def advance(ticks: int = 1) -> dict:
-            """Wait for the game to advance by the specified number of ticks
-            (max 500 per call). The game runs at normal speed (~25 ticks/sec).
-            Use this to let time pass without issuing commands (e.g., while
-            waiting for production to complete). Returns updated game summary."""
+            """Advance the game by N ticks (max 500 per call, ~25 ticks = 1 second).
+            Production, movement, combat, and building auto-placement all require
+            game time to progress — nothing happens without calling advance().
+            Also triggers auto-placement of buildings queued via build_and_place().
+            Typical build times: power plant ~300 ticks, barracks ~500 ticks,
+            war factory ~750 ticks. Returns updated game summary."""
             requested = ticks
             ticks = max(1, min(ticks, 500))  # clamp to [1, 500]
             try:
@@ -1271,7 +1297,11 @@ class OpenRAEnvironment(MCPEnvironment):
                 for uid in resolved
             ]
             result = env._execute_commands(commands)
-            return env._add_unit_feedback(result, resolved)
+            targets = getattr(env, "_move_targets", None)
+            if targets is not None:
+                for uid in resolved:
+                    targets[uid] = (target_x, target_y)
+            return env._add_unit_feedback(result, resolved, target_x=target_x, target_y=target_y)
 
         @configurable_tool
         def attack_move(unit_ids: str, target_x: int, target_y: int, queued: bool = False) -> dict:
@@ -1286,7 +1316,11 @@ class OpenRAEnvironment(MCPEnvironment):
                 for uid in resolved
             ]
             result = env._execute_commands(commands)
-            return env._add_unit_feedback(result, resolved)
+            targets = getattr(env, "_move_targets", None)
+            if targets is not None:
+                for uid in resolved:
+                    targets[uid] = (target_x, target_y)
+            return env._add_unit_feedback(result, resolved, target_x=target_x, target_y=target_y)
 
         @configurable_tool
         def attack_target(unit_ids: str, target_actor_id: int, queued: bool = False) -> dict:
@@ -1342,21 +1376,32 @@ class OpenRAEnvironment(MCPEnvironment):
                 unit_cost = unit_stats["cost"] if unit_stats else 0
                 if unit_cost > 0 and total_funds < unit_cost:
                     return {
-                        "error": f"Insufficient funds: ${total_funds} available, "
-                                 f"{unit_type} costs ${unit_cost}. "
-                                 f"Build refinery or wait for income.",
+                        "error": env._app_config.prompts.insufficient_funds.format(
+                            available=total_funds, item=unit_type, cost=unit_cost),
                     }
             count = max(1, min(count, 10))
             commands = [CommandModel(action=ActionType.TRAIN, item_type=unit_type)
                         for _ in range(count)]
-            return env._execute_commands(commands)
+            result = env._execute_commands(commands)
+            # Factual build confirmation with estimated ticks
+            unit_stats = get_unit_stats(unit_type)
+            unit_cost = unit_stats["cost"] if unit_stats else 0
+            if unit_cost > 0:
+                ticks_each = _estimate_build_ticks(unit_cost)
+                ticks_total = ticks_each * count
+                result["note"] = env._app_config.prompts.build_unit_queued.format(
+                    count=count, unit=unit_type, cost=unit_cost,
+                    ticks_each=ticks_each, ticks_total=ticks_total,
+                    seconds_total=round(ticks_total / 25, 1))
+            return result
 
         @configurable_tool
         def build_structure(building_type: str) -> dict:
-            """Start constructing a building. Building will need to be placed
-            when ready using place_building(). building_type is the internal
-            name (e.g., 'powr', 'barr', 'weap').
-            Prefer build_and_place() which auto-places when done."""
+            """Start constructing a building (manual placement workflow).
+            After calling this, call advance(ticks) to let construction finish,
+            then call place_building() to place it on the map.
+            Prefer build_and_place() which handles placement automatically.
+            building_type: internal name (e.g., 'powr', 'barr', 'weap')."""
             # Reject if same building already in production queue
             env._refresh_obs()
             if env._last_obs:
@@ -1372,35 +1417,46 @@ class OpenRAEnvironment(MCPEnvironment):
                     if "missing_prerequisites" in diag:
                         result["missing_prerequisites"] = diag["missing_prerequisites"]
                     return result
+                if building_type in env._pending_placements:
+                    return {"note": env._app_config.prompts.build_already_pending.format(
+                        building=building_type)}
                 already = any(
                     p["queue_type"] in env._PLACEABLE_QUEUE_TYPES and p["item"] == building_type
                     for p in env._last_obs.get("production", [])
                 )
                 if already:
-                    return {"error": f"'{building_type}' is already being built. Wait for it to finish or cancel_production(\"{building_type}\") first."}
+                    return {"error": f"'{building_type}' is already in the production queue."}
             commands = [CommandModel(action=ActionType.BUILD, item_type=building_type)]
             result = env._execute_commands(commands)
-            # Proactive power warning
+            # Factual build confirmation with estimated ticks
             stats = get_building_stats(building_type)
+            bld_cost = stats["cost"] if stats else 0
+            if bld_cost > 0:
+                ticks = _estimate_build_ticks(bld_cost)
+                result["note"] = env._app_config.prompts.build_structure_queued.format(
+                    building=building_type, cost=bld_cost,
+                    ticks=ticks, seconds=round(ticks / 25, 1))
+            # Proactive power warning
             if stats and env._last_obs:
                 power_drain = stats.get("power", 0)
                 if power_drain < 0:
                     eco = env._last_obs.get("economy", {})
                     current_balance = eco.get("power_provided", 0) - eco.get("power_drained", 0)
                     if current_balance + power_drain < 0:
-                        result["warning"] = (
-                            f"POWER WARNING: {building_type} drains {abs(power_drain)} power. "
-                            f"Current balance: {current_balance:+d}. "
-                            f"Build powr first or production will slow to 1/3 speed!"
-                        )
+                        new_balance = current_balance + power_drain
+                        result["warning"] = env._app_config.prompts.power_warning.format(
+                            building=building_type, drain=abs(power_drain),
+                            balance=f"{new_balance:+d}")
             return result
 
         @configurable_tool
         def build_and_place(building_type: str, cell_x: int = 0, cell_y: int = 0) -> dict:
             """Build a structure and auto-place it when construction finishes.
-            Coordinates are optional — the engine auto-finds a valid position
-            near your base if omitted or invalid.
-            This is the preferred way to build — no need to call place_building separately."""
+            After calling this, you must call advance(ticks) to let construction
+            complete — the building auto-places once done. Do NOT call
+            place_building() on buildings queued this way — placement is automatic.
+            Coordinates are optional — the engine finds a valid position near
+            your base if omitted. Returns updated game summary."""
             # Validate and reject duplicates
             env._refresh_obs()
             if env._last_obs:
@@ -1416,35 +1472,53 @@ class OpenRAEnvironment(MCPEnvironment):
                     if "missing_prerequisites" in diag:
                         result["missing_prerequisites"] = diag["missing_prerequisites"]
                     return result
+                if building_type in env._pending_placements:
+                    return {"note": env._app_config.prompts.build_already_pending.format(
+                        building=building_type)}
                 already = any(
                     p["queue_type"] in env._PLACEABLE_QUEUE_TYPES and p["item"] == building_type
                     for p in env._last_obs.get("production", [])
                 )
                 if already:
-                    return {"error": f"'{building_type}' is already being built. Wait for it to finish or cancel_production(\"{building_type}\") first."}
+                    return {"error": f"'{building_type}' is already in the production queue."}
             commands = [CommandModel(action=ActionType.BUILD, item_type=building_type)]
             result = env._execute_commands(commands)
             env._pending_placements[building_type] = {"cell_x": cell_x, "cell_y": cell_y}
-            # Proactive power warning
+            # Factual build confirmation with estimated ticks
             stats = get_building_stats(building_type)
+            bld_cost = stats["cost"] if stats else 0
+            if bld_cost > 0:
+                ticks = _estimate_build_ticks(bld_cost)
+                result["note"] = env._app_config.prompts.build_queued.format(
+                    building=building_type, cost=bld_cost,
+                    ticks=ticks, seconds=round(ticks / 25, 1))
+            # Proactive power warning
             if stats and env._last_obs:
                 power_drain = stats.get("power", 0)
                 if power_drain < 0:
                     eco = env._last_obs.get("economy", {})
                     current_balance = eco.get("power_provided", 0) - eco.get("power_drained", 0)
                     if current_balance + power_drain < 0:
-                        result["warning"] = (
-                            f"POWER WARNING: {building_type} drains {abs(power_drain)} power. "
-                            f"Current balance: {current_balance:+d}. "
-                            f"Build powr first or production will slow to 1/3 speed!"
-                        )
+                        new_balance = current_balance + power_drain
+                        result["warning"] = env._app_config.prompts.power_warning.format(
+                            building=building_type, drain=abs(power_drain),
+                            balance=f"{new_balance:+d}")
             return result
 
         @configurable_tool
         def place_building(building_type: str, cell_x: int = 0, cell_y: int = 0) -> dict:
-            """Place a completed building at the specified cell position.
-            Cell coordinates are optional — the game engine auto-finds the best
-            valid position near your base if the given position is invalid or omitted."""
+            """Place a completed building on the map (only for build_structure workflow).
+            The building must be at 100% in the production queue or this will error.
+            Do NOT use this on buildings queued via build_and_place() — those
+            auto-place via advance(). Cell coordinates are optional — the engine
+            auto-finds a valid position near your base if omitted."""
+            # Guard: building queued via build_and_place auto-places
+            if building_type in env._pending_placements:
+                return {
+                    "note": env._app_config.prompts.place_auto_managed.format(
+                        building=building_type),
+                    "tick": env._last_obs.get("tick", 0) if env._last_obs else 0,
+                }
             # Check building is ready in production queue
             env._refresh_obs()
             pre_obs = env._last_obs
@@ -1455,7 +1529,7 @@ class OpenRAEnvironment(MCPEnvironment):
                 )
                 if not ready:
                     return {
-                        "error": f"'{building_type}' not ready to place. Build with build_structure() first and advance() until done.",
+                        "error": f"'{building_type}' not ready to place — not at 100% in production queue.",
                         "tick": pre_obs.get("tick", 0),
                     }
 
@@ -1715,6 +1789,10 @@ class OpenRAEnvironment(MCPEnvironment):
             All commands are sent in a single call. The game resolves any
             conflicts by its own logic.
 
+            Note: batch does NOT advance game time. Cannot contain advance(),
+            get_game_state, or other query/flow-control tools — those are
+            silently skipped. Use advance() as a separate call after batch.
+
             Returns: game state summary after commands are processed.
             """
             env._refresh_obs()
@@ -1769,6 +1847,10 @@ class OpenRAEnvironment(MCPEnvironment):
             Conditions: "enemies_visible", "no_enemies_visible", "under_attack",
               "building_ready", "funds_above:2000", "funds_below:500"
               (funds = cash + ore; "cash_above"/"cash_below" also work)
+
+            Note: plan does NOT advance game time between steps. It only
+            refreshes observations. Use advance() as a standalone call to
+            let construction and movement complete.
 
             Example — deploy then build:
             [
@@ -1941,27 +2023,43 @@ class OpenRAEnvironment(MCPEnvironment):
             )
         return alive
 
-    def _add_unit_feedback(self, result: dict, commanded_ids: list[int]) -> dict:
+    def _add_unit_feedback(self, result: dict, commanded_ids: list[int],
+                           target_x: int | None = None, target_y: int | None = None) -> dict:
         """Append commanded_units feedback to a tool result.
 
         Looks up the commanded unit IDs in the latest observation and adds
         their current position and activity so the agent can verify commands
-        were received and see where units are.
+        were received and see where units are.  When target coordinates are
+        provided, also computes an estimated arrival time per unit.
         """
         if not self._last_obs or not commanded_ids:
             return result
         units_by_id = {u["actor_id"]: u for u in self._last_obs.get("units", [])}
-        result["commanded_units"] = [
-            {
+        entries = []
+        for uid in commanded_ids:
+            if uid not in units_by_id:
+                continue
+            u = units_by_id[uid]
+            entry = {
                 "id": uid,
-                "type": units_by_id[uid]["type"],
-                "cell_x": units_by_id[uid]["cell_x"],
-                "cell_y": units_by_id[uid]["cell_y"],
-                "activity": units_by_id[uid].get("current_activity", "Unknown"),
+                "type": u["type"],
+                "cell_x": u["cell_x"],
+                "cell_y": u["cell_y"],
+                "activity": u.get("current_activity", "Unknown"),
             }
-            for uid in commanded_ids
-            if uid in units_by_id
-        ]
+            if target_x is not None and target_y is not None and u.get("speed", 0) > 0:
+                eta = _estimate_move_ticks(u["speed"], u["cell_x"], u["cell_y"], target_x, target_y)
+                entry["eta_ticks"] = eta
+                entry["eta_seconds"] = round(eta / 25, 1)
+            entries.append(entry)
+        result["commanded_units"] = entries
+        # Group-level ETA note for movement commands
+        if target_x is not None and entries:
+            etas = [e["eta_ticks"] for e in entries if "eta_ticks" in e]
+            if etas:
+                slowest = max(etas)
+                result["note"] = self._app_config.prompts.move_eta.format(
+                    ticks=slowest, seconds=round(slowest / 25, 1))
         return result
 
     def _diagnose_unavailable(self, item_type: str) -> dict:
@@ -1977,7 +2075,7 @@ class OpenRAEnvironment(MCPEnvironment):
         if get_building_stats(item_type) and self._last_obs:
             owned_types = {b["type"] for b in self._last_obs.get("buildings", [])}
             if "fact" not in owned_types:
-                return {"reason": "No Construction Yard (fact) — deploy an MCV or you cannot build structures."}
+                return {"reason": "No Construction Yard (fact) — requires MCV deployment to build."}
 
         prereqs = stats.get("prerequisites", [])
         if not prereqs:
@@ -2148,6 +2246,9 @@ class OpenRAEnvironment(MCPEnvironment):
     # Naval buildings that require water tiles
     _WATER_BUILDINGS = {"spen", "syrd"}
 
+    # Defense structures — placement biased toward enemy direction
+    _DEFENSE_BUILDINGS = {"gun", "ftur", "tsla", "agun", "pbox", "hbox", "sam", "gap"}
+
     # Queue types that produce placeable structures (Building + Defense)
     _PLACEABLE_QUEUE_TYPES = {"Building", "Defense"}
 
@@ -2170,7 +2271,8 @@ class OpenRAEnvironment(MCPEnvironment):
         """Find valid placement positions for a building near the Construction Yard.
 
         Searches the full build radius around the CY, avoiding occupied cells.
-        Returns candidates sorted by distance from CY (closest first).
+        For defense buildings, biases placement toward the enemy direction.
+        Returns candidates sorted by score (best first).
         """
         buildings = obs.get("buildings", [])
 
@@ -2200,7 +2302,28 @@ class OpenRAEnvironment(MCPEnvironment):
         map_w = map_info.get("width", 128)
         map_h = map_info.get("height", 128)
 
-        # Generate candidates sorted by distance from CY
+        # Enemy direction for defense placement bias
+        is_defense = building_type in self._DEFENSE_BUILDINGS
+        enemy_dx, enemy_dy = 0, 0
+        if is_defense:
+            # Use visible enemies if any, otherwise estimate from map opposite corner
+            enemies = obs.get("visible_enemies", []) + obs.get("visible_enemy_buildings", [])
+            if enemies:
+                avg_ex = sum(e.get("cell_x", e.get("pos_x", 0) // 1024) for e in enemies) // len(enemies)
+                avg_ey = sum(e.get("cell_y", e.get("pos_y", 0) // 1024) for e in enemies) // len(enemies)
+                enemy_dx = avg_ex - cx
+                enemy_dy = avg_ey - cy_y
+            else:
+                # Estimate: enemy at opposite corner
+                enemy_dx = (map_w - cx) - cx  # positive if enemy is to the right
+                enemy_dy = (map_h - cy_y) - cy_y
+
+            # Normalize to unit-ish direction
+            mag = max(abs(enemy_dx), abs(enemy_dy), 1)
+            enemy_dx /= mag
+            enemy_dy /= mag
+
+        # Generate candidates
         candidates = []
         max_radius = 15  # Full RA build radius
         for dx in range(-max_radius, max_radius + 1):
@@ -2227,7 +2350,20 @@ class OpenRAEnvironment(MCPEnvironment):
                 if not overlap:
                     candidates.append({"cell_x": px, "cell_y": py, "distance": dist})
 
-        candidates.sort(key=lambda c: c["distance"])
+        if is_defense and (enemy_dx or enemy_dy):
+            # Defense: prefer positions toward the enemy, close-ish to CY (3-7 cells out)
+            def defense_score(c):
+                dx = c["cell_x"] - cx
+                dy = c["cell_y"] - cy_y
+                # Dot product with enemy direction (higher = more toward enemy)
+                toward_enemy = dx * enemy_dx + dy * enemy_dy
+                # Ideal distance: 3-7 cells from CY for defense perimeter
+                dist_penalty = abs(c["distance"] - 5)
+                return (-toward_enemy, dist_penalty)
+            candidates.sort(key=defense_score)
+        else:
+            candidates.sort(key=lambda c: c["distance"])
+
         return candidates
 
     _MAX_PLACEMENT_ATTEMPTS = 20
@@ -2316,7 +2452,8 @@ class OpenRAEnvironment(MCPEnvironment):
                     else:
                         reason = f"no valid position found (tried {attempt_idx} spots)"
                     self._placement_results.append(
-                        f"PLACEMENT FAILED: {btype} — {reason}. Auto-cancelling."
+                        self._app_config.prompts.placement_failed.format(
+                            building=btype, reason=reason)
                     )
                     try:
                         cancel_cmd = [CommandModel(action=ActionType.CANCEL_PRODUCTION, item_type=btype)]
@@ -2326,7 +2463,8 @@ class OpenRAEnvironment(MCPEnvironment):
                     failed.append(btype)
             else:
                 # Building no longer in queue → placement succeeded
-                self._placement_results.append(f"AUTO-PLACED: {btype}")
+                self._placement_results.append(
+                    self._app_config.prompts.placement_success.format(building=btype))
                 failed.append(btype)
 
         for btype in failed:
@@ -2349,9 +2487,7 @@ class OpenRAEnvironment(MCPEnvironment):
             # Water buildings can't auto-place on land — warn and skip
             if btype in self._WATER_BUILDINGS:
                 self._placement_results.append(
-                    f"WATER BUILDING: {btype} must be placed on water. "
-                    f"Call get_valid_placements(\"{btype}\") then place_building() manually, "
-                    f"or cancel_production(\"{btype}\") to unblock the queue."
+                    self._app_config.prompts.placement_water.format(building=btype)
                 )
                 self._pending_placements.pop(btype, None)
                 continue
@@ -2375,8 +2511,8 @@ class OpenRAEnvironment(MCPEnvironment):
                 attempted[btype] = 1  # start tracking from candidate index 1
             except Exception:
                 self._placement_results.append(
-                    f"PLACEMENT FAILED: {btype} — command error. "
-                    f"Use cancel_production(\"{btype}\") to clear queue."
+                    self._app_config.prompts.placement_failed.format(
+                        building=btype, reason="command error")
                 )
                 self._pending_placements.pop(btype, None)
 
@@ -2496,6 +2632,7 @@ class OpenRAEnvironment(MCPEnvironment):
         self._last_obs = None
         self._unit_groups.clear()
         self._pending_placements.clear()
+        self._move_targets.clear()
         self._attempted_placements.clear()
         self._placement_results.clear()
         self._planning_active = False

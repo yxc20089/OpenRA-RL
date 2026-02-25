@@ -16,6 +16,15 @@ logger = logging.getLogger(__name__)
 # Default path to the OpenRA installation
 DEFAULT_OPENRA_PATH = os.environ.get("OPENRA_PATH", "/opt/openra")
 
+# Map user-friendly difficulty names to actual OpenRA bot type strings.
+# Users can set either the friendly name or the raw OpenRA name.
+BOT_TYPE_MAP: dict[str, str] = {
+    "easy": "rush",
+    "normal": "normal",
+    "hard": "turtle",
+}
+
+
 
 @dataclass
 class OpenRAConfig:
@@ -28,7 +37,7 @@ class OpenRAConfig:
     bot_name: str = "Normal AI"
     bot_type: str = "normal"
     rl_slot: str = "Multi1"
-    ai_slot: str = ""
+    ai_slot: str = "Multi0"
     seed: Optional[int] = None
     headless: bool = True  # Use Null renderer (no GPU needed)
     record_replays: bool = False  # Enable .orarep replay recording
@@ -104,7 +113,9 @@ class OpenRAProcessManager:
         # Build bots configuration: slot:bottype,slot:bottype
         bots = f"{self.config.rl_slot}:rl-agent"
         if self.config.ai_slot:
-            bots += f",{self.config.ai_slot}:{self.config.bot_type}"
+            # Map friendly names (easy/normal/hard) to OpenRA types (rush/normal/turtle)
+            actual_type = BOT_TYPE_MAP.get(self.config.bot_type, self.config.bot_type)
+            bots += f",{self.config.ai_slot}:{actual_type}"
 
         args = [
             *exe,
