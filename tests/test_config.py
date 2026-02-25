@@ -10,13 +10,16 @@ import yaml
 
 from openra_env.config import (
     TOOL_CATEGORIES,
+    AlertPromptsConfig,
     AlertsConfig,
     AgentConfig,
+    CompressionConfig,
     GameConfig,
     LLMConfig,
     OpenRARLConfig,
     OpponentConfig,
     PlanningConfig,
+    PromptsConfig,
     RewardConfig,
     RewardVectorConfig,
     ToolCategoriesConfig,
@@ -52,6 +55,8 @@ class TestDefaults:
     def test_all_alerts_enabled_by_default(self):
         cfg = OpenRARLConfig()
         for field in AlertsConfig.model_fields:
+            if field == "max_alerts":
+                continue  # max_alerts is an int, not a bool toggle
             assert getattr(cfg.alerts, field) is True, f"Alert {field} should default to True"
 
     def test_disabled_tools_list_empty_by_default(self):
@@ -506,3 +511,296 @@ def _temp_yaml(data: dict):
             Path(path).unlink(missing_ok=True)
 
     return _ctx()
+
+
+# ── PromptsConfig Tests ──────────────────────────────────────────────
+
+
+class TestPromptsConfig:
+    """Tests for the PromptsConfig system."""
+
+    def test_default_prompts_have_values(self):
+        """PromptsConfig defaults should have non-empty values for key fields."""
+        p = PromptsConfig()
+        assert "end_planning_phase" in p.planning_nudge
+        assert "tool" in p.no_tool_nudge.lower()
+        assert "{building}" in p.power_warning
+        assert "{count}" in p.alerts.idle_army
+
+    def test_prompts_in_root_config(self):
+        """OpenRARLConfig should have prompts field with defaults."""
+        config = OpenRARLConfig()
+        assert isinstance(config.prompts, PromptsConfig)
+        assert isinstance(config.prompts.alerts, AlertPromptsConfig)
+        assert config.prompts.planning_complete == "Planning complete. Game is now live."
+
+    def test_prompts_from_yaml(self):
+        """Override prompts via config YAML."""
+        data = {
+            "prompts": {
+                "no_tool_nudge": "Please call a tool now.",
+                "alerts": {
+                    "low_power": "Power is low: {balance}",
+                },
+            },
+        }
+        with _temp_yaml(data) as path:
+            config = load_config(config_path=path)
+        assert config.prompts.no_tool_nudge == "Please call a tool now."
+        assert config.prompts.alerts.low_power == "Power is low: {balance}"
+        # Other fields keep defaults
+        assert "combat units idle" in config.prompts.alerts.idle_army
+
+    def test_alert_template_format(self):
+        """Alert templates should render with .format()."""
+        p = AlertPromptsConfig()
+        result = p.low_power.format(balance="-30")
+        assert "LOW POWER" in result
+        assert "-30" in result
+
+    def test_placement_template_format(self):
+        """Placement templates should render with .format()."""
+        p = PromptsConfig()
+        result = p.placement_failed.format(building="powr", reason="no valid position")
+        assert "powr" in result
+        assert "no valid position" in result
+
+    def test_planning_prompt_template(self):
+        """Planning prompt template should accept all expected variables."""
+        p = PromptsConfig()
+        result = p.planning_prompt.format(
+            max_turns=10, map_name="test", map_width=64, map_height=64,
+            base_x=10, base_y=10, enemy_x=50, enemy_y=50,
+            faction="russia", side="Soviet",
+            opponent_summary="Easy AI", planning_nudge=p.planning_nudge,
+        )
+        assert "10 turns" in result
+        assert "russia" in result
+        assert "end_planning_phase" in result
+
+    def test_backward_compat_system_prompt_migration(self):
+        """agent.system_prompt should migrate to prompts.system_prompt."""
+        config = OpenRARLConfig(agent=AgentConfig(system_prompt="My custom prompt"))
+        assert config.prompts.system_prompt == "My custom prompt"
+
+    def test_prompts_system_prompt_takes_precedence(self):
+        """prompts.system_prompt should win over agent.system_prompt."""
+        config = OpenRARLConfig(
+            agent=AgentConfig(system_prompt="agent version"),
+            prompts=PromptsConfig(system_prompt="prompts version"),
+        )
+        assert config.prompts.system_prompt == "prompts version"
+
+    def test_backward_compat_system_prompt_file_migration(self):
+        """agent.system_prompt_file should migrate to prompts.system_prompt_file."""
+        config = OpenRARLConfig(agent=AgentConfig(system_prompt_file="/tmp/test.txt"))
+        assert config.prompts.system_prompt_file == "/tmp/test.txt"
+
+    def test_env_var_prompts_file(self):
+        """PROMPTS_FILE env var should set prompts.prompts_file."""
+        with patch.dict(os.environ, {"PROMPTS_FILE": "/tmp/prompts.yaml"}, clear=False):
+            config = load_config(config_path="/nonexistent/config.yaml")
+        assert config.prompts.prompts_file == "/tmp/prompts.yaml"
+
+    def test_game_start_template(self):
+        """Game start template should render correctly."""
+        p = PromptsConfig()
+        result = p.game_start.format(
+            strategy_section="\n\nRush strategy",
+            briefing="Map: test",
+            barracks_type="barr",
+            mcv_note=" Your MCV is unit 42.",
+        )
+        assert "Game started!" in result
+        assert "Rush strategy" in result
+        assert "barr" in result
+        assert "unit 42" in result
+
+    def test_insufficient_funds_template(self):
+        """Insufficient funds template should render correctly."""
+        p = PromptsConfig()
+        result = p.insufficient_funds.format(available=500, item="3tnk", cost=950)
+        assert "500" in result
+        assert "3tnk" in result
+        assert "950" in result
+
+    def test_build_queued_template(self):
+        """Build queued template should render correctly."""
+        p = PromptsConfig()
+        result = p.build_queued.format(building="powr", cost=300, ticks=180, seconds=7.2)
+        assert "powr" in result
+        assert "300" in result
+        assert "180" in result
+        assert "auto-places" in result
+
+    def test_build_unit_queued_template(self):
+        """Build unit queued template should render correctly."""
+        p = PromptsConfig()
+        result = p.build_unit_queued.format(
+            count=3, unit="e1", cost=100, ticks_each=60,
+            ticks_total=180, seconds_total=7.2)
+        assert "3x" in result
+        assert "e1" in result
+        assert "60" in result
+        assert "180" in result
+
+    def test_build_already_pending_template(self):
+        """Build already pending template should render correctly."""
+        p = PromptsConfig()
+        result = p.build_already_pending.format(building="powr")
+        assert "powr" in result
+        assert "already queued" in result
+
+    def test_max_alerts_default(self):
+        """AlertsConfig max_alerts should default to 0 (unlimited)."""
+        cfg = AlertsConfig()
+        assert cfg.max_alerts == 0
+
+
+# ── Compression Config ───────────────────────────────────────────────
+
+
+class TestCompressionConfig:
+    def test_defaults(self):
+        c = CompressionConfig()
+        assert c.include_strategy is True
+        assert c.include_military is True
+        assert c.include_production is True
+
+    def test_disable_strategy(self):
+        c = CompressionConfig(include_strategy=False)
+        assert c.include_strategy is False
+
+    def test_llm_compression_strategy_default(self):
+        llm = LLMConfig()
+        assert llm.compression_strategy == "sliding_window"
+
+    def test_llm_compression_trigger_default(self):
+        llm = LLMConfig()
+        assert llm.compression_trigger == 0
+
+    def test_compression_strategy_none(self):
+        llm = LLMConfig(compression_strategy="none")
+        assert llm.compression_strategy == "none"
+
+    def test_compression_trigger_custom(self):
+        llm = LLMConfig(compression_trigger=60)
+        assert llm.compression_trigger == 60
+
+    def test_prompts_compression_field(self):
+        p = PromptsConfig()
+        assert isinstance(p.compression, CompressionConfig)
+        assert p.compression.include_strategy is True
+
+    def test_move_eta_template(self):
+        p = PromptsConfig()
+        result = p.move_eta.format(ticks=183, seconds=7.3)
+        assert "183" in result
+        assert "7.3" in result
+
+    def test_full_config_compression_yaml(self):
+        """Compression fields round-trip through YAML config loading."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump({
+                "llm": {
+                    "compression_strategy": "none",
+                    "compression_trigger": 60,
+                    "keep_last_messages": 20,
+                },
+                "prompts": {
+                    "compression": {
+                        "include_strategy": False,
+                        "include_military": True,
+                        "include_production": False,
+                    }
+                }
+            }, f)
+            f.flush()
+            cfg = load_config(f.name)
+        os.unlink(f.name)
+        assert cfg.llm.compression_strategy == "none"
+        assert cfg.llm.compression_trigger == 60
+        assert cfg.llm.keep_last_messages == 20
+        assert cfg.prompts.compression.include_strategy is False
+        assert cfg.prompts.compression.include_production is False
+        assert cfg.prompts.compression.include_military is True
+
+
+# ── Opponent Config ──────────────────────────────────────────────────
+
+
+class TestOpponentConfig:
+    def test_default_spawns_enemy(self):
+        """Default opponent config spawns an enemy in Multi0."""
+        cfg = OpponentConfig()
+        assert cfg.ai_slot == "Multi0"
+        assert cfg.bot_type == "normal"
+
+    def test_disable_enemy_via_empty_slot(self):
+        cfg = OpponentConfig(ai_slot="")
+        assert cfg.ai_slot == ""
+
+    def test_custom_bot_type(self):
+        cfg = OpponentConfig(bot_type="hard")
+        assert cfg.bot_type == "hard"
+
+
+# ── Bot Type Mapping ─────────────────────────────────────────────────
+
+
+class TestBotTypeMapping:
+    def test_easy_maps_to_rush(self):
+        from openra_env.server.openra_process import BOT_TYPE_MAP
+        assert BOT_TYPE_MAP["easy"] == "rush"
+
+    def test_normal_maps_to_normal(self):
+        from openra_env.server.openra_process import BOT_TYPE_MAP
+        assert BOT_TYPE_MAP["normal"] == "normal"
+
+    def test_hard_maps_to_turtle(self):
+        from openra_env.server.openra_process import BOT_TYPE_MAP
+        assert BOT_TYPE_MAP["hard"] == "turtle"
+
+    def test_raw_names_pass_through(self):
+        from openra_env.server.openra_process import BOT_TYPE_MAP
+        for raw in ["rush", "turtle", "naval"]:
+            assert BOT_TYPE_MAP.get(raw, raw) == raw
+
+    def test_build_command_maps_easy(self):
+        from openra_env.server.openra_process import OpenRAConfig, OpenRAProcessManager
+        openra_path = str(Path(__file__).parent.parent / "OpenRA")
+        config = OpenRAConfig(openra_path=openra_path, bot_type="easy")
+        manager = OpenRAProcessManager(config)
+        cmd = manager._build_command()
+        bots_arg = [a for a in cmd if "Launch.Bots" in a][0]
+        assert "rush" in bots_arg
+        assert "easy" not in bots_arg
+
+    def test_build_command_maps_hard(self):
+        from openra_env.server.openra_process import OpenRAConfig, OpenRAProcessManager
+        openra_path = str(Path(__file__).parent.parent / "OpenRA")
+        config = OpenRAConfig(openra_path=openra_path, bot_type="hard")
+        manager = OpenRAProcessManager(config)
+        cmd = manager._build_command()
+        bots_arg = [a for a in cmd if "Launch.Bots" in a][0]
+        assert "turtle" in bots_arg
+
+    def test_build_command_no_enemy_with_empty_slot(self):
+        from openra_env.server.openra_process import OpenRAConfig, OpenRAProcessManager
+        openra_path = str(Path(__file__).parent.parent / "OpenRA")
+        config = OpenRAConfig(openra_path=openra_path, ai_slot="")
+        manager = OpenRAProcessManager(config)
+        cmd = manager._build_command()
+        bots_arg = [a for a in cmd if "Launch.Bots" in a][0]
+        assert bots_arg == "Launch.Bots=Multi1:rl-agent"
+
+    def test_default_config_spawns_enemy(self):
+        from openra_env.server.openra_process import OpenRAConfig, OpenRAProcessManager
+        openra_path = str(Path(__file__).parent.parent / "OpenRA")
+        config = OpenRAConfig(openra_path=openra_path)
+        manager = OpenRAProcessManager(config)
+        cmd = manager._build_command()
+        bots_arg = [a for a in cmd if "Launch.Bots" in a][0]
+        # Default should include enemy (Multi0:normal)
+        assert "Multi0" in bots_arg
+        assert "normal" in bots_arg

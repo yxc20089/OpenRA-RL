@@ -29,6 +29,7 @@ from openra_env.agent import run_agent
 # Re-export for backwards compatibility
 from openra_env.agent import (  # noqa: F401
     SYSTEM_PROMPT,
+    load_system_prompt,
     compose_pregame_briefing,
     format_state_briefing,
     mcp_tools_to_openai,
@@ -99,6 +100,11 @@ def main():
         default=None,
         help="Write all output to this log file in addition to stdout",
     )
+    parser.add_argument(
+        "--system-prompt",
+        default=None,
+        help="Path to a custom system prompt .txt file (overrides built-in default)",
+    )
     args = parser.parse_args()
 
     # Build config: YAML file + env vars + CLI overrides (CLI wins over .env)
@@ -119,6 +125,8 @@ def main():
         cli.setdefault("agent", {})["verbose"] = True
     if args.log_file is not None:
         cli.setdefault("agent", {})["log_file"] = args.log_file
+    if args.system_prompt is not None:
+        cli.setdefault("agent", {})["system_prompt_file"] = args.system_prompt
 
     config = load_config(config_path=args.config, cli_overrides=cli)
     verbose = config.agent.verbose

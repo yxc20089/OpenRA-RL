@@ -1,0 +1,144 @@
+# OpenRA-RL Default Prompts
+# =========================
+# All LLM-facing text used by the agent. Copy this file and customize
+# to change what the model sees. Point to your copy via:
+#   prompts:
+#     prompts_file: "path/to/my_prompts.yaml"
+# in config.yaml, or set PROMPTS_FILE environment variable.
+#
+# Templates use Python str.format() placeholders: {variable_name}
+# Available variables are documented in comments above each template.
+
+# ── Planning Phase ───────────────────────────────────────────────────
+
+# Variables: {max_turns}, {map_name}, {map_width}, {map_height},
+#   {base_x}, {base_y}, {enemy_x}, {enemy_y}, {faction}, {side},
+#   {opponent_summary}, {planning_nudge}
+planning_prompt: |
+  ## PRE-GAME PLANNING PHASE
+  You have {max_turns} turns to plan.
+
+  ### Map Intel
+  Map: {map_name} ({map_width}x{map_height})
+  Your base: ({base_x}, {base_y})
+  Enemy estimated: ({enemy_x}, {enemy_y})
+  Your faction: {faction} ({side})
+
+  ### Opponent Intelligence
+  {opponent_summary}
+
+  {planning_nudge}
+
+planning_nudge: "Call end_planning_phase(strategy='...') when ready to start."
+
+planning_instructions: >-
+  Planning phase active. Available tools: get_faction_briefing
+  (all unit/building stats), get_map_analysis (terrain/resources),
+  get_opponent_intel (enemy profile), batch_lookup (multi-item queries).
+  Call end_planning_phase(strategy=...) to begin gameplay.
+
+planning_complete: "Planning complete. Game is now live."
+
+# ── Game Start ───────────────────────────────────────────────────────
+
+# Variables: {strategy_section}, {briefing}, {barracks_type}, {mcv_note}
+game_start: "Game started!{strategy_section}\n\n{briefing}\n\nYour barracks type is '{barracks_type}'.{mcv_note}"
+
+# ── Agent Nudges ─────────────────────────────────────────────────────
+
+no_tool_nudge: "No tool was called. A tool call is required each turn."
+continue_nudge: "The game is still in progress."
+compression_suffix: "Game continues from current state."
+sanitize_bridge: "Acknowledged. Continuing."
+
+# ── Tool Warnings ────────────────────────────────────────────────────
+
+# Variables: {building}, {drain}, {balance}
+power_warning: "POWER WARNING: {building} drains {drain} power. Balance will be {balance}."
+
+# Variables: {available}, {item}, {cost}
+insufficient_funds: "Insufficient funds: ${available} available, {item} costs ${cost}."
+
+# ── Placement Feedback ───────────────────────────────────────────────
+
+# Variables: {building}
+placement_success: "AUTO-PLACED: {building}"
+
+# Variables: {building}, {reason}
+placement_failed: "PLACEMENT FAILED: {building} — {reason}. Auto-cancelling."
+
+# Variables: {building}
+placement_water: "WATER BUILDING: {building} requires water tiles for placement."
+
+# ── Build Confirmations ─────────────────────────────────────────
+# Factual confirmation notes returned by build tools.
+
+# Variables: {building}, {cost}, {ticks}, {seconds}
+build_queued: "'{building}' (${cost}) queued, auto-places on completion. ~{ticks} ticks (~{seconds}s)."
+
+# Variables: {building}, {cost}, {ticks}, {seconds}
+build_structure_queued: "'{building}' (${cost}) queued. ~{ticks} ticks (~{seconds}s) to complete."
+
+# Variables: {count}, {unit}, {cost}, {ticks_each}, {ticks_total}, {seconds_total}
+build_unit_queued: "{count}x '{unit}' (${cost} each) queued. ~{ticks_each} ticks per unit, ~{ticks_total} ticks (~{seconds_total}s) total."
+
+# ── Build Guards ────────────────────────────────────────────────
+
+# Variables: {building}
+build_already_pending: "'{building}' is already queued and pending auto-placement."
+
+# Variables: {building}
+place_auto_managed: "'{building}' is queued via build_and_place — placement is automatic."
+
+# ── Movement Feedback ───────────────────────────────────────────────
+
+# Variables: {ticks}, {seconds}
+move_eta: "Units moving. Slowest arrives in ~{ticks} ticks (~{seconds}s)."
+
+# ── Alerts ───────────────────────────────────────────────────────────
+# These appear in the TURN BRIEFING under ALERTS.
+# Each alert type can be enabled/disabled separately in the alerts config.
+
+alerts:
+  # Variables: {type}, {id}
+  under_attack: "UNDER ATTACK: enemy {type} id={id} near base"
+
+  # Variables: {count}, {breakdown}
+  under_attack_mass: "UNDER ATTACK: {count} enemies near base ({breakdown})"
+
+  # Variables: {type}, {id}, {hp}
+  damaged: "DAMAGED: {type} id={id} at {hp} HP"
+
+  # Variables: {balance}
+  low_power: "LOW POWER: {balance} — production runs at 1/3 speed"
+
+  # Variables: {balance}
+  power_tight: "POWER TIGHT: {balance} surplus — next building may cause low power"
+
+  # Variables: {funds}, {harvesters}
+  idle_funds: "IDLE FUNDS: ${funds} available, {harvesters} harvester(s)"
+
+  # Variables: {ore}, {cap}
+  ore_full: "ORE FULL: {ore}/{cap} storage — income is being lost"
+
+  idle_production: "IDLE PRODUCTION: no active production queue"
+
+  # Variables: {item}, {progress}
+  stalled: "STALLED: {item}@{progress} — $0 funds, production paused"
+
+  # Variables: {building}
+  building_stuck: "BUILDING STUCK: {building} — auto-placement failing"
+
+  # Variables: {building}
+  ready_to_place: "READY TO PLACE: {building} — completed, awaiting placement"
+
+  # Variables: {count}
+  stance: "STANCE: {count} combat unit(s) on ReturnFire (only fire when fired upon)"
+
+  # Variables: {count}
+  idle_army: "IDLE ARMY: {count} combat units idle"
+
+  no_defenses: "NO DEFENSES: no defense structures built"
+
+  # Variables: {explored}, {idle}
+  no_scouting: "NO SCOUTING: enemy not found — {explored} of map explored, {idle} idle combat units available"

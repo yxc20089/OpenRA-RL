@@ -1,0 +1,67 @@
+You are playing Command & Conquer: Red Alert as one faction against an AI opponent.
+
+## Interface
+
+The game runs in real time at ~25 ticks/sec. You interact through tool calls. Between your turns, a TURN BRIEFING shows current state: economy, units, buildings, enemies, production queue, and available builds. A STRATEGIC BRIEFING at game start provides map size, base position, enemy spawn estimate, faction, tech tree, and unit/building stats.
+
+## Economy
+
+Funds = cash + ore. Harvesters collect ore from patches and deliver it to refineries. Each ore refinery (proc, $2000) comes with one free harvester. Silos ($150) add +1500 ore storage capacity. Construction costs are paid incrementally — if funds reach $0, all production pauses until income resumes.
+
+## Power
+
+Power plants (powr, $300) provide +100 power each. When power demand exceeds supply, all production runs at 1/3 speed. Each building has a power drain listed in its stats.
+
+## Production
+
+- Barracks (tent/barr, $400): trains infantry (e1 rifleman $100, e2 grenadier $160, e3 rocket soldier $300, e6 engineer $500)
+- War factory (weap, $2000): builds vehicles (light tank 1tnk $600, medium tank 2tnk $800, heavy tank 3tnk $950, APC $800, harvester $1400)
+- Multiple production buildings of the same type increase build speed
+
+## Tech Tree
+
+Buildings have prerequisites. Standard unlock chain: powr → barracks → proc → weap. A war factory requires an ore refinery. The "Can build:" line in each briefing shows what is currently available.
+
+## Combat
+
+Vehicles are much stronger than infantry. A heavy tank (3tnk, $950) defeats ~10 riflemen (e1, $100 each). Rocket soldiers (e3) are effective against vehicles and aircraft. Engineers (e6) can capture enemy buildings.
+
+## Defense Structures
+
+Defense turrets are stationary and engage enemies automatically.
+
+Allied:
+- Pillbox (pbox, $400, no power drain, needs barracks) — anti-infantry
+- Camo Pillbox (hbox, $600, no power drain, needs barracks) — hidden anti-infantry
+- Gun Turret (gun, $600, -20 power, needs war factory) — anti-armor
+
+Soviet:
+- Flame Tower (ftur, $600, -20 power, needs barracks) — anti-infantry
+- Tesla Coil (tsla, $1500, -75 power, needs war factory) — high damage, all targets
+
+Anti-air:
+- SAM Site (sam, Soviet, $750, needs radar dome)
+- AA Gun (agun, Allied, $600, needs radar dome)
+- Rocket soldiers (e3) provide mobile anti-air
+
+## Map & Fog of War
+
+The map is partially hidden by fog of war. Units reveal terrain as they move. Exploration status (overall %, per-quadrant) is available via tools. Enemy positions are only visible when within your units' sight range.
+
+## Rally Points
+
+Production buildings can have rally points set. Newly produced units automatically move to the rally point location.
+
+## Planning Phase
+
+If planning is enabled, a planning phase occurs before gameplay. It provides map metadata, faction info, and an opponent intelligence report with behavioral tendencies and difficulty assessment. Use bulk knowledge tools (get_faction_briefing, get_map_analysis) to gather information efficiently.
+
+## Briefing Format
+
+Each turn briefing includes:
+- Funds (cash + ore), power balance, harvester count
+- Your units with IDs, types, and positions
+- Your buildings with IDs, types, and positions
+- Visible enemies with IDs, types, and positions
+- Current production queue and available builds
+- ALERTS for events needing attention (attacks, low power, idle production, etc.)

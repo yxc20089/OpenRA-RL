@@ -19,9 +19,11 @@ game:
 #   max_wall_time_s: 0                # End game after N seconds (0 = unlimited)
 
 # ── Opponent ──────────────────────────────────────────────────────────
+# Enemy bot always spawns by default. Set ai_slot to "" to disable.
+# bot_type accepts friendly names (easy/normal/hard) or OpenRA names (rush/normal/turtle/naval).
 opponent:
-  bot_type: "easy"                    # AI difficulty: easy, normal, hard ($BOT_TYPE)
-  ai_slot: "Multi0"                   # AI player slot ($AI_SLOT)
+  bot_type: "easy"                    # easy=rush, normal=normal, hard=turtle ($BOT_TYPE)
+  ai_slot: "Multi0"                   # AI player slot; "" to disable enemy ($AI_SLOT)
 
 # ── Planning Phase ────────────────────────────────────────────────────
 # planning:
@@ -71,6 +73,7 @@ opponent:
 #   no_defenses: true
 #   no_scouting: true
 #   loss_tracking: true
+#   max_alerts: 0                    # Max alerts per turn (0 = unlimited)
 
 # ── LLM Model ────────────────────────────────────────────────────────
 # llm:
@@ -80,7 +83,9 @@ opponent:
 #   max_tokens: 1500
 #   temperature: null                 # null = provider default
 #   top_p: null                       # null = provider default
-#   keep_last_messages: 40            # History compression window
+#   keep_last_messages: 40            # Messages to keep after compression
+#   compression_strategy: "sliding_window"  # "sliding_window" or "none"
+#   compression_trigger: 0            # Compress at this count (0 = keep_last * 2)
 #   max_retries: 4                    # Retry on transient errors
 #   retry_backoff_s: 10               # Base backoff (multiplied by attempt)
 #   request_timeout_s: 120.0          # HTTP timeout per request
@@ -95,3 +100,20 @@ opponent:
 #   max_time_s: 1800                  # 30 minutes ($MAX_TIME)
 #   verbose: false
 #   log_file: ""                      # Log file path ($LLM_AGENT_LOG)
+
+# ── Prompts ──────────────────────────────────────────────────────────
+# All LLM-facing text. Override individual fields here, or point
+# prompts_file to a separate YAML (copy openra_env/prompts/default_prompts.yaml).
+# Templates use Python str.format() placeholders: {variable_name}
+# prompts:
+#   system_prompt: ""                 # Inline system prompt (overrides built-in)
+#   system_prompt_file: ""            # Path to .txt system prompt ($SYSTEM_PROMPT_FILE)
+#   prompts_file: ""                  # Path to prompts YAML ($PROMPTS_FILE)
+#   planning_nudge: "Call end_planning_phase(strategy='...') when ready to start."
+#   planning_complete: "Planning complete. Game is now live."
+#   no_tool_nudge: "No tool was called. A tool call is required each turn."
+#   continue_nudge: "The game is still in progress."
+#   alerts:                           # Alert message templates
+#     low_power: "LOW POWER: {balance} — production runs at 1/3 speed"
+#     idle_army: "IDLE ARMY: {count} combat units idle"
+#     # ... see openra_env/prompts/default_prompts.yaml for all fields

@@ -985,7 +985,7 @@ class TestOreCapAlert:
         alerts = result.get("alerts", [])
         ore_alerts = [a for a in alerts if "ORE FULL" in a]
         assert len(ore_alerts) == 1
-        assert "silo" in ore_alerts[0].lower()
+        assert "income is being lost" in ore_alerts[0].lower()
 
     def test_ore_cap_alert_not_when_low(self, env_with_full_ore):
         """Alert does NOT fire when ore is well below capacity."""
@@ -1539,16 +1539,14 @@ class TestBuildingStuckAlertText:
         return env, mcp
 
     def test_stuck_alert_suggests_valid_placements(self, env_stuck_building):
-        """BUILDING STUCK alert should suggest get_valid_placements(), not auto-cancel."""
+        """BUILDING STUCK alert should be factual (no prescriptive tool suggestions)."""
         env, mcp = env_stuck_building
         tool = mcp._tool_manager._tools["get_game_state"]
         result = tool.fn()
         alerts = result.get("alerts", [])
         stuck_alerts = [a for a in alerts if "BUILDING STUCK" in a]
         assert len(stuck_alerts) == 1
-        assert "get_valid_placements" in stuck_alerts[0]
-        assert "cancel_production" in stuck_alerts[0]
-        assert "auto-cancel" not in stuck_alerts[0]
+        assert "auto-placement failing" in stuck_alerts[0]
 
 
 # ── Round 3 Tests ──────────────────────────────────────────────────────────
@@ -3022,3 +3020,749 @@ class TestExplorationStatusRegistration:
         from openra_env.config import TOOL_CATEGORIES
         assert "get_exploration_status" in TOOL_CATEGORIES
         assert TOOL_CATEGORIES["get_exploration_status"] == "read"
+
+
+# ── Build Confirmation & Guard Tests ──────────────────────────────────────────
+
+
+class TestBuildConfirmationNotes:
+    """Build tools should return factual confirmation notes with tick estimates."""
+
+    @pytest.fixture
+    def env_build(self):
+        obs = {
+            "tick": 100, "done": False, "result": "",
+            "economy": {
+                "cash": 10000, "ore": 0,
+                "power_provided": 200, "power_drained": 50,
+                "resource_capacity": 5000, "harvester_count": 1,
+            },
+            "military": {
+                "units_killed": 0, "units_lost": 0,
+                "buildings_killed": 0, "buildings_lost": 0,
+                "army_value": 0, "active_unit_count": 0,
+            },
+            "units": [],
+            "buildings": [
+                {"actor_id": 1, "type": "fact", "pos_x": 500, "pos_y": 500,
+                 "hp_percent": 1.0, "owner": "Multi0", "is_producing": False,
+                 "production_progress": 0.0, "producing_item": "",
+                 "is_powered": True, "is_repairing": False, "sell_value": 0,
+                 "rally_x": -1, "rally_y": -1, "power_amount": 0,
+                 "can_produce": [], "cell_x": 5, "cell_y": 5},
+            ],
+            "production": [],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+            "map_info": {"width": 128, "height": 128, "map_name": "Test"},
+            "available_production": ["e1", "e3", "powr", "proc", "barr", "tent"],
+        }
+        env, mcp = _make_env_with_tools(obs)
+        env._execute_commands = lambda cmds: {
+            "tick": 101, "done": False, "result": "",
+            "economy": obs["economy"],
+            "own_units": 0, "own_buildings": 1,
+            "visible_enemies": 0, "production": [],
+        }
+        return env, mcp
+
+    def test_build_unit_returns_note(self, env_build):
+        env, mcp = env_build
+        tool = mcp._tool_manager._tools["build_unit"]
+        result = tool.fn(unit_type="e1", count=3)
+        assert "note" in result
+        assert "e1" in result["note"]
+        assert "3x" in result["note"]
+        # e1 costs $100 → 60 ticks each, 180 total
+        assert "60" in result["note"]
+        assert "180" in result["note"]
+
+    def test_build_structure_returns_note(self, env_build):
+        env, mcp = env_build
+        tool = mcp._tool_manager._tools["build_structure"]
+        result = tool.fn(building_type="powr")
+        assert "note" in result
+        assert "powr" in result["note"]
+        # powr costs $300 → 180 ticks
+        assert "180" in result["note"]
+
+    def test_build_and_place_returns_note(self, env_build):
+        env, mcp = env_build
+        tool = mcp._tool_manager._tools["build_and_place"]
+        result = tool.fn(building_type="powr")
+        assert "note" in result
+        assert "auto-places" in result["note"]
+        assert "180" in result["note"]
+
+
+class TestPendingPlacementGuards:
+    """Prevent double-ordering or manual placement of auto-managed buildings."""
+
+    @pytest.fixture
+    def env_pending(self):
+        obs = {
+            "tick": 200, "done": False, "result": "",
+            "economy": {
+                "cash": 10000, "ore": 0,
+                "power_provided": 200, "power_drained": 50,
+                "resource_capacity": 5000, "harvester_count": 1,
+            },
+            "military": {
+                "units_killed": 0, "units_lost": 0,
+                "buildings_killed": 0, "buildings_lost": 0,
+                "army_value": 0, "active_unit_count": 0,
+            },
+            "units": [],
+            "buildings": [
+                {"actor_id": 1, "type": "fact", "pos_x": 500, "pos_y": 500,
+                 "hp_percent": 1.0, "owner": "Multi0", "is_producing": False,
+                 "production_progress": 0.0, "producing_item": "",
+                 "is_powered": True, "is_repairing": False, "sell_value": 0,
+                 "rally_x": -1, "rally_y": -1, "power_amount": 0,
+                 "can_produce": [], "cell_x": 5, "cell_y": 5},
+            ],
+            "production": [
+                {"queue_type": "Building", "item": "powr", "progress": 0.5,
+                 "remaining_ticks": 90},
+            ],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+            "map_info": {"width": 128, "height": 128, "map_name": "Test"},
+            "available_production": ["e1", "powr", "proc", "barr"],
+        }
+        env, mcp = _make_env_with_tools(obs)
+        env._pending_placements = {"powr": {"cell_x": 0, "cell_y": 0}}
+        return env, mcp
+
+    def test_build_structure_rejects_pending(self, env_pending):
+        env, mcp = env_pending
+        tool = mcp._tool_manager._tools["build_structure"]
+        result = tool.fn(building_type="powr")
+        assert "note" in result
+        assert "already queued" in result["note"]
+
+    def test_build_and_place_rejects_pending(self, env_pending):
+        env, mcp = env_pending
+        tool = mcp._tool_manager._tools["build_and_place"]
+        result = tool.fn(building_type="powr")
+        assert "note" in result
+        assert "already queued" in result["note"]
+
+    def test_place_building_rejects_auto_managed(self, env_pending):
+        env, mcp = env_pending
+        tool = mcp._tool_manager._tools["place_building"]
+        result = tool.fn(building_type="powr")
+        assert "note" in result
+        assert "automatic" in result["note"]
+
+
+class TestAlertPriorityAndCap:
+    """Alerts should be sorted by priority and capped by max_alerts."""
+
+    def test_alerts_sorted_by_priority(self):
+        """Higher priority alerts (lower number) come first."""
+        obs = {
+            "tick": 1000, "done": False, "result": "",
+            "economy": {
+                "cash": 5000, "ore": 0,
+                "power_provided": 50, "power_drained": 100,
+                "resource_capacity": 5000, "harvester_count": 1,
+            },
+            "military": {
+                "units_killed": 0, "units_lost": 0,
+                "buildings_killed": 0, "buildings_lost": 0,
+                "army_value": 500, "active_unit_count": 5,
+            },
+            "units": [
+                {"actor_id": i, "type": "e1", "pos_x": 100, "pos_y": 100,
+                 "cell_x": 1, "cell_y": 1, "hp_percent": 1.0, "is_idle": True,
+                 "current_activity": "", "owner": "Multi0", "can_attack": True,
+                 "facing": 0, "experience_level": 0, "stance": 1, "speed": 71,
+                 "attack_range": 5120, "passenger_count": -1, "is_building": False}
+                for i in range(10, 15)
+            ],
+            "buildings": [
+                {"actor_id": 1, "type": "fact", "pos_x": 500, "pos_y": 500,
+                 "hp_percent": 0.3, "owner": "Multi0", "is_producing": False,
+                 "production_progress": 0.0, "producing_item": "",
+                 "is_powered": True, "is_repairing": False, "sell_value": 0,
+                 "rally_x": -1, "rally_y": -1, "power_amount": 0,
+                 "can_produce": [], "cell_x": 5, "cell_y": 5},
+                {"actor_id": 2, "type": "powr", "pos_x": 500, "pos_y": 600,
+                 "hp_percent": 1.0, "owner": "Multi0", "is_producing": False,
+                 "production_progress": 0.0, "producing_item": "",
+                 "is_powered": True, "is_repairing": False, "sell_value": 150,
+                 "rally_x": -1, "rally_y": -1, "power_amount": 100,
+                 "can_produce": [], "cell_x": 5, "cell_y": 6},
+                {"actor_id": 3, "type": "barr", "pos_x": 500, "pos_y": 700,
+                 "hp_percent": 1.0, "owner": "Multi0", "is_producing": False,
+                 "production_progress": 0.0, "producing_item": "",
+                 "is_powered": True, "is_repairing": False, "sell_value": 0,
+                 "rally_x": -1, "rally_y": -1, "power_amount": 0,
+                 "can_produce": [], "cell_x": 5, "cell_y": 7},
+                {"actor_id": 4, "type": "proc", "pos_x": 500, "pos_y": 800,
+                 "hp_percent": 1.0, "owner": "Multi0", "is_producing": False,
+                 "production_progress": 0.0, "producing_item": "",
+                 "is_powered": True, "is_repairing": False, "sell_value": 0,
+                 "rally_x": -1, "rally_y": -1, "power_amount": 0,
+                 "can_produce": [], "cell_x": 5, "cell_y": 8},
+            ],
+            "production": [],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 128, "height": 128, "map_name": "Test"},
+            "available_production": [],
+        }
+        env, mcp = _make_env_with_tools(obs)
+        tool = mcp._tool_manager._tools["get_game_state"]
+        result = tool.fn()
+        alerts = result["alerts"]
+        # Should have: LOW POWER (priority 2), DAMAGED (priority 5),
+        # IDLE ARMY (priority 7), STANCE (priority 7)
+        assert any("LOW POWER" in a for a in alerts)
+        assert any("DAMAGED" in a for a in alerts)
+        # LOW POWER should come before DAMAGED
+        low_power_idx = next(i for i, a in enumerate(alerts) if "LOW POWER" in a)
+        damaged_idx = next(i for i, a in enumerate(alerts) if "DAMAGED" in a)
+        assert low_power_idx < damaged_idx
+
+    def test_max_alerts_caps_output(self):
+        """max_alerts limits the number of alerts returned."""
+        obs = {
+            "tick": 1000, "done": False, "result": "",
+            "economy": {
+                "cash": 5000, "ore": 0,
+                "power_provided": 50, "power_drained": 100,
+                "resource_capacity": 5000, "harvester_count": 1,
+            },
+            "military": {
+                "units_killed": 0, "units_lost": 0,
+                "buildings_killed": 0, "buildings_lost": 0,
+                "army_value": 500, "active_unit_count": 5,
+            },
+            "units": [
+                {"actor_id": i, "type": "e1", "pos_x": 100, "pos_y": 100,
+                 "cell_x": 1, "cell_y": 1, "hp_percent": 1.0, "is_idle": True,
+                 "current_activity": "", "owner": "Multi0", "can_attack": True,
+                 "facing": 0, "experience_level": 0, "stance": 1, "speed": 71,
+                 "attack_range": 5120, "passenger_count": -1, "is_building": False}
+                for i in range(10, 15)
+            ],
+            "buildings": [
+                {"actor_id": 1, "type": "fact", "pos_x": 500, "pos_y": 500,
+                 "hp_percent": 0.3, "owner": "Multi0", "is_producing": False,
+                 "production_progress": 0.0, "producing_item": "",
+                 "is_powered": True, "is_repairing": False, "sell_value": 0,
+                 "rally_x": -1, "rally_y": -1, "power_amount": 0,
+                 "can_produce": [], "cell_x": 5, "cell_y": 5},
+                {"actor_id": 2, "type": "powr", "pos_x": 500, "pos_y": 600,
+                 "hp_percent": 1.0, "owner": "Multi0", "is_producing": False,
+                 "production_progress": 0.0, "producing_item": "",
+                 "is_powered": True, "is_repairing": False, "sell_value": 150,
+                 "rally_x": -1, "rally_y": -1, "power_amount": 100,
+                 "can_produce": [], "cell_x": 5, "cell_y": 6},
+                {"actor_id": 3, "type": "barr", "pos_x": 500, "pos_y": 700,
+                 "hp_percent": 1.0, "owner": "Multi0", "is_producing": False,
+                 "production_progress": 0.0, "producing_item": "",
+                 "is_powered": True, "is_repairing": False, "sell_value": 0,
+                 "rally_x": -1, "rally_y": -1, "power_amount": 0,
+                 "can_produce": [], "cell_x": 5, "cell_y": 7},
+                {"actor_id": 4, "type": "proc", "pos_x": 500, "pos_y": 800,
+                 "hp_percent": 1.0, "owner": "Multi0", "is_producing": False,
+                 "production_progress": 0.0, "producing_item": "",
+                 "is_powered": True, "is_repairing": False, "sell_value": 0,
+                 "rally_x": -1, "rally_y": -1, "power_amount": 0,
+                 "can_produce": [], "cell_x": 5, "cell_y": 8},
+            ],
+            "production": [],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 128, "height": 128, "map_name": "Test"},
+            "available_production": [],
+        }
+        env, mcp = _make_env_with_tools(obs)
+        # Set max_alerts to 2
+        env._app_config.alerts.max_alerts = 2
+        tool = mcp._tool_manager._tools["get_game_state"]
+        result = tool.fn()
+        assert len(result["alerts"]) <= 2
+
+    def test_max_alerts_zero_means_unlimited(self):
+        """max_alerts=0 means no cap (default)."""
+        obs = {
+            "tick": 1000, "done": False, "result": "",
+            "economy": {
+                "cash": 5000, "ore": 0,
+                "power_provided": 50, "power_drained": 100,
+                "resource_capacity": 5000, "harvester_count": 1,
+            },
+            "military": {
+                "units_killed": 0, "units_lost": 0,
+                "buildings_killed": 0, "buildings_lost": 0,
+                "army_value": 500, "active_unit_count": 5,
+            },
+            "units": [
+                {"actor_id": i, "type": "e1", "pos_x": 100, "pos_y": 100,
+                 "cell_x": 1, "cell_y": 1, "hp_percent": 1.0, "is_idle": True,
+                 "current_activity": "", "owner": "Multi0", "can_attack": True,
+                 "facing": 0, "experience_level": 0, "stance": 1, "speed": 71,
+                 "attack_range": 5120, "passenger_count": -1, "is_building": False}
+                for i in range(10, 15)
+            ],
+            "buildings": [
+                {"actor_id": 1, "type": "fact", "pos_x": 500, "pos_y": 500,
+                 "hp_percent": 0.3, "owner": "Multi0", "is_producing": False,
+                 "production_progress": 0.0, "producing_item": "",
+                 "is_powered": True, "is_repairing": False, "sell_value": 0,
+                 "rally_x": -1, "rally_y": -1, "power_amount": 0,
+                 "can_produce": [], "cell_x": 5, "cell_y": 5},
+                {"actor_id": 2, "type": "powr", "pos_x": 500, "pos_y": 600,
+                 "hp_percent": 1.0, "owner": "Multi0", "is_producing": False,
+                 "production_progress": 0.0, "producing_item": "",
+                 "is_powered": True, "is_repairing": False, "sell_value": 150,
+                 "rally_x": -1, "rally_y": -1, "power_amount": 100,
+                 "can_produce": [], "cell_x": 5, "cell_y": 6},
+                {"actor_id": 3, "type": "barr", "pos_x": 500, "pos_y": 700,
+                 "hp_percent": 1.0, "owner": "Multi0", "is_producing": False,
+                 "production_progress": 0.0, "producing_item": "",
+                 "is_powered": True, "is_repairing": False, "sell_value": 0,
+                 "rally_x": -1, "rally_y": -1, "power_amount": 0,
+                 "can_produce": [], "cell_x": 5, "cell_y": 7},
+                {"actor_id": 4, "type": "proc", "pos_x": 500, "pos_y": 800,
+                 "hp_percent": 1.0, "owner": "Multi0", "is_producing": False,
+                 "production_progress": 0.0, "producing_item": "",
+                 "is_powered": True, "is_repairing": False, "sell_value": 0,
+                 "rally_x": -1, "rally_y": -1, "power_amount": 0,
+                 "can_produce": [], "cell_x": 5, "cell_y": 8},
+            ],
+            "production": [],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 128, "height": 128, "map_name": "Test"},
+            "available_production": [],
+        }
+        env, mcp = _make_env_with_tools(obs)
+        assert env._app_config.alerts.max_alerts == 0
+        tool = mcp._tool_manager._tools["get_game_state"]
+        result = tool.fn()
+        # Should have multiple alerts (LOW POWER, DAMAGED, IDLE ARMY, STANCE, etc.)
+        assert len(result["alerts"]) >= 3
+
+
+class TestProductionItemsTicks:
+    """Production items in get_game_state should include remaining ticks."""
+
+    def test_production_items_include_ticks(self):
+        obs = {
+            "tick": 500, "done": False, "result": "",
+            "economy": {
+                "cash": 5000, "ore": 0,
+                "power_provided": 200, "power_drained": 50,
+                "resource_capacity": 5000, "harvester_count": 1,
+            },
+            "military": {
+                "units_killed": 0, "units_lost": 0,
+                "buildings_killed": 0, "buildings_lost": 0,
+                "army_value": 0, "active_unit_count": 0,
+            },
+            "units": [],
+            "buildings": [
+                {"actor_id": 1, "type": "fact", "pos_x": 500, "pos_y": 500,
+                 "hp_percent": 1.0, "owner": "Multi0", "is_producing": False,
+                 "production_progress": 0.0, "producing_item": "",
+                 "is_powered": True, "is_repairing": False, "sell_value": 0,
+                 "rally_x": -1, "rally_y": -1, "power_amount": 0,
+                 "can_produce": [], "cell_x": 5, "cell_y": 5},
+            ],
+            "production": [
+                {"queue_type": "Building", "item": "powr", "progress": 0.45,
+                 "remaining_ticks": 99},
+                {"queue_type": "Defense", "item": "e1", "progress": 0.8,
+                 "remaining_ticks": 12},
+            ],
+            "visible_enemies": [], "visible_enemy_buildings": [],
+            "map_info": {"width": 128, "height": 128, "map_name": "Test"},
+            "available_production": [],
+        }
+        env, mcp = _make_env_with_tools(obs)
+        tool = mcp._tool_manager._tools["get_game_state"]
+        result = tool.fn()
+        items = result["production_items"]
+        assert "powr@45%(~99 ticks)" in items[0]
+        assert "e1@80%(~12 ticks)" in items[1]
+
+
+class TestEstimateBuildTicks:
+    """Test the _estimate_build_ticks helper."""
+
+    def test_powr_300_cost(self):
+        from openra_env.server.openra_environment import _estimate_build_ticks
+        assert _estimate_build_ticks(300) == 180  # 300 * 60 / 100
+
+    def test_e1_100_cost(self):
+        from openra_env.server.openra_environment import _estimate_build_ticks
+        assert _estimate_build_ticks(100) == 60
+
+    def test_proc_2000_cost(self):
+        from openra_env.server.openra_environment import _estimate_build_ticks
+        assert _estimate_build_ticks(2000) == 1200
+
+    def test_zero_cost(self):
+        from openra_env.server.openra_environment import _estimate_build_ticks
+        assert _estimate_build_ticks(0) == 0
+
+
+# ─── Movement ETA Tests ─────────────────────────────────────────────────────
+
+
+class TestMovementETA:
+    """Test the _estimate_move_ticks helper and ETA in unit feedback."""
+
+    def test_estimate_basic(self):
+        from openra_env.server.openra_environment import _estimate_move_ticks
+        # e1 speed=56, moving 20 cells: 20*1024/56 = 365
+        assert _estimate_move_ticks(56, 0, 0, 10, 10) == 20 * 1024 // 56
+
+    def test_estimate_zero_speed(self):
+        from openra_env.server.openra_environment import _estimate_move_ticks
+        assert _estimate_move_ticks(0, 0, 0, 10, 10) == 0
+
+    def test_estimate_same_position(self):
+        from openra_env.server.openra_environment import _estimate_move_ticks
+        assert _estimate_move_ticks(56, 5, 5, 5, 5) == 0
+
+    def test_estimate_fast_unit(self):
+        from openra_env.server.openra_environment import _estimate_move_ticks
+        # 1tnk speed=113, 10 cells
+        eta = _estimate_move_ticks(113, 0, 0, 5, 5)
+        assert eta == 10 * 1024 // 113
+
+    def test_unit_feedback_includes_eta(self):
+        """_add_unit_feedback adds eta_ticks when target is provided."""
+        from openra_env.config import OpenRARLConfig
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        env._app_config = OpenRARLConfig()
+        env._last_obs = {
+            "units": [
+                {"actor_id": 1, "type": "e1", "cell_x": 10, "cell_y": 10,
+                 "speed": 56, "current_activity": "Move"},
+            ]
+        }
+        result = {}
+        env._add_unit_feedback(result, [1], target_x=20, target_y=10)
+        assert "commanded_units" in result
+        unit = result["commanded_units"][0]
+        assert "eta_ticks" in unit
+        assert "eta_seconds" in unit
+        assert unit["eta_ticks"] == 10 * 1024 // 56
+        assert "note" in result
+        assert "ticks" in result["note"]
+
+    def test_unit_feedback_no_eta_without_target(self):
+        """_add_unit_feedback omits eta when no target provided."""
+        from openra_env.config import OpenRARLConfig
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        env._app_config = OpenRARLConfig()
+        env._last_obs = {
+            "units": [
+                {"actor_id": 1, "type": "e1", "cell_x": 10, "cell_y": 10,
+                 "speed": 56, "current_activity": "Idle"},
+            ]
+        }
+        result = {}
+        env._add_unit_feedback(result, [1])
+        unit = result["commanded_units"][0]
+        assert "eta_ticks" not in unit
+        assert "note" not in result
+
+    def test_unit_feedback_slowest_eta_in_note(self):
+        """ETA note uses the slowest unit's arrival time."""
+        from openra_env.config import OpenRARLConfig
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        env._app_config = OpenRARLConfig()
+        env._last_obs = {
+            "units": [
+                {"actor_id": 1, "type": "e1", "cell_x": 0, "cell_y": 0,
+                 "speed": 56, "current_activity": "Move"},
+                {"actor_id": 2, "type": "1tnk", "cell_x": 0, "cell_y": 0,
+                 "speed": 113, "current_activity": "Move"},
+            ]
+        }
+        result = {}
+        env._add_unit_feedback(result, [1, 2], target_x=10, target_y=0)
+        # e1 is slower, so its ETA should be in the note
+        e1_eta = 10 * 1024 // 56
+        assert str(e1_eta) in result["note"]
+
+
+# ─── Enhanced Compression Tests ──────────────────────────────────────────────
+
+
+class TestEnhancedCompression:
+    """Test the enhanced compress_history function."""
+
+    def test_trigger_threshold_default(self):
+        """Default trigger = keep_last * 2."""
+        from openra_env.agent import compress_history
+        messages = [
+            {"role": "system", "content": "sys"},
+            *[{"role": "user", "content": f"m{i}"} for i in range(50)],
+        ]
+        # keep_last=40, trigger=0 → threshold=80. 51 < 80, no compression.
+        result = compress_history(messages, keep_last=40)
+        assert len(result) == 51
+
+    def test_trigger_threshold_custom(self):
+        """Custom trigger fires earlier."""
+        from openra_env.agent import compress_history
+        messages = [
+            {"role": "system", "content": "sys"},
+            *[{"role": "user", "content": f"m{i}"} for i in range(50)],
+        ]
+        # trigger=30, 51 > 30, should compress to keep_last=10 + system + summary
+        result = compress_history(messages, keep_last=10, trigger=30)
+        assert len(result) == 12  # system + summary + 10 recent
+
+    def test_strategy_extraction(self):
+        """Compression summary includes planning strategy."""
+        from openra_env.agent import compress_history
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "Game started!\nStrategy: Rush with tanks"},
+            *[{"role": "user", "content": f"m{i}"} for i in range(60)],
+        ]
+        result = compress_history(messages, keep_last=10, trigger=20)
+        summary = result[1]["content"]
+        assert "Strategy: Rush with tanks" in summary
+
+    def test_strategy_disabled(self):
+        """Compression skips strategy when include_strategy=False."""
+        from openra_env.agent import compress_history
+        from openra_env.config import CompressionConfig
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "Strategy: Rush with tanks"},
+            *[{"role": "user", "content": f"m{i}"} for i in range(60)],
+        ]
+        comp = CompressionConfig(include_strategy=False)
+        result = compress_history(messages, keep_last=10, trigger=20, compression=comp)
+        summary = result[1]["content"]
+        assert "Strategy:" not in summary
+
+    def test_military_stats_extraction(self):
+        """Compression summary includes military stats from state snapshots."""
+        import json
+        from openra_env.agent import compress_history
+        state = {
+            "tick": 5000, "economy": {"cash": 1200},
+            "own_units": 8, "own_buildings": 6,
+            "military": {"units_killed": 3, "units_lost": 1}
+        }
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "tool", "content": json.dumps(state)},
+            *[{"role": "user", "content": f"m{i}"} for i in range(60)],
+        ]
+        result = compress_history(messages, keep_last=10, trigger=20)
+        summary = result[1]["content"]
+        assert "3 kills" in summary
+        assert "1 loss" in summary
+
+    def test_military_disabled(self):
+        """Military stats skipped when include_military=False."""
+        import json
+        from openra_env.agent import compress_history
+        from openra_env.config import CompressionConfig
+        state = {
+            "tick": 5000, "economy": {"cash": 1200},
+            "own_units": 8, "own_buildings": 6,
+            "military": {"units_killed": 3, "units_lost": 1}
+        }
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "tool", "content": json.dumps(state)},
+            *[{"role": "user", "content": f"m{i}"} for i in range(60)],
+        ]
+        comp = CompressionConfig(include_military=False)
+        result = compress_history(messages, keep_last=10, trigger=20, compression=comp)
+        summary = result[1]["content"]
+        assert "kills" not in summary
+
+    def test_production_tracking(self):
+        """Compression summary tracks produced unit types."""
+        import json
+        from openra_env.agent import compress_history
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "tool", "content": json.dumps({"note": "'e1' ($100 each) queued. ~60 ticks per unit"})},
+            {"role": "tool", "content": json.dumps({"note": "'1tnk' ($800 each) queued. ~480 ticks per unit"})},
+            *[{"role": "user", "content": f"m{i}"} for i in range(60)],
+        ]
+        result = compress_history(messages, keep_last=10, trigger=20)
+        summary = result[1]["content"]
+        assert "Units produced:" in summary
+        assert "e1" in summary
+        assert "1tnk" in summary
+
+    def test_production_disabled(self):
+        """Production tracking skipped when include_production=False."""
+        import json
+        from openra_env.agent import compress_history
+        from openra_env.config import CompressionConfig
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "tool", "content": json.dumps({"note": "'e1' ($100 each) queued. ~60 ticks per unit"})},
+            *[{"role": "user", "content": f"m{i}"} for i in range(60)],
+        ]
+        comp = CompressionConfig(include_production=False)
+        result = compress_history(messages, keep_last=10, trigger=20, compression=comp)
+        summary = result[1]["content"]
+        assert "Units produced:" not in summary
+
+    def test_error_tracking(self):
+        """Compression summary includes recent errors."""
+        import json
+        from openra_env.agent import compress_history
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "tool", "content": json.dumps({"placement_failed": True})},
+            *[{"role": "user", "content": f"m{i}"} for i in range(60)],
+        ]
+        result = compress_history(messages, keep_last=10, trigger=20)
+        summary = result[1]["content"]
+        assert "placement failed" in summary
+
+
+# ─── State Briefing Format Tests ─────────────────────────────────────────────
+
+
+class TestStateBriefingFormat:
+    """Test format_state_briefing shows unit activity and destination."""
+
+    def test_idle_unit_no_arrow(self):
+        from openra_env.agent import format_state_briefing
+        state = {
+            "tick": 100, "economy": {"cash": 500, "ore": 0, "harvester_count": 1},
+            "power_balance": 10, "own_units": 1, "own_buildings": 0,
+            "units_summary": [
+                {"id": 1, "type": "e1", "cell_x": 10, "cell_y": 10,
+                 "idle": True, "can_attack": True, "stance": 0, "activity": "Idle"}
+            ],
+            "buildings_summary": [], "enemy_summary": [], "production_items": [],
+            "alerts": [],
+        }
+        text = format_state_briefing(state)
+        assert "1@(10,10)" in text
+        assert "→" not in text.split("Units:")[1].split("|")[0]  # no arrow for idle
+
+    def test_moving_unit_with_target(self):
+        from openra_env.agent import format_state_briefing
+        state = {
+            "tick": 200, "economy": {"cash": 500, "ore": 0, "harvester_count": 1},
+            "power_balance": 10, "own_units": 1, "own_buildings": 0,
+            "units_summary": [
+                {"id": 1, "type": "e1", "cell_x": 10, "cell_y": 10,
+                 "idle": False, "can_attack": True, "stance": 0, "activity": "Move",
+                 "target_x": 30, "target_y": 20}
+            ],
+            "buildings_summary": [], "enemy_summary": [], "production_items": [],
+            "alerts": [],
+        }
+        text = format_state_briefing(state)
+        assert "1@(10,10)→(30,20)" in text
+
+    def test_moving_unit_without_target_shows_activity(self):
+        from openra_env.agent import format_state_briefing
+        state = {
+            "tick": 300, "economy": {"cash": 500, "ore": 0, "harvester_count": 1},
+            "power_balance": 10, "own_units": 1, "own_buildings": 0,
+            "units_summary": [
+                {"id": 1, "type": "e1", "cell_x": 10, "cell_y": 10,
+                 "idle": False, "can_attack": True, "stance": 0, "activity": "AttackMove"}
+            ],
+            "buildings_summary": [], "enemy_summary": [], "production_items": [],
+            "alerts": [],
+        }
+        text = format_state_briefing(state)
+        # Should show short activity tag
+        assert "→att" in text
+
+    def test_mixed_idle_and_moving(self):
+        from openra_env.agent import format_state_briefing
+        state = {
+            "tick": 400, "economy": {"cash": 500, "ore": 0, "harvester_count": 1},
+            "power_balance": 10, "own_units": 2, "own_buildings": 0,
+            "units_summary": [
+                {"id": 1, "type": "e1", "cell_x": 5, "cell_y": 5,
+                 "idle": True, "can_attack": True, "stance": 0, "activity": "Idle"},
+                {"id": 2, "type": "e1", "cell_x": 10, "cell_y": 10,
+                 "idle": False, "can_attack": True, "stance": 0, "activity": "Move",
+                 "target_x": 20, "target_y": 15},
+            ],
+            "buildings_summary": [], "enemy_summary": [], "production_items": [],
+            "alerts": [],
+        }
+        text = format_state_briefing(state)
+        assert "1@(5,5)" in text  # idle, no arrow
+        assert "2@(10,10)→(20,15)" in text  # moving with target
+
+
+# ─── Defense Placement Bias Tests ────────────────────────────────────────────
+
+
+class TestDefensePlacementBias:
+    """Defense buildings should be placed toward the enemy, not behind the base."""
+
+    def test_defense_placed_toward_enemy(self):
+        """A gun turret should be placed on the enemy side of the CY."""
+        from openra_env.config import OpenRARLConfig
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        env._app_config = OpenRARLConfig()
+
+        # CY at (10, 10), enemy is to the right (high x)
+        obs = {
+            "buildings": [{"actor_id": 1, "type": "fact", "cell_x": 10, "cell_y": 10}],
+            "visible_enemies": [{"actor_id": 99, "type": "e1", "cell_x": 50, "cell_y": 10}],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 64, "height": 64},
+        }
+        candidates = env._find_placement_candidates("gun", obs)
+        assert len(candidates) > 0
+        # Top candidate should be to the RIGHT of CY (toward enemy at x=50)
+        best = candidates[0]
+        assert best["cell_x"] > 10, f"Defense placed at x={best['cell_x']}, expected > 10 (toward enemy)"
+
+    def test_non_defense_closest_to_cy(self):
+        """A non-defense building (powr) should still sort by distance from CY."""
+        from openra_env.config import OpenRARLConfig
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        env._app_config = OpenRARLConfig()
+
+        obs = {
+            "buildings": [{"actor_id": 1, "type": "fact", "cell_x": 10, "cell_y": 10}],
+            "visible_enemies": [{"actor_id": 99, "type": "e1", "cell_x": 50, "cell_y": 10}],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 64, "height": 64},
+        }
+        candidates = env._find_placement_candidates("powr", obs)
+        assert len(candidates) > 0
+        # powr is NOT defense — should be sorted by distance, not biased toward enemy
+        best = candidates[0]
+        assert best["distance"] <= 4, f"Non-defense building placed too far: dist={best['distance']}"
+
+    def test_defense_uses_estimated_enemy_when_none_visible(self):
+        """Defense bias works even with no visible enemies (uses map opposite corner)."""
+        from openra_env.config import OpenRARLConfig
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        env._app_config = OpenRARLConfig()
+
+        # CY at (10, 10) on 64x64 map — enemy estimated at ~(54, 54)
+        obs = {
+            "buildings": [{"actor_id": 1, "type": "fact", "cell_x": 10, "cell_y": 10}],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 64, "height": 64},
+        }
+        candidates = env._find_placement_candidates("pbox", obs)
+        assert len(candidates) > 0
+        best = candidates[0]
+        # Should bias toward bottom-right (enemy direction)
+        assert best["cell_x"] >= 10 and best["cell_y"] >= 10

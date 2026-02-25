@@ -119,7 +119,10 @@ async def get_game_state() -> str:
 
 @mcp.tool()
 async def advance(ticks: int = 50) -> str:
-    """Advance the game by N ticks (~25 ticks = 1 second)."""
+    """Advance the game by N ticks (~25 ticks = 1 second).
+    Production, movement, combat, and auto-placement all require game time.
+    Also triggers auto-placement of buildings queued via build_and_place().
+    Typical build times: power plant ~300 ticks, barracks ~500, war factory ~750."""
     return _format(await _call("advance", ticks=ticks))
 
 
@@ -273,13 +276,17 @@ async def build_unit(unit_type: str, count: int = 1) -> str:
 
 @mcp.tool()
 async def build_structure(building_type: str) -> str:
-    """Start constructing a building. Must be placed after completion."""
+    """Start constructing a building (manual placement workflow).
+    Call advance(ticks) to let construction finish, then place_building() to place it.
+    Prefer build_and_place() which handles placement automatically."""
     return _format(await _call("build_structure", building_type=building_type))
 
 
 @mcp.tool()
 async def build_and_place(building_type: str, cell_x: int = 0, cell_y: int = 0) -> str:
-    """Queue a building and auto-place it when done. The easiest way to build."""
+    """Build a structure and auto-place it when construction finishes.
+    Call advance(ticks) after this to let construction complete — placement is automatic.
+    Do NOT call place_building() on buildings queued this way."""
     return _format(await _call("build_and_place", building_type=building_type, cell_x=cell_x, cell_y=cell_y))
 
 
@@ -287,7 +294,9 @@ async def build_and_place(building_type: str, cell_x: int = 0, cell_y: int = 0) 
 
 @mcp.tool()
 async def place_building(building_type: str, cell_x: int = 0, cell_y: int = 0) -> str:
-    """Place a completed building at a specific cell."""
+    """Place a completed building on the map (only for build_structure workflow).
+    Do NOT use on buildings queued via build_and_place() — those auto-place via advance().
+    Cell coordinates are optional — engine auto-finds position if omitted."""
     return _format(await _call("place_building", building_type=building_type, cell_x=cell_x, cell_y=cell_y))
 
 
@@ -401,13 +410,15 @@ async def command_group(
 
 @mcp.tool()
 async def batch(actions: list[dict]) -> str:
-    """Execute multiple actions simultaneously in one tick. Example: [{"tool":"build_unit","unit_type":"e1"}]"""
+    """Execute multiple actions simultaneously in one tick. Does NOT advance game time.
+    Cannot contain advance() or query tools. Example: [{"tool":"build_unit","unit_type":"e1"}]"""
     return _format(await _call("batch", actions=actions))
 
 
 @mcp.tool()
 async def plan(steps: list[dict]) -> str:
-    """Execute steps sequentially with state refresh between each."""
+    """Execute steps sequentially with state refresh between each.
+    Does NOT advance game time between steps — use advance() standalone for that."""
     return _format(await _call("plan", steps=steps))
 
 
