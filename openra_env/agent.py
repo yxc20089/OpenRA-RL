@@ -986,11 +986,60 @@ async def run_agent(config, verbose: bool = False):
             print(f"  (could not get final state: {e})")
 
         # Get replay
+        replay = {}
         try:
             replay = await env.call_tool("get_replay_path")
             if replay.get("path"):
                 print(f"Replay: {replay['path']}")
         except Exception:
             pass
+
+        # Auto-export bench submission JSON
+        try:
+            from datetime import datetime, timezone
+            from pathlib import Path
+
+            sub = {
+                "agent_name": llm_config.model,
+                "agent_type": "LLM",
+                "opponent": config.opponent.bot_type.capitalize(),
+                "games": 1,
+                "result": final.get("result", ""),
+                "win": final.get("result") == "win",
+                "ticks": final.get("tick", 0),
+                "kills_cost": mil.get("kills_cost", 0),
+                "deaths_cost": mil.get("deaths_cost", 0),
+                "kd_ratio": round(mil.get("kills_cost", 0) / max(mil.get("deaths_cost", 1), 1), 2),
+                "assets_value": mil.get("assets_value", 0),
+                "explored_percent": final.get("explored_percent", 0),
+                "reward_vector": final.get("reward_vector", {}),
+                "replay_path": replay.get("path", ""),
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+            export_dir = Path.home() / ".openra-rl" / "bench-exports"
+            export_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            slug = llm_config.model.replace("/", "_")[:40]
+            export_path = export_dir / f"bench-{slug}-{ts}.json"
+            export_path.write_text(json.dumps(sub, indent=2))
+            print(f"Bench export: {export_path}")
+
+            # Auto-upload to bench if configured
+            bench_url = config.agent.bench_url
+            if bench_url:
+                try:
+                    resp = httpx.post(
+                        f"{bench_url.rstrip('/')}/api/submit",
+                        json={"data": [json.dumps(sub)]},
+                        timeout=30,
+                    )
+                    if resp.status_code == 200:
+                        print(f"Uploaded to bench: {bench_url}")
+                    else:
+                        print(f"  (bench upload failed: HTTP {resp.status_code})")
+                except Exception as e:
+                    print(f"  (bench upload failed: {e})")
+        except Exception as e:
+            print(f"  (bench export failed: {e})")
 
         print("=" * 70)

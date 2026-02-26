@@ -4843,3 +4843,76 @@ class TestStartPlanningRewardDimensions:
         assert "intelligence" in rd
         assert "outcome" in rd
         assert len(rd) == 8
+
+
+# ── Bench Export Tests ──────────────────────────────────────────────────────
+
+
+class TestBenchExportJson:
+    """Tests for the bench export JSON built in agent.py scorecard."""
+
+    def _build_submission(self, mil=None, final=None, replay=None, model="test/model"):
+        """Build a bench submission dict the same way agent.py does."""
+        from datetime import datetime, timezone
+
+        mil = mil or {"kills_cost": 1000, "deaths_cost": 500, "assets_value": 8000}
+        final = final or {"result": "loss", "tick": 5000, "explored_percent": 45.0, "reward_vector": {"combat": 0.5}}
+        replay = replay or {"path": "/tmp/test.orarep"}
+
+        return {
+            "agent_name": model,
+            "agent_type": "LLM",
+            "opponent": "Beginner",
+            "games": 1,
+            "result": final.get("result", ""),
+            "win": final.get("result") == "win",
+            "ticks": final.get("tick", 0),
+            "kills_cost": mil.get("kills_cost", 0),
+            "deaths_cost": mil.get("deaths_cost", 0),
+            "kd_ratio": round(mil.get("kills_cost", 0) / max(mil.get("deaths_cost", 1), 1), 2),
+            "assets_value": mil.get("assets_value", 0),
+            "explored_percent": final.get("explored_percent", 0),
+            "reward_vector": final.get("reward_vector", {}),
+            "replay_path": replay.get("path", ""),
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+    def test_required_fields_present(self):
+        """Bench submission JSON must have all fields the API expects."""
+        sub = self._build_submission()
+        required = {"agent_name", "agent_type", "opponent", "result", "ticks",
+                     "kills_cost", "deaths_cost", "assets_value"}
+        missing = required - set(sub.keys())
+        assert not missing, f"Missing required fields: {missing}"
+
+    def test_kd_ratio_handles_zero_deaths(self):
+        """K/D ratio should not crash when deaths_cost is 0."""
+        sub = self._build_submission(mil={"kills_cost": 500, "deaths_cost": 0, "assets_value": 3000})
+        assert sub["kd_ratio"] == 500.0
+
+    def test_win_flag_matches_result(self):
+        """win boolean should be True only when result is 'win'."""
+        loss = self._build_submission(final={"result": "loss", "tick": 100, "explored_percent": 0, "reward_vector": {}})
+        assert loss["win"] is False
+
+        win = self._build_submission(final={"result": "win", "tick": 100, "explored_percent": 0, "reward_vector": {}})
+        assert win["win"] is True
+
+    def test_json_serializable(self):
+        """Submission dict must be fully JSON-serializable."""
+        import json
+        sub = self._build_submission()
+        serialized = json.dumps(sub)
+        roundtripped = json.loads(serialized)
+        assert roundtripped["agent_name"] == "test/model"
+        assert roundtripped["kills_cost"] == 1000
+
+    def test_model_slug_in_filename(self):
+        """Export filename should contain a sanitized model slug."""
+        from datetime import datetime, timezone
+        model = "qwen/qwen3-coder-next"
+        slug = model.replace("/", "_")[:40]
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        filename = f"bench-{slug}-{ts}.json"
+        assert "qwen_qwen3-coder-next" in filename
+        assert "/" not in filename
