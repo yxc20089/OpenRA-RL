@@ -92,6 +92,21 @@ def main() -> None:
     replay_sub.add_parser("copy", help="Copy replays from Docker to ~/.openra-rl/replays/")
     replay_sub.add_parser("stop", help="Stop the replay viewer")
 
+    # ── bench ─────────────────────────────────────────────────────────
+    bench_parser = subparsers.add_parser("bench", help="Benchmark leaderboard tools")
+    bench_sub = bench_parser.add_subparsers(dest="bench_command")
+
+    bench_submit_parser = bench_sub.add_parser("submit", help="Upload game result JSON to the leaderboard")
+    bench_submit_parser.add_argument("json_file", type=str, help="Path to bench export JSON file")
+    bench_submit_parser.add_argument("--agent-name", default=None, help="Override agent name")
+    bench_submit_parser.add_argument("--agent-type", default=None, help="Override agent type (Scripted/LLM/RL)")
+    bench_submit_parser.add_argument("--agent-url", default=None, help="GitHub/project URL")
+    bench_submit_parser.add_argument("--replay", default=None, help="Path to .orarep replay file")
+    bench_submit_parser.add_argument(
+        "--bench-url", default=None,
+        help="Bench leaderboard URL (default: https://openra-rl-openra-bench.hf.space)",
+    )
+
     # ── doctor ──────────────────────────────────────────────────────
     subparsers.add_parser("doctor", help="Check system prerequisites")
 
@@ -166,6 +181,25 @@ def main() -> None:
             server_url=args.server_url,
             port=args.port,
         )
+    elif args.command == "bench":
+        if args.bench_command == "submit":
+            from openra_env.bench_submit import main as bench_submit_main
+            # Patch sys.argv so bench_submit's argparse sees the right args
+            submit_argv = ["openra-rl bench submit", args.json_file]
+            if args.agent_name:
+                submit_argv += ["--agent-name", args.agent_name]
+            if args.agent_type:
+                submit_argv += ["--agent-type", args.agent_type]
+            if args.agent_url:
+                submit_argv += ["--agent-url", args.agent_url]
+            if args.replay:
+                submit_argv += ["--replay", args.replay]
+            if args.bench_url:
+                submit_argv += ["--bench-url", args.bench_url]
+            sys.argv = submit_argv
+            bench_submit_main()
+        else:
+            bench_parser.print_help()
     elif args.command == "doctor":
         commands.cmd_doctor()
     elif args.command == "version":

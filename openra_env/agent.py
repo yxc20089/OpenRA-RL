@@ -986,11 +986,56 @@ async def run_agent(config, verbose: bool = False):
             print(f"  (could not get final state: {e})")
 
         # Get replay
+        replay = {}
         try:
             replay = await env.call_tool("get_replay_path")
             if replay.get("path"):
                 print(f"Replay: {replay['path']}")
         except Exception:
             pass
+
+        # Auto-export bench submission JSON
+        try:
+            from datetime import datetime, timezone
+            from pathlib import Path
+
+            resolved_name = config.agent.agent_name or llm_config.model
+            sub = {
+                "agent_name": resolved_name,
+                "agent_type": config.agent.agent_type or "LLM",
+                "agent_url": config.agent.agent_url,
+                "opponent": config.opponent.bot_type.capitalize(),
+                "games": 1,
+                "result": final.get("result", ""),
+                "win": final.get("result") == "win",
+                "ticks": final.get("tick", 0),
+                "kills_cost": mil.get("kills_cost", 0),
+                "deaths_cost": mil.get("deaths_cost", 0),
+                "kd_ratio": round(mil.get("kills_cost", 0) / max(mil.get("deaths_cost", 1), 1), 2),
+                "assets_value": mil.get("assets_value", 0),
+                "explored_percent": final.get("explored_percent", 0),
+                "reward_vector": final.get("reward_vector", {}),
+                "replay_path": replay.get("path", ""),
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+            export_dir = Path.home() / ".openra-rl" / "bench-exports"
+            export_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            slug = resolved_name.replace("/", "_")[:40]
+            export_path = export_dir / f"bench-{slug}-{ts}.json"
+            export_path.write_text(json.dumps(sub, indent=2))
+            print(f"Bench export: {export_path}")
+
+            # Auto-upload to bench if enabled
+            bench_url = config.agent.bench_url
+            if config.agent.bench_upload and bench_url:
+                try:
+                    from openra_env.bench_submit import gradio_submit
+                    msg = gradio_submit(bench_url, sub, replay_path=replay.get("path", ""))
+                    print(f"Uploaded to bench: {msg}")
+                except Exception as e:
+                    print(f"  (bench upload failed: {e})")
+        except Exception as e:
+            print(f"  (bench export failed: {e})")
 
         print("=" * 70)

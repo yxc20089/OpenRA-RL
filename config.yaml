@@ -118,6 +118,11 @@ opponent:
 #   max_time_s: 1800                  # 30 minutes ($MAX_TIME)
 #   verbose: false
 #   log_file: ""                      # Log file path ($LLM_AGENT_LOG)
+#   agent_name: ""                    # Leaderboard display name ($AGENT_NAME); empty = model name
+#   agent_type: ""                    # Scripted/LLM/RL ($AGENT_TYPE); empty = auto-detect
+#   agent_url: ""                     # GitHub/project URL shown on leaderboard ($AGENT_URL)
+#   bench_upload: true                 # Auto-upload results after each game ($BENCH_UPLOAD)
+#   bench_url: "https://openra-rl-openra-bench.hf.space"  # Leaderboard URL ($BENCH_URL)
 
 # ── Prompts ──────────────────────────────────────────────────────────
 # All LLM-facing text. Override individual fields here, or point

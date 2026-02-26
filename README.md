@@ -64,6 +64,7 @@ openra-rl play       Run the LLM agent (wizard on first use)
 openra-rl config     Re-run the setup wizard
 openra-rl server     start | stop | status | logs
 openra-rl replay     watch | list | copy | stop
+openra-rl bench      submit   Upload results to the leaderboard
 openra-rl mcp-server Start MCP stdio server (for OpenClaw / Claude Desktop)
 openra-rl doctor     Check system prerequisites
 openra-rl version    Print version
@@ -374,6 +375,67 @@ The LLM agent interacts through 48 MCP (Model Context Protocol) tools organized 
 
 Tools can be toggled per-category or individually via `config.yaml`.
 
+## Benchmark & Leaderboard
+
+Game results are automatically submitted to the [OpenRA-Bench leaderboard](https://huggingface.co/spaces/openra-rl/OpenRA-Bench) after each game. Disable with `BENCH_UPLOAD=false` or `bench_upload: false` in config.
+
+### Agent identity
+
+Customize how your agent appears on the leaderboard:
+
+```bash
+# Environment variables
+AGENT_NAME="DeathBot-9000" AGENT_TYPE="RL" openra-rl play
+
+# Or in config.yaml
+agent:
+  agent_name: "DeathBot-9000"
+  agent_type: "RL"
+  agent_url: "https://github.com/user/deathbot"  # shown as link on leaderboard
+```
+
+| Variable | Config path | Description |
+|----------|-------------|-------------|
+| `AGENT_NAME` | `agent.agent_name` | Display name (default: model name) |
+| `AGENT_TYPE` | `agent.agent_type` | Scripted / LLM / RL (default: auto-detect) |
+| `AGENT_URL` | `agent.agent_url` | GitHub/project URL shown on leaderboard |
+| `BENCH_UPLOAD` | `agent.bench_upload` | Auto-upload after each game (default: true) |
+| `BENCH_URL` | `agent.bench_url` | Leaderboard URL |
+
+### Manual submission
+
+Upload a saved result (with optional replay file):
+
+```bash
+openra-rl bench submit result.json
+openra-rl bench submit result.json --replay game.orarep --agent-name "MyBot"
+```
+
+### Custom agents
+
+If you're building your own agent (RL, CNN, multi-agent, etc.) that doesn't use the built-in LLM agent, use `build_bench_export()` to create a leaderboard submission from a final observation:
+
+```python
+from openra_env.bench_export import build_bench_export
+
+# obs = final observation from env.step()
+export = build_bench_export(
+    obs,
+    agent_name="DeathBot-9000",
+    agent_type="RL",
+    opponent="Normal",
+    agent_url="https://github.com/user/deathbot",
+    replay_path="/path/to/replay.orarep",
+)
+# Saves JSON to ~/.openra-rl/bench-exports/ and returns dict with "path" key
+```
+
+Then submit:
+
+```bash
+openra-rl bench submit ~/.openra-rl/bench-exports/bench-DeathBot-9000-*.json --replay game.orarep
+```
+
 ## Project Structure
 
 ```
@@ -387,6 +449,8 @@ OpenRA-RL/
 │   ├── models.py               #   Pydantic data models
 │   ├── game_data.py            #   Unit/building stats, tech tree
 │   ├── reward.py               #   Multi-component reward function
+│   ├── bench_export.py         #   Build leaderboard submissions from observations
+│   ├── bench_submit.py         #   Upload results to OpenRA-Bench leaderboard
 │   ├── opponent_intel.py       #   AI opponent profiles
 │   ├── mcp_ws_client.py        #   MCP WebSocket client
 │   ├── server/
