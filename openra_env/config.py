@@ -145,7 +145,8 @@ class AgentConfig(BaseModel):
     max_time_s: int = 1800
     verbose: bool = False
     log_file: str = ""
-    bench_url: str = ""  # empty = no auto-upload. Set to HF Space URL to enable.
+    bench_upload: bool = True  # Auto-upload results to bench after each game
+    bench_url: str = "https://openra-rl-openra-bench.hf.space"
     system_prompt: str = ""  # deprecated — use prompts.system_prompt
     system_prompt_file: str = ""  # deprecated — use prompts.system_prompt_file
 
@@ -404,6 +405,7 @@ _ENV_VAR_MAP: list[tuple[str, str]] = [
     ("OPENRA_URL", "agent.server_url"),
     ("MAX_TIME", "agent.max_time_s"),
     ("LLM_AGENT_LOG", "agent.log_file"),
+    ("BENCH_UPLOAD", "agent.bench_upload"),
     ("BENCH_URL", "agent.bench_url"),
     ("SYSTEM_PROMPT_FILE", "agent.system_prompt_file"),
     # prompts

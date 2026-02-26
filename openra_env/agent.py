@@ -1024,9 +1024,9 @@ async def run_agent(config, verbose: bool = False):
             export_path.write_text(json.dumps(sub, indent=2))
             print(f"Bench export: {export_path}")
 
-            # Auto-upload to bench if configured
+            # Auto-upload to bench if enabled
             bench_url = config.agent.bench_url
-            if bench_url:
+            if config.agent.bench_upload and bench_url:
                 try:
                     resp = httpx.post(
                         f"{bench_url.rstrip('/')}/api/submit",

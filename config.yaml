@@ -118,10 +118,8 @@ opponent:
 #   max_time_s: 1800                  # 30 minutes ($MAX_TIME)
 #   verbose: false
 #   log_file: ""                      # Log file path ($LLM_AGENT_LOG)
-#   bench_url: ""                     # Bench leaderboard URL ($BENCH_URL)
-                                      # Set to upload results after each game.
-                                      # Default: "" (disabled — export saved locally only)
-                                      # Example: "https://openra-rl-openra-bench.hf.space"
+#   bench_upload: true                 # Auto-upload results after each game ($BENCH_UPLOAD)
+#   bench_url: "https://openra-rl-openra-bench.hf.space"  # Leaderboard URL ($BENCH_URL)
 
 # ── Prompts ──────────────────────────────────────────────────────────
 # All LLM-facing text. Override individual fields here, or point

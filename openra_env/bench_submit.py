@@ -1,8 +1,8 @@
 """CLI tool to upload bench export JSON to OpenRA-Bench leaderboard.
 
 Usage:
-    python -m openra_env.bench_submit result.json
-    python -m openra_env.bench_submit result.json --bench-url http://localhost:7860
+    openra-rl bench submit result.json
+    openra-rl bench submit result.json --bench-url http://localhost:7860
 """
 
 import argparse
