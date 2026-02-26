@@ -1028,15 +1028,9 @@ async def run_agent(config, verbose: bool = False):
             bench_url = config.agent.bench_url
             if config.agent.bench_upload and bench_url:
                 try:
-                    resp = httpx.post(
-                        f"{bench_url.rstrip('/')}/api/submit",
-                        json={"data": [json.dumps(sub)]},
-                        timeout=30,
-                    )
-                    if resp.status_code == 200:
-                        print(f"Uploaded to bench: {bench_url}")
-                    else:
-                        print(f"  (bench upload failed: HTTP {resp.status_code})")
+                    from openra_env.bench_submit import gradio_submit
+                    msg = gradio_submit(bench_url, sub)
+                    print(f"Uploaded to bench: {msg}")
                 except Exception as e:
                     print(f"  (bench upload failed: {e})")
         except Exception as e:
