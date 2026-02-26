@@ -59,7 +59,6 @@ def build_bench_export(
         obs_dict = dict(obs)
 
     mil = obs_dict.get("military") or {}
-    eco = obs_dict.get("economy") or {}
     kills = mil.get("kills_cost", 0)
     deaths = mil.get("deaths_cost", 0)
 
