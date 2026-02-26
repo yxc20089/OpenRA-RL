@@ -80,6 +80,7 @@ def gradio_upload_file(bench_url: str, file_path: str, timeout: float = 30) -> d
         "path": paths[0],
         "orig_name": path.name,
         "size": path.stat().st_size,
+        "meta": {"_type": "gradio.FileData"},
     }
 
 
