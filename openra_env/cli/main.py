@@ -98,6 +98,10 @@ def main() -> None:
 
     bench_submit_parser = bench_sub.add_parser("submit", help="Upload game result JSON to the leaderboard")
     bench_submit_parser.add_argument("json_file", type=str, help="Path to bench export JSON file")
+    bench_submit_parser.add_argument("--agent-name", default=None, help="Override agent name")
+    bench_submit_parser.add_argument("--agent-type", default=None, help="Override agent type (Scripted/LLM/RL)")
+    bench_submit_parser.add_argument("--agent-url", default=None, help="GitHub/project URL")
+    bench_submit_parser.add_argument("--replay", default=None, help="Path to .orarep replay file")
     bench_submit_parser.add_argument(
         "--bench-url", default=None,
         help="Bench leaderboard URL (default: https://openra-rl-openra-bench.hf.space)",
@@ -182,6 +186,14 @@ def main() -> None:
             from openra_env.bench_submit import main as bench_submit_main
             # Patch sys.argv so bench_submit's argparse sees the right args
             submit_argv = ["openra-rl bench submit", args.json_file]
+            if args.agent_name:
+                submit_argv += ["--agent-name", args.agent_name]
+            if args.agent_type:
+                submit_argv += ["--agent-type", args.agent_type]
+            if args.agent_url:
+                submit_argv += ["--agent-url", args.agent_url]
+            if args.replay:
+                submit_argv += ["--replay", args.replay]
             if args.bench_url:
                 submit_argv += ["--bench-url", args.bench_url]
             sys.argv = submit_argv

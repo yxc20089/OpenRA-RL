@@ -999,9 +999,11 @@ async def run_agent(config, verbose: bool = False):
             from datetime import datetime, timezone
             from pathlib import Path
 
+            resolved_name = config.agent.agent_name or llm_config.model
             sub = {
-                "agent_name": llm_config.model,
-                "agent_type": "LLM",
+                "agent_name": resolved_name,
+                "agent_type": config.agent.agent_type or "LLM",
+                "agent_url": config.agent.agent_url,
                 "opponent": config.opponent.bot_type.capitalize(),
                 "games": 1,
                 "result": final.get("result", ""),
@@ -1019,7 +1021,7 @@ async def run_agent(config, verbose: bool = False):
             export_dir = Path.home() / ".openra-rl" / "bench-exports"
             export_dir.mkdir(parents=True, exist_ok=True)
             ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            slug = llm_config.model.replace("/", "_")[:40]
+            slug = resolved_name.replace("/", "_")[:40]
             export_path = export_dir / f"bench-{slug}-{ts}.json"
             export_path.write_text(json.dumps(sub, indent=2))
             print(f"Bench export: {export_path}")
@@ -1029,7 +1031,7 @@ async def run_agent(config, verbose: bool = False):
             if config.agent.bench_upload and bench_url:
                 try:
                     from openra_env.bench_submit import gradio_submit
-                    msg = gradio_submit(bench_url, sub)
+                    msg = gradio_submit(bench_url, sub, replay_path=replay.get("path", ""))
                     print(f"Uploaded to bench: {msg}")
                 except Exception as e:
                     print(f"  (bench upload failed: {e})")
