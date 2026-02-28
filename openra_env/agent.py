@@ -35,6 +35,13 @@ def _looks_like_tool_capability_error(error_text: str) -> bool:
     return any(m in text for m in markers)
 
 
+def _bench_export_policy(encountered_agent_error: bool) -> tuple[bool, str]:
+    """Decide whether bench export/upload should run for this match."""
+    if encountered_agent_error:
+        return False, "runtime [ERROR] occurred during the match"
+    return True, ""
+
+
 def _format_llm_api_error(status_code: int, error_text: str, llm_config: LLMConfig) -> str:
     """Map raw provider errors to clear, actionable runtime messages."""
     error_lower = error_text.lower()
@@ -853,6 +860,7 @@ async def run_agent(config, verbose: bool = False):
         total_api_calls = 0
         start_time = time.time()
         game_done = False
+        encountered_agent_error = False
         consecutive_errors = 0
         MAX_CONSECUTIVE_ERRORS = 3
 
@@ -905,6 +913,7 @@ async def run_agent(config, verbose: bool = False):
                 except (httpx.ReadTimeout, httpx.ConnectTimeout):
                     timeout_s = int(llm_config.request_timeout_s)
                     print(f"\n  [ERROR] Request timed out after {timeout_s}s.")
+                    encountered_agent_error = True
                     if is_local:
                         print("  [HINT] Local models can be slow. Increase timeout in config.yaml:")
                         print(f"         llm.request_timeout_s: {timeout_s * 2}")
@@ -919,9 +928,11 @@ async def run_agent(config, verbose: bool = False):
                         await asyncio.sleep(wait)
                     else:
                         print(f"\n  [ERROR] API call failed: {e}")
+                        encountered_agent_error = True
                         break
             if response is None:
                 print("  [ERROR] Stopping agent.")
+                encountered_agent_error = True
                 break
 
             total_api_calls += 1
@@ -987,6 +998,7 @@ async def run_agent(config, verbose: bool = False):
                     consecutive_errors += 1
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                         print(f"\n  GAME CRASHED: {consecutive_errors} consecutive connection errors. Stopping.")
+                        encountered_agent_error = True
                         game_done = True
 
                 # Format result for message
@@ -1088,47 +1100,51 @@ async def run_agent(config, verbose: bool = False):
             pass
 
         # Auto-export bench submission JSON
-        try:
-            from datetime import datetime, timezone
-            from pathlib import Path
+        should_export, skip_reason = _bench_export_policy(encountered_agent_error)
+        if not should_export:
+            print(f"Skipping bench export/upload: {skip_reason}")
+        else:
+            try:
+                from datetime import datetime, timezone
+                from pathlib import Path
 
-            resolved_name = config.agent.agent_name or llm_config.model
-            sub = {
-                "agent_name": resolved_name,
-                "agent_type": config.agent.agent_type or "LLM",
-                "agent_url": config.agent.agent_url,
-                "opponent": config.opponent.bot_type.capitalize(),
-                "games": 1,
-                "result": final.get("result", ""),
-                "win": final.get("result") == "win",
-                "ticks": final.get("tick", 0),
-                "kills_cost": mil.get("kills_cost", 0),
-                "deaths_cost": mil.get("deaths_cost", 0),
-                "kd_ratio": round(mil.get("kills_cost", 0) / max(mil.get("deaths_cost", 1), 1), 2),
-                "assets_value": mil.get("assets_value", 0),
-                "explored_percent": final.get("explored_percent", 0),
-                "reward_vector": final.get("reward_vector", {}),
-                "replay_path": replay.get("path", ""),
-                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            }
-            export_dir = Path.home() / ".openra-rl" / "bench-exports"
-            export_dir.mkdir(parents=True, exist_ok=True)
-            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            slug = resolved_name.replace("/", "_")[:40]
-            export_path = export_dir / f"bench-{slug}-{ts}.json"
-            export_path.write_text(json.dumps(sub, indent=2))
-            print(f"Bench export: {export_path}")
+                resolved_name = config.agent.agent_name or llm_config.model
+                sub = {
+                    "agent_name": resolved_name,
+                    "agent_type": config.agent.agent_type or "LLM",
+                    "agent_url": config.agent.agent_url,
+                    "opponent": config.opponent.bot_type.capitalize(),
+                    "games": 1,
+                    "result": final.get("result", ""),
+                    "win": final.get("result") == "win",
+                    "ticks": final.get("tick", 0),
+                    "kills_cost": mil.get("kills_cost", 0),
+                    "deaths_cost": mil.get("deaths_cost", 0),
+                    "kd_ratio": round(mil.get("kills_cost", 0) / max(mil.get("deaths_cost", 1), 1), 2),
+                    "assets_value": mil.get("assets_value", 0),
+                    "explored_percent": final.get("explored_percent", 0),
+                    "reward_vector": final.get("reward_vector", {}),
+                    "replay_path": replay.get("path", ""),
+                    "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }
+                export_dir = Path.home() / ".openra-rl" / "bench-exports"
+                export_dir.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                slug = resolved_name.replace("/", "_")[:40]
+                export_path = export_dir / f"bench-{slug}-{ts}.json"
+                export_path.write_text(json.dumps(sub, indent=2))
+                print(f"Bench export: {export_path}")
 
-            # Auto-upload to bench if enabled
-            bench_url = config.agent.bench_url
-            if config.agent.bench_upload and bench_url:
-                try:
-                    from openra_env.bench_submit import gradio_submit
-                    msg = gradio_submit(bench_url, sub, replay_path=replay.get("path", ""))
-                    print(f"Uploaded to bench: {msg}")
-                except Exception as e:
-                    print(f"  (bench upload failed: {e})")
-        except Exception as e:
-            print(f"  (bench export failed: {e})")
+                # Auto-upload to bench if enabled
+                bench_url = config.agent.bench_url
+                if config.agent.bench_upload and bench_url:
+                    try:
+                        from openra_env.bench_submit import gradio_submit
+                        msg = gradio_submit(bench_url, sub, replay_path=replay.get("path", ""))
+                        print(f"Uploaded to bench: {msg}")
+                    except Exception as e:
+                        print(f"  (bench upload failed: {e})")
+            except Exception as e:
+                print(f"  (bench export failed: {e})")
 
         print("=" * 70)

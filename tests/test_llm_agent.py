@@ -2,7 +2,7 @@
 
 import pytest
 
-from openra_env.agent import _format_llm_api_error, _sanitize_messages
+from openra_env.agent import _bench_export_policy, _format_llm_api_error, _sanitize_messages
 from openra_env.config import LLMConfig
 
 
@@ -190,3 +190,17 @@ class TestToolCallingPreflight:
         assert ok is True
         assert err == ""
         assert called is False
+
+
+class TestBenchExportPolicy:
+    """Tests for when bench export/upload is allowed."""
+
+    def test_skip_export_when_runtime_error_occurred(self):
+        should_export, reason = _bench_export_policy(encountered_agent_error=True)
+        assert should_export is False
+        assert "runtime [error]" in reason.lower()
+
+    def test_allow_export_when_no_runtime_error(self):
+        should_export, reason = _bench_export_policy(encountered_agent_error=False)
+        assert should_export is True
+        assert reason == ""
