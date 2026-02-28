@@ -204,3 +204,43 @@ class TestBenchExportPolicy:
         should_export, reason = _bench_export_policy(encountered_agent_error=False)
         assert should_export is True
         assert reason == ""
+
+
+class TestRunAgentPreflightAbort:
+    """Regression tests for tool-capability preflight abort path."""
+
+    @pytest.mark.asyncio
+    async def test_openrouter_tool_capability_failure_aborts_before_reset(self, monkeypatch, capsys):
+        from types import SimpleNamespace
+        from openra_env import agent as agent_mod
+
+        cfg = SimpleNamespace(
+            agent=SimpleNamespace(server_url="http://localhost:8000", max_turns=0, max_time_s=1800),
+            llm=LLMConfig(
+                base_url="https://openrouter.ai/api/v1/chat/completions",
+                model="liquid/lfm-2.5-1.2b-thinking:free",
+                request_timeout_s=120.0,
+            ),
+        )
+
+        client_constructed = False
+
+        class _FailIfConstructedClient:
+            def __init__(self, *args, **kwargs):
+                nonlocal client_constructed
+                client_constructed = True
+                raise AssertionError("OpenRAMCPClient should not be constructed on preflight failure")
+
+        async def _fake_preflight(_llm_config):
+            return False, "No endpoints found that support tool use."
+
+        monkeypatch.setattr(agent_mod, "_preflight_tool_calling_support", _fake_preflight)
+        monkeypatch.setattr(agent_mod, "OpenRAMCPClient", _FailIfConstructedClient)
+
+        await agent_mod.run_agent(cfg, verbose=False)
+
+        out = capsys.readouterr().out
+        assert "Checking model route for tool-calling support..." in out
+        assert "Aborting before game launch (no match started)." in out
+        assert "Resetting environment (launching OpenRA)..." not in out
+        assert client_constructed is False
