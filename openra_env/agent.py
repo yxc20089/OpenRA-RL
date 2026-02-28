@@ -18,6 +18,98 @@ from openra_env.mcp_ws_client import OpenRAMCPClient
 
 logger = logging.getLogger("llm_agent")
 
+
+def _looks_like_tool_capability_error(error_text: str) -> bool:
+    """Best-effort detection of provider errors indicating no tool support."""
+    text = error_text.lower()
+    markers = (
+        "support tool use",
+        "no endpoints found",
+        "does not support tool",
+        "tool calling",
+        "tools are not supported",
+        "unsupported parameter",
+    )
+    if "no endpoints found" in text and "tool" in text:
+        return True
+    return any(m in text for m in markers)
+
+
+def _format_llm_api_error(status_code: int, error_text: str, llm_config: LLMConfig) -> str:
+    """Map raw provider errors to clear, actionable runtime messages."""
+    error_lower = error_text.lower()
+
+    if status_code in (401, 403):
+        return (
+            f"Authentication failed ({status_code}). "
+            "Check your API key: openra-rl config"
+        )
+
+    if status_code == 400 and "model" in error_lower:
+        return (
+            f"Invalid model ID '{llm_config.model}'. "
+            "Update with: openra-rl config"
+        )
+
+    if status_code == 429:
+        return "Rate limited by LLM provider. Wait a minute and retry."
+
+    if status_code == 404 and _looks_like_tool_capability_error(error_text):
+        is_openrouter = "openrouter.ai" in llm_config.base_url.lower()
+        if is_openrouter:
+            return (
+                f"Model '{llm_config.model}' has no OpenRouter route that supports tool calling. "
+                "OpenRA-RL requires tool-calling models. "
+                "Use a tool-capable model/route (often not ':free'), or use Ollama "
+                "with qwen3:32b or qwen3:4b."
+            )
+        return (
+            f"Model '{llm_config.model}' does not support tool calling on this endpoint. "
+            "OpenRA-RL requires tool-calling models."
+        )
+
+    return f"LLM API error {status_code}: {error_text}"
+
+
+async def _preflight_tool_calling_support(llm_config: LLMConfig) -> tuple[bool, str]:
+    """Check OpenRouter model route support for tool calling before game start.
+
+    Returns:
+        (True, "") when preflight passes or does not apply.
+        (False, reason) when preflight confirms tools are unsupported.
+    """
+    if "openrouter.ai" not in llm_config.base_url.lower():
+        return True, ""
+
+    preflight_cfg = llm_config.model_copy(
+        update={
+            "max_tokens": 1,
+            "request_timeout_s": min(llm_config.request_timeout_s, 30.0),
+        }
+    )
+    preflight_messages = [
+        {"role": "user", "content": "Tool-calling preflight check. Reply briefly."},
+    ]
+    preflight_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "preflight_ping",
+                "description": "Preflight-only tool for capability check.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    try:
+        await chat_completion(preflight_messages, preflight_tools, preflight_cfg, verbose=False, prompts=None)
+        return True, ""
+    except RuntimeError as e:
+        msg = str(e)
+        if _looks_like_tool_capability_error(msg):
+            return False, msg
+        raise
+
+
 def _load_default_prompt() -> str:
     """Load the default system prompt shipped with the package."""
     from openra_env.prompts import load_default_prompt
@@ -405,21 +497,9 @@ async def chat_completion(
 
         if response.status_code != 200:
             error_text = response.text[:2000]
-            if response.status_code in (401, 403):
-                raise RuntimeError(
-                    f"Authentication failed ({response.status_code}). "
-                    f"Check your API key: openra-rl config"
-                )
-            if response.status_code == 400 and "model" in error_text.lower():
-                raise RuntimeError(
-                    f"Invalid model ID '{llm_config.model}'. "
-                    f"Update with: openra-rl config"
-                )
-            if response.status_code == 429:
-                raise RuntimeError(
-                    "Rate limited by LLM provider. Wait a minute and retry."
-                )
-            raise RuntimeError(f"LLM API error {response.status_code}: {error_text}")
+            raise RuntimeError(
+                _format_llm_api_error(response.status_code, error_text, llm_config)
+            )
 
         try:
             data = response.json()
@@ -590,6 +670,19 @@ async def run_agent(config, verbose: bool = False):
     print(f"Model: {llm_config.model} @ {llm_config.base_url}")
     if is_local:
         print(f"Timeout: {int(llm_config.request_timeout_s)}s (local model)")
+
+    if "openrouter.ai" in llm_config.base_url.lower():
+        print("Checking model route for tool-calling support...")
+        try:
+            preflight_ok, preflight_err = await _preflight_tool_calling_support(llm_config)
+        except Exception as e:
+            print(f"  [ERROR] Preflight check failed: {e}")
+            print("  Aborting before game launch (no match started).")
+            return
+        if not preflight_ok:
+            print(f"  [ERROR] Preflight check failed: {preflight_err}")
+            print("  Aborting before game launch (no match started).")
+            return
 
     async with OpenRAMCPClient(base_url=url, message_timeout_s=300.0) as env:
         print("Resetting environment (launching OpenRA)...")
