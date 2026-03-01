@@ -195,14 +195,16 @@ class TestToolCallingPreflight:
 class TestBenchExportPolicy:
     """Tests for when bench export/upload is allowed."""
 
-    def test_skip_export_when_runtime_error_occurred(self):
-        should_export, reason = _bench_export_policy(encountered_agent_error=True)
-        assert should_export is False
+    def test_always_exports_locally_even_on_error(self):
+        should_export, should_upload, reason = _bench_export_policy(encountered_agent_error=True)
+        assert should_export is True
+        assert should_upload is False
         assert "runtime [error]" in reason.lower()
 
-    def test_allow_export_when_no_runtime_error(self):
-        should_export, reason = _bench_export_policy(encountered_agent_error=False)
+    def test_allow_export_and_upload_when_no_runtime_error(self):
+        should_export, should_upload, reason = _bench_export_policy(encountered_agent_error=False)
         assert should_export is True
+        assert should_upload is True
         assert reason == ""
 
 

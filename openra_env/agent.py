@@ -22,24 +22,30 @@ logger = logging.getLogger("llm_agent")
 def _looks_like_tool_capability_error(error_text: str) -> bool:
     """Best-effort detection of provider errors indicating no tool support."""
     text = error_text.lower()
+    # Only match phrases that unambiguously refer to tool-calling capability.
+    # "no endpoints found" is too generic on its own — guard it with "tool".
+    if "no endpoints found" in text and "tool" in text:
+        return True
     markers = (
         "support tool use",
-        "no endpoints found",
         "does not support tool",
         "tool calling",
         "tools are not supported",
-        "unsupported parameter",
     )
-    if "no endpoints found" in text and "tool" in text:
-        return True
     return any(m in text for m in markers)
 
 
-def _bench_export_policy(encountered_agent_error: bool) -> tuple[bool, str]:
-    """Decide whether bench export/upload should run for this match."""
+def _bench_export_policy(encountered_agent_error: bool) -> tuple[bool, bool, str]:
+    """Decide whether bench export and upload should run for this match.
+
+    Returns:
+        (should_export, should_upload, reason)
+        Local export always happens (useful for debugging).
+        Upload is skipped when runtime errors occurred.
+    """
     if encountered_agent_error:
-        return False, "runtime [ERROR] occurred during the match"
-    return True, ""
+        return True, False, "runtime [ERROR] occurred during the match"
+    return True, True, ""
 
 
 def _format_llm_api_error(status_code: int, error_text: str, llm_config: LLMConfig) -> str:
@@ -1099,52 +1105,52 @@ async def run_agent(config, verbose: bool = False):
         except Exception:
             pass
 
-        # Auto-export bench submission JSON
-        should_export, skip_reason = _bench_export_policy(encountered_agent_error)
-        if not should_export:
-            print(f"Skipping bench export/upload: {skip_reason}")
-        else:
-            try:
-                from datetime import datetime, timezone
-                from pathlib import Path
+        # Auto-export bench submission JSON (always local, upload gated on errors)
+        should_export, should_upload, skip_reason = _bench_export_policy(encountered_agent_error)
+        try:
+            from datetime import datetime, timezone
+            from pathlib import Path
 
-                resolved_name = config.agent.agent_name or llm_config.model
-                sub = {
-                    "agent_name": resolved_name,
-                    "agent_type": config.agent.agent_type or "LLM",
-                    "agent_url": config.agent.agent_url,
-                    "opponent": config.opponent.bot_type.capitalize(),
-                    "games": 1,
-                    "result": final.get("result", ""),
-                    "win": final.get("result") == "win",
-                    "ticks": final.get("tick", 0),
-                    "kills_cost": mil.get("kills_cost", 0),
-                    "deaths_cost": mil.get("deaths_cost", 0),
-                    "kd_ratio": round(mil.get("kills_cost", 0) / max(mil.get("deaths_cost", 1), 1), 2),
-                    "assets_value": mil.get("assets_value", 0),
-                    "explored_percent": final.get("explored_percent", 0),
-                    "reward_vector": final.get("reward_vector", {}),
-                    "replay_path": replay.get("path", ""),
-                    "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                }
-                export_dir = Path.home() / ".openra-rl" / "bench-exports"
-                export_dir.mkdir(parents=True, exist_ok=True)
-                ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-                slug = resolved_name.replace("/", "_")[:40]
-                export_path = export_dir / f"bench-{slug}-{ts}.json"
-                export_path.write_text(json.dumps(sub, indent=2))
-                print(f"Bench export: {export_path}")
+            resolved_name = config.agent.agent_name or llm_config.model
+            sub = {
+                "agent_name": resolved_name,
+                "agent_type": config.agent.agent_type or "LLM",
+                "agent_url": config.agent.agent_url,
+                "opponent": config.opponent.bot_type.capitalize(),
+                "games": 1,
+                "result": final.get("result", ""),
+                "win": final.get("result") == "win",
+                "ticks": final.get("tick", 0),
+                "kills_cost": mil.get("kills_cost", 0),
+                "deaths_cost": mil.get("deaths_cost", 0),
+                "kd_ratio": round(mil.get("kills_cost", 0) / max(mil.get("deaths_cost", 1), 1), 2),
+                "assets_value": mil.get("assets_value", 0),
+                "explored_percent": final.get("explored_percent", 0),
+                "reward_vector": final.get("reward_vector", {}),
+                "replay_path": replay.get("path", ""),
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+            export_dir = Path.home() / ".openra-rl" / "bench-exports"
+            export_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            slug = resolved_name.replace("/", "_")[:40]
+            export_path = export_dir / f"bench-{slug}-{ts}.json"
+            export_path.write_text(json.dumps(sub, indent=2))
+            print(f"Bench export: {export_path}")
 
-                # Auto-upload to bench if enabled
-                bench_url = config.agent.bench_url
-                if config.agent.bench_upload and bench_url:
+            # Auto-upload to bench if enabled (skip when agent errors occurred)
+            bench_url = config.agent.bench_url
+            if config.agent.bench_upload and bench_url:
+                if not should_upload:
+                    print(f"Skipping bench upload: {skip_reason}")
+                else:
                     try:
                         from openra_env.bench_submit import gradio_submit
                         msg = gradio_submit(bench_url, sub, replay_path=replay.get("path", ""))
                         print(f"Uploaded to bench: {msg}")
                     except Exception as e:
                         print(f"  (bench upload failed: {e})")
-            except Exception as e:
-                print(f"  (bench export failed: {e})")
+        except Exception as e:
+            print(f"  (bench export failed: {e})")
 
         print("=" * 70)
