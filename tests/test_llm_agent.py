@@ -1,6 +1,9 @@
 """Tests for llm_agent helper functions."""
 
-from openra_env.agent import _sanitize_messages
+import pytest
+
+from openra_env.agent import _bench_export_policy, _format_llm_api_error, _sanitize_messages
+from openra_env.config import LLMConfig
 
 
 class TestSanitizeMessages:
@@ -119,3 +122,127 @@ class TestSanitizeMessages:
         assert roles == ["system", "user", "assistant", "tool", "assistant", "user"]
         assert result[4]["role"] == "assistant"  # bridge
         assert result[5]["content"] == "TURN BRIEFING: tick 500"
+
+
+class TestFormatLLMApiError:
+    """Tests for provider error mapping helper."""
+
+    def test_openrouter_tool_route_error_has_actionable_hint(self):
+        cfg = LLMConfig(
+            base_url="https://openrouter.ai/api/v1/chat/completions",
+            model="liquid/lfm-2.5-1.2b-thinking:free",
+        )
+        msg = _format_llm_api_error(
+            404,
+            (
+                '{"error":{"message":"No endpoints found that support tool use.'
+                ' To learn more about provider routing","code":404}}'
+            ),
+            cfg,
+        )
+        assert "supports tool calling" in msg
+        assert "OpenRA-RL requires tool-calling models" in msg
+        assert "not ':free'" in msg
+
+    def test_auth_error_message_preserved(self):
+        cfg = LLMConfig(model="foo/bar")
+        msg = _format_llm_api_error(401, "unauthorized", cfg)
+        assert "Authentication failed (401)" in msg
+
+
+class TestToolCallingPreflight:
+    """Tests for startup preflight capability checks."""
+
+    @pytest.mark.asyncio
+    async def test_openrouter_unsupported_tools_is_blocked(self, monkeypatch):
+        from openra_env import agent as agent_mod
+
+        cfg = LLMConfig(
+            base_url="https://openrouter.ai/api/v1/chat/completions",
+            model="liquid/lfm-2.5-1.2b-thinking:free",
+        )
+
+        async def _fake_chat_completion(*args, **kwargs):
+            raise RuntimeError("No endpoints found that support tool use.")
+
+        monkeypatch.setattr(agent_mod, "chat_completion", _fake_chat_completion)
+        ok, err = await agent_mod._preflight_tool_calling_support(cfg)
+        assert ok is False
+        assert "support tool use" in err.lower()
+
+    @pytest.mark.asyncio
+    async def test_non_openrouter_skips_preflight_call(self, monkeypatch):
+        from openra_env import agent as agent_mod
+
+        cfg = LLMConfig(
+            base_url="http://localhost:11434/v1/chat/completions",
+            model="qwen3:4b",
+        )
+        called = False
+
+        async def _fake_chat_completion(*args, **kwargs):
+            nonlocal called
+            called = True
+            return {}
+
+        monkeypatch.setattr(agent_mod, "chat_completion", _fake_chat_completion)
+        ok, err = await agent_mod._preflight_tool_calling_support(cfg)
+        assert ok is True
+        assert err == ""
+        assert called is False
+
+
+class TestBenchExportPolicy:
+    """Tests for when bench export/upload is allowed."""
+
+    def test_always_exports_locally_even_on_error(self):
+        should_export, should_upload, reason = _bench_export_policy(encountered_agent_error=True)
+        assert should_export is True
+        assert should_upload is False
+        assert "runtime [error]" in reason.lower()
+
+    def test_allow_export_and_upload_when_no_runtime_error(self):
+        should_export, should_upload, reason = _bench_export_policy(encountered_agent_error=False)
+        assert should_export is True
+        assert should_upload is True
+        assert reason == ""
+
+
+class TestRunAgentPreflightAbort:
+    """Regression tests for tool-capability preflight abort path."""
+
+    @pytest.mark.asyncio
+    async def test_openrouter_tool_capability_failure_aborts_before_reset(self, monkeypatch, capsys):
+        from types import SimpleNamespace
+        from openra_env import agent as agent_mod
+
+        cfg = SimpleNamespace(
+            agent=SimpleNamespace(server_url="http://localhost:8000", max_turns=0, max_time_s=1800),
+            llm=LLMConfig(
+                base_url="https://openrouter.ai/api/v1/chat/completions",
+                model="liquid/lfm-2.5-1.2b-thinking:free",
+                request_timeout_s=120.0,
+            ),
+        )
+
+        client_constructed = False
+
+        class _FailIfConstructedClient:
+            def __init__(self, *args, **kwargs):
+                nonlocal client_constructed
+                client_constructed = True
+                raise AssertionError("OpenRAMCPClient should not be constructed on preflight failure")
+
+        async def _fake_preflight(_llm_config):
+            return False, "No endpoints found that support tool use."
+
+        monkeypatch.setattr(agent_mod, "_preflight_tool_calling_support", _fake_preflight)
+        monkeypatch.setattr(agent_mod, "OpenRAMCPClient", _FailIfConstructedClient)
+
+        await agent_mod.run_agent(cfg, verbose=False)
+
+        out = capsys.readouterr().out
+        assert "Checking model route for tool-calling support..." in out
+        assert "Aborting before game launch (no match started)." in out
+        assert "Resetting environment (launching OpenRA)..." not in out
+        assert client_constructed is False
