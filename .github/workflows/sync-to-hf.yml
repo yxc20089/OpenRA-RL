@@ -18,7 +18,29 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Inject HuggingFace Spaces frontmatter into README (kept out of GitHub display)
+          HF_FRONT='---
+          title: OpenRA-RL
+          emoji: 🎮
+          colorFrom: red
+          colorTo: blue
+          sdk: docker
+          app_port: 8000
+          tags:
+            - openenv
+            - reinforcement-learning
+            - rts
+          models: []
+          datasets: []
+          pinned: false
+          ---
+          '
+          printf '%s\n' "$HF_FRONT" | sed 's/^          //' | cat - README.md > /tmp/README.md
+          mv /tmp/README.md README.md
+
           # Create an orphan branch with just the current tree (no history)
+          git add -A
           git checkout --orphan hf-sync
           git commit -m "Sync from GitHub ${GITHUB_SHA::7}"
           git remote add hf https://openra-rl:$HF_TOKEN@huggingface.co/spaces/openra-rl/OpenRA-RL

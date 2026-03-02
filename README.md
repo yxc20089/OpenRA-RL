@@ -1,19 +1,3 @@
----
-title: OpenRA-RL
-emoji: 🎮
-colorFrom: red
-colorTo: blue
-sdk: docker
-app_port: 8000
-tags:
-  - openenv
-  - reinforcement-learning
-  - rts
-models: []
-datasets: []
-pinned: false
----
-
 <p align="center">
   <a href="https://openra-rl.dev">
     <img src="docs/banner.png" alt="OpenRA-RL — Command AI To Play Red Alert" width="100%">
