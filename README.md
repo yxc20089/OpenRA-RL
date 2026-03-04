@@ -299,31 +299,103 @@ The replay viewer runs inside Docker using the same engine that recorded the gam
 
 For running the game server natively (macOS/Linux):
 
-### Install dependencies
+### 1. Clone with submodules
+
+`OpenRA/` is a git submodule — clone it alongside the repo:
 
 ```bash
-# Python
+git clone --recurse-submodules https://github.com/yxc20089/OpenRA-RL.git
+```
+
+Or if you already cloned without submodules:
+
+```bash
+git submodule update --init --recursive
+```
+
+### 2. Install Python dependencies
+
+```bash
 pip install -e ".[dev]"
+```
 
-# .NET 8.0 SDK
-# macOS: brew install dotnet@8
-# Ubuntu: sudo apt install dotnet-sdk-8.0
+### 3. Install .NET 8 SDK
 
-# Native libraries (macOS arm64)
+**macOS (Apple Silicon):**
+```bash
+brew install dotnet@8
+echo 'export PATH="/opt/homebrew/opt/dotnet@8/bin:$PATH"' >> ~/.profile
+source ~/.profile
+```
+
+**macOS (Intel):** same, but replace `/opt/homebrew` with `/usr/local`.
+
+**Ubuntu/Debian:**
+```bash
+sudo apt install dotnet-sdk-8.0
+```
+
+**Other Linux:** see https://learn.microsoft.com/dotnet/core/install/linux
+
+### 4. Install native libraries
+
+**macOS:**
+```bash
 brew install sdl2 openal-soft freetype luajit
+```
+
+**Ubuntu/Debian:**
+```bash
+sudo apt install libsdl2-dev libopenal-dev libfreetype-dev libluajit-5.1-dev
+```
+
+### 5. Build OpenRA
+
+```bash
+cd OpenRA && make && cd ..
+```
+
+> **Known build issue (macOS + .NET 8):** If you see `error CS0121: The call is ambiguous` for `CryptoUtil.SHA1Hash` in `OpenRA.Game/Map/Map.cs`, change line 286 from:
+> ```csharp
+> return CryptoUtil.SHA1Hash([]);
+> ```
+> to:
+> ```csharp
+> return CryptoUtil.SHA1Hash(Array.Empty<byte>());
+> ```
+> Then re-run `make`.
+
+### 6. Copy native libraries into OpenRA/bin/ (macOS only)
+
+```bash
 cp $(brew --prefix sdl2)/lib/libSDL2.dylib OpenRA/bin/SDL2.dylib
 cp $(brew --prefix openal-soft)/lib/libopenal.dylib OpenRA/bin/soft_oal.dylib
 cp $(brew --prefix freetype)/lib/libfreetype.dylib OpenRA/bin/freetype6.dylib
 cp $(brew --prefix luajit)/lib/libluajit-5.1.dylib OpenRA/bin/lua51.dylib
 ```
 
-### Build OpenRA
+On Linux this step is not needed.
 
-```bash
-cd OpenRA && make && cd ..
+### 7. Configure config.yaml
+
+Set `game.openra_path` to the absolute path of the `OpenRA/` directory:
+
+```yaml
+game:
+  openra_path: "/path/to/OpenRA-RL/OpenRA"  # use $(pwd)/OpenRA
+  headless: true   # true = no window, runs anywhere (recommended for agents)
+                   # false = opens a real OpenRA window so you can watch live
 ```
 
-### Start the server
+Use `headless: true` for agent training and CI. Use `headless: false` only if you want to watch the game in a live OpenRA window (requires a display and SDL2).
+
+### 8. Run the agent
+
+```bash
+openra-rl play --local --provider ollama --model qwen3:32b
+```
+
+### Start the server manually (optional)
 
 ```bash
 python openra_env/server/app.py
