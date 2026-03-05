@@ -42,7 +42,7 @@ planning_complete: "Planning complete. Game is now live."
 # ── Game Start ───────────────────────────────────────────────────────
 
 # Variables: {strategy_section}, {briefing}, {barracks_type}, {mcv_note}
-game_start: "Game started!{strategy_section}\n\n{briefing}\n\nYour barracks type is '{barracks_type}'.{mcv_note}"
+game_start: "Game started!{strategy_section}\n\n{briefing}{mcv_note}"
 
 # ── Agent Nudges ─────────────────────────────────────────────────────
 

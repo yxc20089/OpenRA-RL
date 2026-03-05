@@ -38,8 +38,8 @@ class OpenRAConfig:
     mod: str = "ra"
     map_name: str = "singles.oramap"
     grpc_port: int = 9999
-    bot_name: str = "Normal AI"
-    bot_type: str = "normal"
+    bot_name: str = "Beginner AI"
+    bot_type: str = "beginner"
     rl_slot: str = "Multi1"
     ai_slot: str = "Multi0"
     seed: Optional[int] = None

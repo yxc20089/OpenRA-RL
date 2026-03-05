@@ -40,7 +40,7 @@ class TestDefaults:
         cfg = OpenRARLConfig()
         assert cfg.game.mod == "ra"
         assert cfg.game.grpc_port == 9999
-        assert cfg.opponent.bot_type == "easy"
+        assert cfg.opponent.bot_type == "beginner"
         assert cfg.planning.enabled is True
         assert cfg.reward.victory == 1.0
         assert cfg.llm.model == "qwen/qwen3-coder-next"
@@ -52,16 +52,24 @@ class TestDefaults:
         for field in ToolCategoriesConfig.model_fields:
             assert getattr(cats, field) is True, f"Category {field} should default to True"
 
-    def test_all_alerts_enabled_by_default(self):
+    def test_factual_alerts_enabled_by_default(self):
+        """Factual alerts (events) enabled; prescriptive alerts disabled."""
         cfg = OpenRARLConfig()
-        for field in AlertsConfig.model_fields:
-            if field == "max_alerts":
-                continue  # max_alerts is an int, not a bool toggle
+        # Factual alerts — report events
+        for field in ("under_attack", "damaged_building", "low_power", "ore_full",
+                      "production_stalled", "building_ready", "loss_tracking", "minimap"):
             assert getattr(cfg.alerts, field) is True, f"Alert {field} should default to True"
+        # Prescriptive alerts — disabled so agent discovers on its own
+        for field in ("idle_funds", "idle_production", "stance_warning",
+                      "idle_army", "no_defenses", "no_scouting"):
+            assert getattr(cfg.alerts, field) is False, f"Alert {field} should default to False"
 
-    def test_disabled_tools_list_empty_by_default(self):
+    def test_redundant_read_tools_disabled_by_default(self):
+        """Redundant read tools disabled — turn briefing provides the same data."""
         cfg = OpenRARLConfig()
-        assert cfg.tools.disabled == []
+        assert set(cfg.tools.disabled) == {
+            "get_economy", "get_units", "get_buildings", "get_enemies", "get_production",
+        }
 
     def test_load_config_no_file_returns_defaults(self):
         """load_config() with no file and no env vars should return defaults."""
@@ -272,10 +280,14 @@ class TestSetNested:
 
 
 class TestToolFiltering:
-    def test_all_tools_enabled_by_default(self):
+    def test_non_disabled_tools_enabled_by_default(self):
         cfg = ToolsConfig()
+        default_disabled = set(cfg.disabled)
         for tool_name in TOOL_CATEGORIES:
-            assert should_register_tool(tool_name, cfg) is True
+            if tool_name in default_disabled:
+                assert should_register_tool(tool_name, cfg) is False
+            else:
+                assert should_register_tool(tool_name, cfg) is True
 
     def test_disable_category(self):
         cfg = ToolsConfig(categories=ToolCategoriesConfig(knowledge=False))
@@ -734,7 +746,7 @@ class TestOpponentConfig:
         """Default opponent config spawns an enemy in Multi0."""
         cfg = OpponentConfig()
         assert cfg.ai_slot == "Multi0"
-        assert cfg.bot_type == "easy"
+        assert cfg.bot_type == "beginner"
 
     def test_disable_enemy_via_empty_slot(self):
         cfg = OpponentConfig(ai_slot="")
@@ -810,6 +822,6 @@ class TestBotTypeMapping:
         manager = OpenRAProcessManager(config)
         cmd = manager._build_command()
         bots_arg = [a for a in cmd if "Launch.Bots" in a][0]
-        # Default should include enemy (Multi0:normal)
+        # Default should include enemy (Multi0:beginner)
         assert "Multi0" in bots_arg
-        assert "normal" in bots_arg
+        assert "beginner" in bots_arg

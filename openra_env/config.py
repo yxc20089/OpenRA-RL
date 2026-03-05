@@ -38,7 +38,7 @@ class OpponentConfig(BaseModel):
     # bot_type: difficulty tiers (beginner/easy/medium/hard/brutal)
     # or raw OpenRA play styles (rush/normal/turtle/naval)
     # ai_slot: player slot for AI; set to "" to disable enemy spawning
-    bot_type: str = "easy"
+    bot_type: str = "beginner"
     ai_slot: str = "Multi0"
 
 
@@ -96,22 +96,26 @@ class ToolCategoriesConfig(BaseModel):
 
 class ToolsConfig(BaseModel):
     categories: ToolCategoriesConfig = Field(default_factory=ToolCategoriesConfig)
-    disabled: list[str] = Field(default_factory=list)
+    # Redundant read tools disabled by default — the turn briefing already
+    # provides all this data. Models waste turns calling these instead of acting.
+    disabled: list[str] = Field(default_factory=lambda: [
+        "get_economy", "get_units", "get_buildings", "get_enemies", "get_production",
+    ])
 
 
 class AlertsConfig(BaseModel):
     under_attack: bool = True
     damaged_building: bool = True
     low_power: bool = True
-    idle_funds: bool = True
+    idle_funds: bool = False  # prescriptive — agent should discover
     ore_full: bool = True
-    idle_production: bool = True
+    idle_production: bool = False  # prescriptive — agent should discover
     production_stalled: bool = True
     building_ready: bool = True
-    stance_warning: bool = True
-    idle_army: bool = True
-    no_defenses: bool = True
-    no_scouting: bool = True
+    stance_warning: bool = False  # prescriptive — agent should discover
+    idle_army: bool = False  # prescriptive — agent should discover
+    no_defenses: bool = False  # prescriptive — agent should discover
+    no_scouting: bool = False  # prescriptive — agent should discover
     loss_tracking: bool = True
     minimap: bool = True  # Show ASCII minimap in turn briefing
     max_alerts: int = 0  # 0 = unlimited; set >0 to cap alerts per turn

@@ -187,7 +187,7 @@ class OpenRAEnvironment(MCPEnvironment):
         mod: str = "ra",
         map_name: str = "singles.oramap",
         grpc_port: int = 9999,
-        bot_type: str = "normal",
+        bot_type: str = "beginner",
         ai_slot: str = "Multi0",
         reward_weights: Optional[RewardWeights] = None,
         record_replays: bool = False,
@@ -212,7 +212,7 @@ class OpenRAEnvironment(MCPEnvironment):
                 overrides.setdefault("game", {})["grpc_port"] = grpc_port
             if record_replays:
                 overrides.setdefault("game", {})["record_replays"] = True
-            if bot_type != "normal":
+            if bot_type != "beginner":
                 overrides.setdefault("opponent", {})["bot_type"] = bot_type
             if ai_slot != "Multi0":
                 overrides.setdefault("opponent", {})["ai_slot"] = ai_slot

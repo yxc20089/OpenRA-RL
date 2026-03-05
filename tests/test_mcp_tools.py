@@ -242,13 +242,13 @@ class TestMCPToolRegistration:
         from tests.conftest import get_tool_names
         tool_names = get_tool_names(mcp)
 
-        # Read tools
+        # Read tools (redundant ones disabled by default)
         assert "get_game_state" in tool_names
-        assert "get_economy" in tool_names
-        assert "get_units" in tool_names
-        assert "get_buildings" in tool_names
-        assert "get_enemies" in tool_names
-        assert "get_production" in tool_names
+        assert "get_economy" not in tool_names  # redundant — in turn briefing
+        assert "get_units" not in tool_names  # redundant — in turn briefing
+        assert "get_buildings" not in tool_names  # redundant — in turn briefing
+        assert "get_enemies" not in tool_names  # redundant — in turn briefing
+        assert "get_production" not in tool_names  # redundant — in turn briefing
         assert "get_map_info" in tool_names
         assert "get_exploration_status" in tool_names
 
@@ -283,8 +283,9 @@ class TestMCPToolRegistration:
         _, mcp = env
         from tests.conftest import get_tool_count
         count = get_tool_count(mcp)
-        # 7 read + 1 exploration + 1 terrain + 4 knowledge + 3 bulk + 4 planning + 27 action + 1 replay = 48
-        assert count == 48, f"Expected 48 tools, got {count}"
+        # 2 read + 1 exploration + 1 terrain + 4 knowledge + 3 bulk + 4 planning + 27 action + 1 replay = 43
+        # (5 redundant read tools disabled by default: get_economy/units/buildings/enemies/production)
+        assert count == 43, f"Expected 43 tools, got {count}"
 
 
 class TestMCPReadTools:
@@ -292,10 +293,11 @@ class TestMCPReadTools:
 
     @pytest.fixture
     def env_with_obs(self):
-        """Create env with a cached observation."""
+        """Create env with a cached observation and all read tools enabled."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
         from openra_env.config import OpenRARLConfig
         env._app_config = OpenRARLConfig()
+        env._app_config.tools.disabled = []  # enable all tools for testing
         from fastmcp import FastMCP
         mcp = FastMCP("openra-test")
         env._register_tools(mcp)
@@ -2952,6 +2954,7 @@ class TestFactualNoScoutingAlert:
         """Alert should state facts: % explored and idle count."""
         obs = self._make_obs_with_fog(tick=1000)
         env, mcp = _make_env_with_tools(obs)
+        env._app_config.alerts.no_scouting = True
         tool = mcp._tool_manager._tools["get_game_state"]
         result = tool.fn()
         scouting_alerts = [a for a in result["alerts"] if "NO SCOUTING" in a]
@@ -2974,6 +2977,7 @@ class TestFactualNoScoutingAlert:
                 fog[(x, y)] = 1.0 if y < 2 else 0.0
         obs = self._make_obs_with_fog(tick=1000, fog_values=fog)
         env, mcp = _make_env_with_tools(obs)
+        env._app_config.alerts.no_scouting = True
         tool = mcp._tool_manager._tools["get_game_state"]
         result = tool.fn()
         scouting_alerts = [a for a in result["alerts"] if "NO SCOUTING" in a]
@@ -3341,6 +3345,11 @@ class TestAlertPriorityAndCap:
             "available_production": [],
         }
         env, mcp = _make_env_with_tools(obs)
+        # Enable prescriptive alerts for this test (testing cap mechanism, not defaults)
+        env._app_config.alerts.idle_army = True
+        env._app_config.alerts.stance_warning = True
+        env._app_config.alerts.idle_production = True
+        env._app_config.alerts.no_defenses = True
         assert env._app_config.alerts.max_alerts == 0
         tool = mcp._tool_manager._tools["get_game_state"]
         result = tool.fn()
