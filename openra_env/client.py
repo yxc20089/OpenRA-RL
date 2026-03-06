@@ -35,6 +35,8 @@ class OpenRAEnv(EnvClient[OpenRAAction, OpenRAObservation, OpenRAState]):
                 result = await env.step(action)
     """
 
+    _max_message_size: int = 64 * 1024 * 1024  # 64 MB
+
     async def connect(self) -> "OpenRAEnv":
         """Connect with ping keepalive disabled.
 
@@ -111,3 +113,44 @@ class OpenRAEnv(EnvClient[OpenRAAction, OpenRAObservation, OpenRAState]):
     def _parse_state(self, data: Dict[str, Any]) -> OpenRAState:
         """Parse state response into OpenRAState."""
         return OpenRAState(**data)
+
+    async def _async_send(self, message: Dict[str, Any]) -> None:
+        import json
+        await self._ws.send(json.dumps(message))
+
+    async def _async_receive(self) -> Dict[str, Any]:
+        import json
+        raw = await self._ws.recv()
+        return json.loads(raw)
+
+    async def _async_send_and_receive(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        await self._async_send(message)
+        response = await self._async_receive()
+        if response.get("type") == "error":
+            error_data = response.get("data", {})
+            raise RuntimeError(f"Server error: {error_data.get('message', 'Unknown error')}")
+        return response
+
+    async def reset(self, **kwargs):
+        response = await self._async_send_and_receive({"type": "reset", "data": kwargs})
+        return self._parse_result(response.get("data", {}))
+
+    async def step(self, action, **kwargs):
+        response = await self._async_send_and_receive({"type": "step", "data": self._step_payload(action)})
+        return self._parse_result(response.get("data", {}))
+
+    async def __aenter__(self) -> "OpenRAEnv":
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self._ws is not None:
+            try:
+                await self._async_send({"type": "close"})
+            except Exception:
+                pass
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
