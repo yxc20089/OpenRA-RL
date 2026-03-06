@@ -68,6 +68,10 @@ class BridgeClient:
             try:
                 await self.connect()
                 state = await self.get_state()
+                if state.phase == "waiting":
+                    logger.debug(f"Bridge not fully active (attempt {attempt + 1}), phase=waiting")
+                    await asyncio.sleep(retry_interval)
+                    continue
                 logger.info(f"Bridge ready after {attempt + 1} attempts, phase={state.phase}")
                 return True
             except grpc.aio.AioRpcError as e:
@@ -108,7 +112,7 @@ class BridgeClient:
         self._action_queue = asyncio.Queue()
         self._session_call = self._stub.GameSession(self._action_request_iterator())
 
-        first_obs = await self._session_call.read()
+        first_obs = await asyncio.wait_for(self._session_call.read(), timeout=30.0)
         if first_obs is None:
             raise ConnectionError("Bridge stream closed before sending initial observation")
 
