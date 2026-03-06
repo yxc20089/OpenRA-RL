@@ -1331,20 +1331,21 @@ class OpenRAEnvironment(MCPEnvironment):
             env._state.planning_strategy = env._planning_strategy
             env._state.planning_turns_used = env._planning_turns_used
 
-            # Start the streaming session NOW — this unpauses the game.
-            # The game has been paused since reset, so tick should still be 0.
+            # Unpause the game via a 1-tick unary FastAdvance.
+            # This also connects the agent and returns the first observation.
             try:
                 loop = getattr(env, '_loop', None)
                 bridge = getattr(env, '_bridge', None)
                 if loop and bridge:
-                    asyncio.run_coroutine_threadsafe(
-                        env._ensure_session_started(), loop
-                    ).result(timeout=30)
+                    proto_obs = asyncio.run_coroutine_threadsafe(
+                        bridge.fast_advance_unary(1), loop
+                    ).result(timeout=60)
+                    obs_dict = observation_to_dict(proto_obs)
+                    env._last_obs = obs_dict
+                    env._state.game_tick = obs_dict["tick"]
             except (AttributeError, RuntimeError) as e:
-                logger.debug(f"Could not start session in end_planning_phase: {e}")
+                logger.debug(f"Could not start game in end_planning_phase: {e}")
 
-            # Get current game state to hand off
-            env._refresh_obs()
             obs = env._last_obs or {}
 
             return {
@@ -1394,8 +1395,7 @@ class OpenRAEnvironment(MCPEnvironment):
             ticks = max(1, min(ticks, 5000))  # clamp to [1, 5000]
             try:
                 async def _do_fast_advance():
-                    await env._ensure_session_started()
-                    return await env._bridge.fast_advance(ticks)
+                    return await env._bridge.fast_advance_unary(ticks)
                 future = asyncio.run_coroutine_threadsafe(
                     _do_fast_advance(), env._loop
                 )
@@ -2790,14 +2790,14 @@ class OpenRAEnvironment(MCPEnvironment):
         }
 
     async def _async_step_internal(self, action: OpenRAAction) -> dict:
-        """Core step logic: send action via gRPC, receive observation dict."""
-        await self._ensure_session_started()  # Start session on first action if not already started
+        """Core step logic: send action via unary FastAdvance RPC, receive observation dict."""
         self._state.step_count += 1
 
         cmd_dicts = [cmd.model_dump() for cmd in action.commands]
         proto_action = commands_to_proto(cmd_dicts)
+        proto_commands = list(proto_action.commands)
 
-        proto_obs = await self._bridge.step(proto_action)
+        proto_obs = await self._bridge.fast_advance_unary(1, proto_commands)
         obs_dict = observation_to_dict(proto_obs)
 
         self._state.game_tick = obs_dict["tick"]

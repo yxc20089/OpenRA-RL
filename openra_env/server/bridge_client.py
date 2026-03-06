@@ -239,6 +239,21 @@ class BridgeClient:
             await asyncio.wait_for(self._obs_event.wait(), timeout=self.timeout_s)
         return self._latest_obs
 
+    async def fast_advance_unary(self, ticks: int, commands=None) -> rl_bridge_pb2.GameObservation:
+        """Advance N ticks via unary RPC (bypasses streaming).
+
+        Works reliably on all platforms including aarch64 where
+        gRPC bidirectional streaming has transport issues.
+        """
+        if not self._connected:
+            await self.connect()
+
+        request = rl_bridge_pb2.FastAdvanceRequest(ticks=ticks)
+        if commands:
+            request.commands.extend(commands)
+
+        return await self._stub.FastAdvance(request, timeout=300.0)
+
     async def observe(self) -> Optional[rl_bridge_pb2.GameObservation]:
         """Return the latest cached observation without sending any action."""
         return self._latest_obs
