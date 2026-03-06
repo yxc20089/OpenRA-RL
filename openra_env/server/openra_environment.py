@@ -2887,6 +2887,23 @@ class OpenRAEnvironment(MCPEnvironment):
         if seed is not None:
             self._config.seed = seed
 
+        # Update map if provided (for scenario-based training)
+        map_name = kwargs.get("map_name")
+        map_data = kwargs.get("map_data")  # base64-encoded .oramap bytes
+        if map_data:
+            import base64
+            raw = base64.b64decode(map_data)
+            maps_dir = Path(self._config.openra_path) / "mods" / self._config.mod / "maps"
+            maps_dir.mkdir(parents=True, exist_ok=True)
+            if not map_name:
+                map_name = f"_scenario_{ep_id[:8]}.oramap"
+            dest = maps_dir / map_name
+            dest.write_bytes(raw)
+            logger.info(f"Wrote scenario map: {dest} ({len(raw)} bytes)")
+        if map_name:
+            self._config.map_name = map_name
+            self._state.map_name = map_name
+
         # Launch OpenRA
         logger.info(f"Launching OpenRA: map={self._config.map_name}, mod={self._config.mod}")
         self._process.launch()
