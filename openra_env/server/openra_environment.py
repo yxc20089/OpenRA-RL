@@ -44,6 +44,13 @@ from openra_env.models import (
     UnitInfoModel,
 )
 from openra_env.config import OpenRARLConfig, load_config, should_register_tool
+from openra_env.command_guard import CommandGuard
+from openra_env.normalization import (
+    get_production_item,
+    normalize_name,
+    normalize_obs_types,
+    normalize_prereq_tokens,
+)
 from openra_env.reward import OpenRARewardFunction, RewardWeights
 from openra_env.server.bridge_client import BridgeClient, commands_to_proto, observation_to_dict
 from openra_env.server.openra_process import OpenRAConfig, OpenRAProcessManager
@@ -269,10 +276,13 @@ class OpenRAEnvironment(MCPEnvironment):
         self._state = OpenRAState()
         self._last_obs: Optional[dict] = None
         self._unit_groups: dict[str, list[int]] = {}  # named groups of unit IDs
-        self._pending_placements: dict[str, dict] = {}  # building_type → {cell_x, cell_y}
+        self._pending_placements: dict[str, list[dict]] = {}  # building_type → [{cell_x, cell_y}, ...]
         self._move_targets: dict[int, tuple[int, int]] = {}  # unit_id → (target_x, target_y)
         self._attempted_placements: dict[str, int] = {}  # building_type → attempt_count (for failure detection)
+        self._pending_placement_baselines: dict[str, int] = {}  # building_type → placed count baseline
+        self._processing_pending_placements: bool = False  # re-entrancy guard for auto-placement
         self._placement_results: list[str] = []  # alerts from auto-placement attempts
+        self._manual_place_attempt_tick: dict[str, int] = {}  # building_type -> tick of last manual place attempt
         self._player_faction: str = ""
         self._enemy_faction: str = ""
         self._last_production_progress: dict[str, float] = {}  # item → progress for stall detection
@@ -280,6 +290,7 @@ class OpenRAEnvironment(MCPEnvironment):
         self._prev_unit_ids: dict[int, str] = {}  # actor_id → type for loss detection
         self._enemy_ever_seen: bool = False  # suppress NO SCOUTING after first contact
         self._accumulated_reward_vector: dict[str, float] = {}  # running sum of reward vector
+        self._command_guard = CommandGuard()
 
         # Planning phase configuration (from unified config)
         self._planning_enabled = cfg.planning.enabled
@@ -302,6 +313,8 @@ class OpenRAEnvironment(MCPEnvironment):
     def _register_tools(self, mcp: FastMCP) -> None:
         """Register MCP tools for LLM agent interaction (filtered by config)."""
         env = self
+        if not hasattr(env, "_command_guard"):
+            env._command_guard = CommandGuard()
         tools_cfg = self._app_config.tools
 
         def configurable_tool(fn):
@@ -409,12 +422,17 @@ class OpenRAEnvironment(MCPEnvironment):
             if acfg.building_ready:
                 pending = getattr(env, "_pending_placements", {})
                 attempted = getattr(env, "_attempted_placements", {})
+                recent_manual_place = getattr(env, "_manual_place_attempt_tick", {})
+                cur_tick = int(obs.get("tick", 0))
                 for p in obs["production"]:
                     if p["queue_type"] in env._PLACEABLE_QUEUE_TYPES and p["progress"] >= 0.99:
                         btype = p["item"]
                         if btype in attempted:
                             alerts.append((3, pcfg.building_stuck.format(building=btype)))
-                        elif btype not in pending:
+                        elif (
+                            btype not in pending
+                            and cur_tick - int(recent_manual_place.get(btype, -10_000)) > 25
+                        ):
                             alerts.append((3, pcfg.ready_to_place.format(building=btype)))
 
             # Auto-placement results from build_and_place (always shown — these are action feedback)
@@ -858,6 +876,7 @@ class OpenRAEnvironment(MCPEnvironment):
         def lookup_unit(unit_type: str) -> dict:
             """Look up stats for a unit type (e.g., 'e1', '3tnk', 'mig').
             Returns cost, HP, speed, armor, prerequisites, and description."""
+            unit_type = normalize_name(unit_type)
             result = get_unit_stats(unit_type)
             if result is None:
                 all_types = get_all_unit_types()
@@ -868,6 +887,7 @@ class OpenRAEnvironment(MCPEnvironment):
         def lookup_building(building_type: str) -> dict:
             """Look up stats for a building type (e.g., 'powr', 'weap', 'stek').
             Returns cost, HP, power, prerequisites, and description."""
+            building_type = normalize_name(building_type)
             result = get_building_stats(building_type)
             if result is None:
                 all_types = get_all_building_types()
@@ -1149,17 +1169,19 @@ class OpenRAEnvironment(MCPEnvironment):
                 qtype = q.get("type", "").lower()
                 name = q.get("name", "")
                 if qtype == "unit":
-                    data = get_unit_stats(name)
+                    canonical = normalize_name(name)
+                    data = get_unit_stats(canonical)
                     if data is None:
                         results.append({"error": f"Unknown unit '{name}'", "query": q})
                     else:
-                        results.append({"type": "unit", "name": name, **data})
+                        results.append({"type": "unit", "name": canonical, "input_name": name, **data})
                 elif qtype == "building":
-                    data = get_building_stats(name)
+                    canonical = normalize_name(name)
+                    data = get_building_stats(canonical)
                     if data is None:
                         results.append({"error": f"Unknown building '{name}'", "query": q})
                     else:
-                        results.append({"type": "building", "name": name, **data})
+                        results.append({"type": "building", "name": canonical, "input_name": name, **data})
                 elif qtype == "faction":
                     data = get_faction_info(name)
                     if data is None:
@@ -1442,7 +1464,16 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return {"error": "No matching units found", "next_action_hint": "refresh_and_reselect_units"}
+            guard = env._evaluate_guard("move_units", {
+                "unit_ids": unit_ids,
+                "resolved_unit_ids": resolved,
+                "target_x": target_x,
+                "target_y": target_y,
+                "queued": queued,
+            })
+            if not guard.allowed:
+                return guard.to_result(tick=(env._last_obs or {}).get("tick", 0))
             commands = [
                 CommandModel(action=ActionType.MOVE, actor_id=uid, target_x=target_x, target_y=target_y, queued=queued)
                 for uid in resolved
@@ -1461,7 +1492,16 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return {"error": "No matching units found", "next_action_hint": "refresh_and_reselect_units"}
+            guard = env._evaluate_guard("attack_move", {
+                "unit_ids": unit_ids,
+                "resolved_unit_ids": resolved,
+                "target_x": target_x,
+                "target_y": target_y,
+                "queued": queued,
+            })
+            if not guard.allowed:
+                return guard.to_result(tick=(env._last_obs or {}).get("tick", 0))
             commands = [
                 CommandModel(action=ActionType.ATTACK_MOVE, actor_id=uid, target_x=target_x, target_y=target_y, queued=queued)
                 for uid in resolved
@@ -1480,7 +1520,15 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return {"error": "No matching units found", "next_action_hint": "refresh_and_reselect_units"}
+            guard = env._evaluate_guard("attack_target", {
+                "unit_ids": unit_ids,
+                "resolved_unit_ids": resolved,
+                "target_actor_id": target_actor_id,
+                "queued": queued,
+            })
+            if not guard.allowed:
+                return guard.to_result(tick=(env._last_obs or {}).get("tick", 0))
             commands = [
                 CommandModel(action=ActionType.ATTACK, actor_id=uid, target_actor_id=target_actor_id, queued=queued)
                 for uid in resolved
@@ -1495,7 +1543,13 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return {"error": "No matching units found", "next_action_hint": "refresh_and_reselect_units"}
+            guard = env._evaluate_guard("stop_units", {
+                "unit_ids": unit_ids,
+                "resolved_unit_ids": resolved,
+            })
+            if not guard.allowed:
+                return guard.to_result(tick=(env._last_obs or {}).get("tick", 0))
             commands = [CommandModel(action=ActionType.STOP, actor_id=uid) for uid in resolved]
             result = env._execute_commands(commands)
             return env._add_unit_feedback(result, resolved)
@@ -1506,6 +1560,7 @@ class OpenRAEnvironment(MCPEnvironment):
             The unit_type is the internal name (e.g., 'e1', '3tnk', 'mig').
             Use count > 1 to queue multiple of the same type."""
             # Validate against available production
+            unit_type = normalize_name(unit_type)
             env._refresh_obs()
             if env._last_obs:
                 available = env._last_obs.get("available_production", [])
@@ -1526,6 +1581,9 @@ class OpenRAEnvironment(MCPEnvironment):
                     if "missing_prerequisites" in diag:
                         result["missing_prerequisites"] = diag["missing_prerequisites"]
                     return result
+                guard = env._evaluate_guard("build_unit", {"unit_type": unit_type, "count": count})
+                if not guard.allowed:
+                    return guard.to_result(tick=env._last_obs.get("tick", 0))
                 # Check funds
                 eco = env._last_obs.get("economy", {})
                 total_funds = eco.get("cash", 0) + eco.get("ore", 0)
@@ -1560,6 +1618,7 @@ class OpenRAEnvironment(MCPEnvironment):
             Prefer build_and_place() which handles placement automatically.
             building_type: internal name (e.g., 'powr', 'barr', 'weap')."""
             # Reject if same building already in production queue
+            building_type = normalize_name(building_type)
             env._refresh_obs()
             if env._last_obs:
                 available = env._last_obs.get("available_production", [])
@@ -1579,15 +1638,9 @@ class OpenRAEnvironment(MCPEnvironment):
                     if "missing_prerequisites" in diag:
                         result["missing_prerequisites"] = diag["missing_prerequisites"]
                     return result
-                if building_type in env._pending_placements:
-                    return {"note": env._app_config.prompts.build_already_pending.format(
-                        building=building_type)}
-                already = any(
-                    p["queue_type"] in env._PLACEABLE_QUEUE_TYPES and p["item"] == building_type
-                    for p in env._last_obs.get("production", [])
-                )
-                if already:
-                    return {"error": f"'{building_type}' is already in the production queue."}
+                guard = env._evaluate_guard("build_structure", {"building_type": building_type})
+                if not guard.allowed:
+                    return guard.to_result(tick=env._last_obs.get("tick", 0))
             commands = [CommandModel(action=ActionType.BUILD, item_type=building_type)]
             result = env._execute_commands(commands)
             # Factual build confirmation with estimated ticks
@@ -1620,6 +1673,7 @@ class OpenRAEnvironment(MCPEnvironment):
             Coordinates are optional — the engine finds a valid position near
             your base if omitted. Returns updated game summary."""
             # Validate and reject duplicates
+            building_type = normalize_name(building_type)
             env._refresh_obs()
             if env._last_obs:
                 available = env._last_obs.get("available_production", [])
@@ -1639,18 +1693,12 @@ class OpenRAEnvironment(MCPEnvironment):
                     if "missing_prerequisites" in diag:
                         result["missing_prerequisites"] = diag["missing_prerequisites"]
                     return result
-                if building_type in env._pending_placements:
-                    return {"note": env._app_config.prompts.build_already_pending.format(
-                        building=building_type)}
-                already = any(
-                    p["queue_type"] in env._PLACEABLE_QUEUE_TYPES and p["item"] == building_type
-                    for p in env._last_obs.get("production", [])
-                )
-                if already:
-                    return {"error": f"'{building_type}' is already in the production queue."}
+                guard = env._evaluate_guard("build_and_place", {"building_type": building_type})
+                if not guard.allowed:
+                    return guard.to_result(tick=env._last_obs.get("tick", 0))
             commands = [CommandModel(action=ActionType.BUILD, item_type=building_type)]
             result = env._execute_commands(commands)
-            env._pending_placements[building_type] = {"cell_x": cell_x, "cell_y": cell_y}
+            env._enqueue_pending_placement(building_type, cell_x=cell_x, cell_y=cell_y)
             # Factual build confirmation with estimated ticks
             stats = get_building_stats(building_type)
             bld_cost = stats["cost"] if stats else 0
@@ -1680,43 +1728,72 @@ class OpenRAEnvironment(MCPEnvironment):
             auto-place via advance(). Cell coordinates are optional — the engine
             auto-finds a valid position near your base if omitted."""
             # Guard: building queued via build_and_place auto-places
-            if building_type in env._pending_placements:
-                return {
-                    "note": env._app_config.prompts.place_auto_managed.format(
-                        building=building_type),
-                    "tick": env._last_obs.get("tick", 0) if env._last_obs else 0,
-                }
+            building_type = normalize_name(building_type)
             # Check building is ready in production queue
             env._refresh_obs()
             pre_obs = env._last_obs
             if pre_obs:
-                ready = any(
-                    p["queue_type"] in env._PLACEABLE_QUEUE_TYPES and p["item"] == building_type and p["progress"] >= 0.99
-                    for p in pre_obs["production"]
-                )
-                if not ready:
-                    return {
-                        "error": f"'{building_type}' not ready to place — not at 100% in production queue.",
-                        "tick": pre_obs.get("tick", 0),
-                    }
+                guard = env._evaluate_guard("place_building", {
+                    "building_type": building_type,
+                    "cell_x": cell_x,
+                    "cell_y": cell_y,
+                })
+                if not guard.allowed:
+                    return guard.to_result(tick=pre_obs.get("tick", 0))
 
-            env._pending_placements.pop(building_type, None)
+            if not hasattr(env, "_manual_place_attempt_tick"):
+                env._manual_place_attempt_tick = {}
+            env._manual_place_attempt_tick[building_type] = int((pre_obs or {}).get("tick", 0))
+            baseline_count = sum(
+                1 for b in (pre_obs or {}).get("buildings", [])
+                if b.get("type") == building_type
+            )
+            env._dequeue_pending_placement(building_type)
             commands = [CommandModel(action=ActionType.PLACE_BUILDING,
                                     item_type=building_type, target_x=cell_x, target_y=cell_y)]
-            return env._execute_commands(commands)
+            result = env._execute_commands(commands)
+
+            post_obs = env._last_obs or {}
+            post_count = sum(
+                1 for b in post_obs.get("buildings", [])
+                if b.get("type") == building_type
+            )
+            effective = post_count > baseline_count
+            result["effective"] = effective
+            if not effective:
+                queue_still_ready = any(
+                    p.get("queue_type", "") in env._PLACEABLE_QUEUE_TYPES
+                    and p.get("item", "") == building_type
+                    and float(p.get("progress", 0.0)) >= 0.99
+                    for p in post_obs.get("production", [])
+                )
+                result["placement_failed"] = True
+                result["error"] = (
+                    f"'{building_type}' placement command had no effect; still waiting in queue."
+                    if queue_still_ready
+                    else f"'{building_type}' placement command had no confirmed effect."
+                )
+                result["next_action_hint"] = "get_valid_placements_or_advance"
+            return result
 
         @configurable_tool
         def cancel_production(item_type: str) -> dict:
             """Cancel production of an item currently in a production queue."""
+            item_type = normalize_name(item_type)
             env._refresh_obs()
             obs = env._last_obs or {}
-            queue = obs.get("production", [])
-            in_queue = any(p.get("type", "").lower() == item_type.lower() for p in queue)
-            if not in_queue:
-                queued_items = [p.get("type", "") for p in queue]
-                return {"error": f"'{item_type}' is not in the production queue.", "current_queue": queued_items}
+            guard = env._evaluate_guard("cancel_production", {"item_type": item_type}, obs=obs)
+            if not guard.allowed:
+                result = guard.to_result(tick=obs.get("tick", 0))
+                if guard.reason == "not_in_queue":
+                    queue = normalize_obs_types(obs).get("production", [])
+                    result["current_queue"] = [get_production_item(p) for p in queue]
+                return result
             commands = [CommandModel(action=ActionType.CANCEL_PRODUCTION, item_type=item_type)]
-            return env._execute_commands(commands)
+            result = env._execute_commands(commands)
+            # Keep auto-placement state in sync with explicit cancellation.
+            env._clear_pending_placement(item_type)
+            return result
 
         @configurable_tool
         def deploy_unit(unit_id: int) -> dict:
@@ -1774,7 +1851,15 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return {"error": "No matching units found", "next_action_hint": "refresh_and_reselect_units"}
+            guard = env._evaluate_guard("guard_target", {
+                "unit_ids": unit_ids,
+                "resolved_unit_ids": resolved,
+                "target_actor_id": target_actor_id,
+                "queued": queued,
+            })
+            if not guard.allowed:
+                return guard.to_result(tick=(env._last_obs or {}).get("tick", 0))
             commands = [
                 CommandModel(action=ActionType.GUARD, actor_id=uid, target_actor_id=target_actor_id, queued=queued)
                 for uid in resolved
@@ -1790,7 +1875,14 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return {"error": "No matching units found", "next_action_hint": "refresh_and_reselect_units"}
+            guard = env._evaluate_guard("set_stance", {
+                "unit_ids": unit_ids,
+                "resolved_unit_ids": resolved,
+                "stance": stance,
+            })
+            if not guard.allowed:
+                return guard.to_result(tick=(env._last_obs or {}).get("tick", 0))
             stance_map = {"hold_fire": 0, "return_fire": 1, "defend": 2, "attack_anything": 3}
             stance_val = stance_map.get(stance.lower(), 3)
             commands = [
@@ -1810,6 +1902,14 @@ class OpenRAEnvironment(MCPEnvironment):
             if not any(u.get("actor_id") == unit_id for u in units):
                 return {"error": f"Unit {unit_id} not found. It may have been destroyed.",
                         "your_units": [{"id": u["actor_id"], "type": u["type"]} for u in units[:20]]}
+            guard = env._evaluate_guard("harvest", {
+                "unit_id": unit_id,
+                "resolved_unit_ids": [unit_id],
+                "target_x": cell_x,
+                "target_y": cell_y,
+            }, obs=obs)
+            if not guard.allowed:
+                return guard.to_result(tick=obs.get("tick", 0))
             commands = [CommandModel(action=ActionType.HARVEST, actor_id=unit_id, target_x=cell_x, target_y=cell_y)]
             return env._execute_commands(commands)
 
@@ -2099,27 +2199,36 @@ class OpenRAEnvironment(MCPEnvironment):
 
                 actions = step.get("actions", [])
                 all_commands = []
-                action_names = []
+                action_statuses = []
                 for action in actions:
                     cmds = env._action_to_commands(action, obs)
-                    all_commands.extend(cmds)
-                    action_names.append(action.get("tool", "?"))
+                    tool_name = action.get("tool", "?")
+                    if cmds:
+                        all_commands.extend(cmds)
+                        action_statuses.append(tool_name)
+                    else:
+                        action_statuses.append(f"{tool_name}:SKIPPED")
 
-                if all_commands:
-                    try:
-                        result = env._execute_commands(all_commands)
-                        if result.get("done"):
-                            execution_log.append(
-                                f"Step {step_num}: {', '.join(action_names)} -> game over"
-                            )
-                            break
-                    except Exception as e:
+                if not all_commands:
+                    execution_log.append(
+                        f"Step {step_num}: NO-OP ({', '.join(action_statuses)})"
+                    )
+                    continue
+
+                try:
+                    result = env._execute_commands(all_commands)
+                    if result.get("done"):
                         execution_log.append(
-                            f"Step {step_num}: {', '.join(action_names)} -> ERROR {e}"
+                            f"Step {step_num}: {', '.join(action_statuses)} -> game over"
                         )
                         break
+                except Exception as e:
+                    execution_log.append(
+                        f"Step {step_num}: {', '.join(action_statuses)} -> ERROR {e}"
+                    )
+                    break
 
-                execution_log.append(f"Step {step_num}: {', '.join(action_names)} OK")
+                execution_log.append(f"Step {step_num}: OK ({', '.join(action_statuses)})")
 
             env._refresh_obs()
             obs = env._last_obs or {}
@@ -2142,6 +2251,28 @@ class OpenRAEnvironment(MCPEnvironment):
             }
 
     # ── Internal helpers ─────────────────────────────────────────────────
+
+    def _normalize_last_obs(self) -> None:
+        """Normalize cached observation type IDs to canonical names."""
+        if self._last_obs is not None:
+            self._last_obs = normalize_obs_types(self._last_obs)
+
+    def _evaluate_guard(self, tool_name: str, params: dict[str, Any], obs: Optional[dict] = None):
+        """Run centralized command guard on a tool call."""
+        if not hasattr(self, "_command_guard"):
+            self._command_guard = CommandGuard()
+        if not hasattr(self, "_pending_placements"):
+            self._pending_placements = {}
+        current_obs = normalize_obs_types(obs if obs is not None else (self._last_obs or {}))
+        if current_obs:
+            self._last_obs = current_obs
+        return self._command_guard.evaluate(
+            tool_name=tool_name,
+            params=params,
+            obs=current_obs,
+            pending_placements=self._pending_placements,
+            placeable_queue_types=self._PLACEABLE_QUEUE_TYPES,
+        )
 
     def _check_plan_condition(self, condition: str, obs: dict) -> bool:
         """Evaluate a plan condition against current observation."""
@@ -2171,6 +2302,51 @@ class OpenRAEnvironment(MCPEnvironment):
             eco = obs.get("economy", {})
             return eco.get("cash", 0) + eco.get("ore", 0) < threshold
         return True  # unknown condition → proceed
+
+    def _iter_pending_entries(self, building_type: str) -> list[dict]:
+        """Return normalized pending entries for one building type."""
+        if not hasattr(self, "_pending_placements"):
+            self._pending_placements = {}
+        raw = self._pending_placements.get(building_type)
+        if raw is None:
+            return []
+        if isinstance(raw, list):
+            entries = [dict(x) for x in raw if isinstance(x, dict)]
+        elif isinstance(raw, dict):
+            entries = [dict(raw)]
+        else:
+            entries = []
+        self._pending_placements[building_type] = entries
+        return entries
+
+    def _enqueue_pending_placement(self, building_type: str, cell_x: int, cell_y: int) -> None:
+        """Append one pending placement request for a building type."""
+        entries = self._iter_pending_entries(building_type)
+        entries.append({"cell_x": cell_x, "cell_y": cell_y})
+        self._pending_placements[building_type] = entries
+
+    def _dequeue_pending_placement(self, building_type: str) -> None:
+        """Consume one pending placement request for a building type."""
+        entries = self._iter_pending_entries(building_type)
+        if entries:
+            entries.pop(0)
+        if entries:
+            self._pending_placements[building_type] = entries
+        else:
+            self._pending_placements.pop(building_type, None)
+            if hasattr(self, "_attempted_placements"):
+                self._attempted_placements.pop(building_type, None)
+            if hasattr(self, "_pending_placement_baselines"):
+                self._pending_placement_baselines.pop(building_type, None)
+
+    def _clear_pending_placement(self, building_type: str) -> None:
+        """Drop all pending/attempt state for a building type."""
+        if hasattr(self, "_pending_placements"):
+            self._pending_placements.pop(building_type, None)
+        if hasattr(self, "_attempted_placements"):
+            self._attempted_placements.pop(building_type, None)
+        if hasattr(self, "_pending_placement_baselines"):
+            self._pending_placement_baselines.pop(building_type, None)
 
     # Category selectors for _resolve_unit_ids
     _UNIT_CATEGORY_SELECTORS = {
@@ -2207,7 +2383,7 @@ class OpenRAEnvironment(MCPEnvironment):
                     if u.get("can_attack") and u.get("is_idle")]
         # Type selector: "type:e1"
         if selector.startswith("type:"):
-            target_type = selector[5:].strip()
+            target_type = normalize_name(selector[5:].strip())
             return [u["actor_id"] for u in obs.get("units", []) if u["type"] == target_type]
         # Category selectors: "all_infantry", "all_vehicles", etc.
         if selector in self._UNIT_CATEGORY_SELECTORS:
@@ -2283,6 +2459,7 @@ class OpenRAEnvironment(MCPEnvironment):
 
         Returns a dict with 'reason' and optionally 'missing_prerequisites'.
         """
+        item_type = normalize_name(item_type)
         stats = get_unit_stats(item_type) or get_building_stats(item_type)
         if not stats:
             return {"reason": f"'{item_type}' is not a known unit or building type."}
@@ -2293,7 +2470,7 @@ class OpenRAEnvironment(MCPEnvironment):
             if "fact" not in owned_types:
                 return {"reason": "No Construction Yard (fact) — requires MCV deployment to build."}
 
-        prereqs = stats.get("prerequisites", [])
+        prereqs = normalize_prereq_tokens(stats.get("prerequisites", []))
         if not prereqs:
             return {"reason": f"'{item_type}' is not available. Check your faction."}
 
@@ -2325,54 +2502,115 @@ class OpenRAEnvironment(MCPEnvironment):
 
     def _action_to_commands(self, action: dict, obs: dict) -> list[CommandModel]:
         """Convert a plan action dict to a list of CommandModel objects."""
+        obs = normalize_obs_types(obs)
         tool = action.get("tool", "")
         unit_ids = self._resolve_unit_ids(action.get("unit_ids", []), obs)
         queued = action.get("queued", False)
 
         if tool == "build_unit":
-            unit_type = action.get("unit_type", "")
+            unit_type = normalize_name(action.get("unit_type", ""))
             available = obs.get("available_production", [])
             if not available or unit_type not in available:
                 return []  # unavailable — batch() will mark as FAILED
+            if not self._evaluate_guard("build_unit", {"unit_type": unit_type, "count": action.get("count", 1)}, obs=obs).allowed:
+                return []
             count = max(1, action.get("count", 1))
             return [CommandModel(action=ActionType.TRAIN, item_type=unit_type)
                     for _ in range(count)]
         elif tool == "build_structure":
-            btype = action["building_type"]
+            btype = normalize_name(action["building_type"])
             available = obs.get("available_production", [])
             if not available or btype not in available:
+                return []
+            if not self._evaluate_guard("build_structure", {"building_type": btype}, obs=obs).allowed:
                 return []
             return [CommandModel(action=ActionType.BUILD, item_type=btype)]
         elif tool == "build_and_place":
-            btype = action["building_type"]
+            btype = normalize_name(action["building_type"])
             available = obs.get("available_production", [])
             if not available or btype not in available:
                 return []
-            self._pending_placements[btype] = {
-                "cell_x": action.get("cell_x", 0), "cell_y": action.get("cell_y", 0)
-            }
+            if not self._evaluate_guard("build_and_place", {"building_type": btype}, obs=obs).allowed:
+                return []
+            self._enqueue_pending_placement(
+                btype,
+                cell_x=action.get("cell_x", 0),
+                cell_y=action.get("cell_y", 0),
+            )
             return [CommandModel(action=ActionType.BUILD, item_type=btype)]
         elif tool == "place_building":
+            btype = normalize_name(action["building_type"])
+            if not self._evaluate_guard(
+                "place_building",
+                {"building_type": btype, "cell_x": action.get("cell_x", 0), "cell_y": action.get("cell_y", 0)},
+                obs=obs,
+            ).allowed:
+                return []
             return [CommandModel(action=ActionType.PLACE_BUILDING,
-                                item_type=action["building_type"],
+                                item_type=btype,
                                 target_x=action.get("cell_x", 0), target_y=action.get("cell_y", 0))]
         elif tool == "attack_move":
+            if not self._evaluate_guard(
+                "attack_move",
+                {
+                    "unit_ids": action.get("unit_ids", []),
+                    "resolved_unit_ids": unit_ids,
+                    "target_x": action["target_x"],
+                    "target_y": action["target_y"],
+                    "queued": queued,
+                },
+                obs=obs,
+            ).allowed:
+                return []
             return [CommandModel(action=ActionType.ATTACK_MOVE, actor_id=uid,
                                 target_x=action["target_x"], target_y=action["target_y"],
                                 queued=queued)
                     for uid in unit_ids]
         elif tool == "move_units":
+            if not self._evaluate_guard(
+                "move_units",
+                {
+                    "unit_ids": action.get("unit_ids", []),
+                    "resolved_unit_ids": unit_ids,
+                    "target_x": action["target_x"],
+                    "target_y": action["target_y"],
+                    "queued": queued,
+                },
+                obs=obs,
+            ).allowed:
+                return []
             return [CommandModel(action=ActionType.MOVE, actor_id=uid,
                                 target_x=action["target_x"], target_y=action["target_y"],
                                 queued=queued)
                     for uid in unit_ids]
         elif tool == "attack_target":
+            if not self._evaluate_guard(
+                "attack_target",
+                {
+                    "unit_ids": action.get("unit_ids", []),
+                    "resolved_unit_ids": unit_ids,
+                    "target_actor_id": action["target_actor_id"],
+                    "queued": queued,
+                },
+                obs=obs,
+            ).allowed:
+                return []
             return [CommandModel(action=ActionType.ATTACK, actor_id=uid,
                                 target_actor_id=action["target_actor_id"], queued=queued)
                     for uid in unit_ids]
         elif tool == "set_stance":
             stance_map = {"hold_fire": 0, "return_fire": 1, "defend": 2, "attack_anything": 3}
             stance_val = stance_map.get(action.get("stance", "attack_anything").lower(), 3)
+            if not self._evaluate_guard(
+                "set_stance",
+                {
+                    "unit_ids": action.get("unit_ids", []),
+                    "resolved_unit_ids": unit_ids,
+                    "stance": action.get("stance", "attack_anything"),
+                },
+                obs=obs,
+            ).allowed:
+                return []
             return [CommandModel(action=ActionType.SET_STANCE, actor_id=uid, target_x=stance_val)
                     for uid in unit_ids]
         elif tool == "deploy_unit":
@@ -2393,18 +2631,37 @@ class OpenRAEnvironment(MCPEnvironment):
                 return []
             return [CommandModel(action=ActionType.REPAIR, actor_id=bid)]
         elif tool == "stop_units":
+            if not self._evaluate_guard(
+                "stop_units",
+                {"unit_ids": action.get("unit_ids", []), "resolved_unit_ids": unit_ids},
+                obs=obs,
+            ).allowed:
+                return []
             return [CommandModel(action=ActionType.STOP, actor_id=uid) for uid in unit_ids]
         elif tool == "harvest":
             uid = action["unit_id"]
             if not any(u.get("actor_id") == uid for u in obs.get("units", [])):
                 return []
+            if not self._evaluate_guard(
+                "harvest",
+                {
+                    "unit_id": uid,
+                    "resolved_unit_ids": [uid],
+                    "target_x": action.get("cell_x", 0),
+                    "target_y": action.get("cell_y", 0),
+                },
+                obs=obs,
+            ).allowed:
+                return []
             return [CommandModel(action=ActionType.HARVEST, actor_id=uid,
                                 target_x=action.get("cell_x", 0),
                                 target_y=action.get("cell_y", 0))]
         elif tool == "cancel_production":
-            item = action["item_type"]
+            item = normalize_name(action["item_type"])
             queue = obs.get("production", [])
-            if not any(p.get("type", "").lower() == item.lower() for p in queue):
+            if not any(get_production_item(p) == item for p in queue):
+                return []
+            if not self._evaluate_guard("cancel_production", {"item_type": item}, obs=obs).allowed:
                 return []
             return [CommandModel(action=ActionType.CANCEL_PRODUCTION, item_type=item)]
         elif tool == "surrender":
@@ -2418,7 +2675,7 @@ class OpenRAEnvironment(MCPEnvironment):
         Used during reset so we have an _last_obs cache for planning tools
         WITHOUT starting the streaming session (which unpauses the game).
         """
-        return {
+        return normalize_obs_types({
             "tick": game_state.tick if game_state else 0,
             "economy": {
                 "cash": 0, "ore": 0, "power_provided": 0, "power_drained": 0,
@@ -2446,7 +2703,7 @@ class OpenRAEnvironment(MCPEnvironment):
             "result": "",
             "spatial_map": "",
             "spatial_channels": 0,
-        }
+        })
 
     async def _ensure_session_started(self) -> None:
         """Start the streaming session (unpauses game) if not already started.
@@ -2457,7 +2714,7 @@ class OpenRAEnvironment(MCPEnvironment):
         """
         if not self._bridge.session_started:
             proto_obs = await self._bridge.start_session()
-            obs_dict = observation_to_dict(proto_obs)
+            obs_dict = normalize_obs_types(observation_to_dict(proto_obs))
             self._last_obs = obs_dict
             self._state.game_tick = obs_dict["tick"]
             logger.info("Streaming session started — game unpaused")
@@ -2476,7 +2733,7 @@ class OpenRAEnvironment(MCPEnvironment):
             )
             proto_obs = future.result(timeout=5)
             if proto_obs is not None:
-                self._last_obs = observation_to_dict(proto_obs)
+                self._last_obs = normalize_obs_types(observation_to_dict(proto_obs))
                 self._state.game_tick = self._last_obs["tick"]
         except Exception:
             pass  # Keep existing _last_obs if refresh fails
@@ -2655,105 +2912,134 @@ class OpenRAEnvironment(MCPEnvironment):
         around the Construction Yard, tries them in order. Cancels after
         _MAX_PLACEMENT_ATTEMPTS failures to avoid blocking the queue.
         """
-        if not self._last_obs:
+        if getattr(self, "_processing_pending_placements", False):
             return
-        production = self._last_obs.get("production", [])
-        attempted = getattr(self, "_attempted_placements", {})
+        self._processing_pending_placements = True
+        try:
+            if not self._last_obs:
+                return
+            if not hasattr(self, "_attempted_placements"):
+                self._attempted_placements = {}
+            if not hasattr(self, "_pending_placement_baselines"):
+                self._pending_placement_baselines = {}
+            production = self._last_obs.get("production", [])
+            attempted = getattr(self, "_attempted_placements", {})
 
-        # Phase 2: Check previously attempted placements for failure
-        failed = []
-        for btype, attempt_idx in list(attempted.items()):
-            still_in_queue = any(
-                p["queue_type"] in self._PLACEABLE_QUEUE_TYPES and p["item"] == btype and p["progress"] >= 0.99
-                for p in production
-            )
-            if still_in_queue:
-                # Building is still in queue → last placement failed, try next candidate
-                candidates = self._find_placement_candidates(btype, self._last_obs)
-                if attempt_idx < min(len(candidates), self._MAX_PLACEMENT_ATTEMPTS):
-                    # Try the next candidate position
-                    pos = candidates[attempt_idx]
-                    try:
-                        commands = [CommandModel(
-                            action=ActionType.PLACE_BUILDING,
-                            item_type=btype,
-                            target_x=pos["cell_x"],
-                            target_y=pos["cell_y"],
-                        )]
-                        self._execute_commands(commands)
-                        attempted[btype] = attempt_idx + 1
-                    except Exception:
-                        attempted[btype] = attempt_idx + 1
-                else:
-                    # Exhausted all candidates — report failure and cancel
-                    if btype in self._WATER_BUILDINGS:
-                        reason = f"{btype} requires water tiles — must be placed on water, not land"
+            # Phase 2: Check previously attempted placements for failure
+            failed = []
+            for btype, attempt_idx in list(attempted.items()):
+                still_in_queue = any(
+                    p["queue_type"] in self._PLACEABLE_QUEUE_TYPES and p["item"] == btype and p["progress"] >= 0.99
+                    for p in production
+                )
+                if still_in_queue:
+                    # Building is still in queue -> last placement failed, try next candidate
+                    candidates = self._find_placement_candidates(btype, self._last_obs)
+                    if attempt_idx < min(len(candidates), self._MAX_PLACEMENT_ATTEMPTS):
+                        # Try the next candidate position
+                        pos = candidates[attempt_idx]
+                        try:
+                            commands = [CommandModel(
+                                action=ActionType.PLACE_BUILDING,
+                                item_type=btype,
+                                target_x=pos["cell_x"],
+                                target_y=pos["cell_y"],
+                            )]
+                            self._execute_commands(commands)
+                            attempted[btype] = attempt_idx + 1
+                        except Exception:
+                            attempted[btype] = attempt_idx + 1
                     else:
-                        reason = f"no valid position found (tried {attempt_idx} spots)"
+                        # Exhausted all candidates -> report failure and cancel
+                        if btype in self._WATER_BUILDINGS:
+                            reason = f"{btype} requires water tiles — must be placed on water, not land"
+                        else:
+                            reason = f"no valid position found (tried {attempt_idx} spots)"
+                        self._placement_results.append(
+                            self._app_config.prompts.placement_failed.format(
+                                building=btype, reason=reason)
+                        )
+                        try:
+                            cancel_cmd = [CommandModel(action=ActionType.CANCEL_PRODUCTION, item_type=btype)]
+                            self._execute_commands(cancel_cmd)
+                        except Exception:
+                            pass
+                        failed.append(btype)
+                else:
+                    # Queue item gone: treat as success only if building count increased.
+                    baseline = self._pending_placement_baselines.get(btype, 0)
+                    cur_count = sum(1 for b in self._last_obs.get("buildings", []) if b.get("type") == btype)
+                    if cur_count > baseline:
+                        self._placement_results.append(
+                            self._app_config.prompts.placement_success.format(building=btype)
+                        )
+                    else:
+                        self._placement_results.append(
+                            f"PLACEMENT CLEARED: {btype} left queue without confirmed placement"
+                        )
+                    failed.append(btype)
+
+            for btype in failed:
+                attempted.pop(btype, None)
+                self._dequeue_pending_placement(btype)
+
+            # Phase 1: Send placement commands for newly ready buildings
+            if not getattr(self, "_pending_placements", None):
+                return
+            for btype in list(self._pending_placements.keys()):
+                entries = self._iter_pending_entries(btype)
+                if not entries:
+                    self._clear_pending_placement(btype)
+                    continue
+                if btype in attempted:
+                    continue  # already being tracked
+                ready = any(
+                    p["queue_type"] in self._PLACEABLE_QUEUE_TYPES and p["item"] == btype and p["progress"] >= 0.99
+                    for p in production
+                )
+                if not ready:
+                    continue
+
+                # Water buildings can't auto-place on land — warn and skip
+                if btype in self._WATER_BUILDINGS:
+                    self._placement_results.append(
+                        self._app_config.prompts.placement_water.format(building=btype)
+                    )
+                    self._dequeue_pending_placement(btype)
+                    continue
+
+                coords = entries[0]
+
+                # Find best placement position using full CY radius search
+                candidates = self._find_placement_candidates(btype, self._last_obs)
+
+                # Use user-specified coords if provided and valid, otherwise use best candidate
+                cx, cy = coords["cell_x"], coords["cell_y"]
+                if cx == 0 and cy == 0 and candidates:
+                    cx, cy = candidates[0]["cell_x"], candidates[0]["cell_y"]
+
+                # Snapshot current placed count to validate true success later.
+                self._pending_placement_baselines[btype] = sum(
+                    1 for b in self._last_obs.get("buildings", []) if b.get("type") == btype
+                )
+
+                try:
+                    commands = [CommandModel(
+                        action=ActionType.PLACE_BUILDING,
+                        item_type=btype,
+                        target_x=cx,
+                        target_y=cy,
+                    )]
+                    self._execute_commands(commands)
+                    attempted[btype] = 1  # start tracking from candidate index 1
+                except Exception:
                     self._placement_results.append(
                         self._app_config.prompts.placement_failed.format(
-                            building=btype, reason=reason)
+                            building=btype, reason="command error")
                     )
-                    try:
-                        cancel_cmd = [CommandModel(action=ActionType.CANCEL_PRODUCTION, item_type=btype)]
-                        self._execute_commands(cancel_cmd)
-                    except Exception:
-                        pass
-                    failed.append(btype)
-            else:
-                # Building no longer in queue → placement succeeded
-                self._placement_results.append(
-                    self._app_config.prompts.placement_success.format(building=btype))
-                failed.append(btype)
-
-        for btype in failed:
-            attempted.pop(btype, None)
-            self._pending_placements.pop(btype, None)
-
-        # Phase 1: Send placement commands for newly ready buildings
-        if not getattr(self, "_pending_placements", None):
-            return
-        for btype, coords in list(self._pending_placements.items()):
-            if btype in attempted:
-                continue  # already being tracked
-            ready = any(
-                p["queue_type"] in self._PLACEABLE_QUEUE_TYPES and p["item"] == btype and p["progress"] >= 0.99
-                for p in production
-            )
-            if not ready:
-                continue
-
-            # Water buildings can't auto-place on land — warn and skip
-            if btype in self._WATER_BUILDINGS:
-                self._placement_results.append(
-                    self._app_config.prompts.placement_water.format(building=btype)
-                )
-                self._pending_placements.pop(btype, None)
-                continue
-
-            # Find best placement position using full CY radius search
-            candidates = self._find_placement_candidates(btype, self._last_obs)
-
-            # Use user-specified coords if provided and valid, otherwise use best candidate
-            cx, cy = coords["cell_x"], coords["cell_y"]
-            if cx == 0 and cy == 0 and candidates:
-                cx, cy = candidates[0]["cell_x"], candidates[0]["cell_y"]
-
-            try:
-                commands = [CommandModel(
-                    action=ActionType.PLACE_BUILDING,
-                    item_type=btype,
-                    target_x=cx,
-                    target_y=cy,
-                )]
-                self._execute_commands(commands)
-                attempted[btype] = 1  # start tracking from candidate index 1
-            except Exception:
-                self._placement_results.append(
-                    self._app_config.prompts.placement_failed.format(
-                        building=btype, reason="command error")
-                )
-                self._pending_placements.pop(btype, None)
+                    self._dequeue_pending_placement(btype)
+        finally:
+            self._processing_pending_placements = False
 
     def _execute_commands(self, commands: list[CommandModel]) -> dict:
         """Send commands, step the game, update cache, return summary."""
@@ -2762,7 +3048,7 @@ class OpenRAEnvironment(MCPEnvironment):
             future = asyncio.run_coroutine_threadsafe(
                 self._async_step_internal(action), self._loop
             )
-            obs_dict = future.result(timeout=300)
+            obs_dict = normalize_obs_types(future.result(timeout=300))
             self._last_obs = obs_dict
         except Exception:
             # Connection lost — check if game ended while we weren't looking
@@ -2798,7 +3084,7 @@ class OpenRAEnvironment(MCPEnvironment):
         proto_action = commands_to_proto(cmd_dicts)
 
         proto_obs = await self._bridge.step(proto_action)
-        obs_dict = observation_to_dict(proto_obs)
+        obs_dict = normalize_obs_types(observation_to_dict(proto_obs))
 
         self._state.game_tick = obs_dict["tick"]
         return obs_dict
@@ -2874,7 +3160,10 @@ class OpenRAEnvironment(MCPEnvironment):
         self._pending_placements.clear()
         self._move_targets.clear()
         self._attempted_placements.clear()
+        self._pending_placement_baselines.clear()
+        self._processing_pending_placements = False
         self._placement_results.clear()
+        self._manual_place_attempt_tick.clear()
         self._planning_active = False
         self._planning_start_time = 0.0
         self._planning_turns_used = 0
@@ -2882,6 +3171,7 @@ class OpenRAEnvironment(MCPEnvironment):
         self._enemy_ever_seen = False
         self._prev_buildings = {}
         self._prev_unit_ids = {}
+        self._command_guard.reset()
 
         # Update seed if provided
         if seed is not None:

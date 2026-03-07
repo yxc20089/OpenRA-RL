@@ -891,6 +891,7 @@ async def run_agent(config, verbose: bool = False):
         encountered_agent_error = False
         consecutive_errors = 0
         MAX_CONSECUTIVE_ERRORS = 3
+        blocked_tool_signatures: dict[str, int] = {}
 
         # In-game checkpoint: periodic strategy evaluation
         CHECKPOINT_INTERVAL = getattr(config.agent, "checkpoint_interval", 3000)
@@ -1045,12 +1046,42 @@ async def run_agent(config, verbose: bool = False):
                     fn_args = {}
 
                 total_tool_calls += 1
+                signature = f"{fn_name}:{json.dumps(fn_args, sort_keys=True, ensure_ascii=True)}"
+                blocked_until_turn = blocked_tool_signatures.get(signature, -1)
 
                 if verbose:
                     args_str = json.dumps(fn_args)
                     if len(args_str) > 80:
                         args_str = args_str[:80] + "..."
                     print(f"  [Tool] {fn_name}({args_str})")
+
+                if blocked_until_turn >= turn:
+                    result = {
+                        "guard_status": "defer",
+                        "guard_reason": "agent_repeat_guard",
+                        "note": (
+                            f"Same tool+args was recently guard-blocked. "
+                            f"Skip retry until after another state update."
+                        ),
+                        "next_action_hint": "advance_or_refresh_state",
+                        "blocked_until_turn": blocked_until_turn,
+                    }
+                    result_str = json.dumps(result)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": result_str,
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"Do not repeat `{fn_name}` with identical args immediately. "
+                            "Follow next_action_hint first."
+                        ),
+                    })
+                    if verbose:
+                        print(f"  [Result] {result_str}")
+                    continue
 
                 try:
                     result = await env.call_tool(fn_name, **fn_args)
@@ -1082,6 +1113,9 @@ async def run_agent(config, verbose: bool = False):
                         encountered_agent_error = True
                         game_done = True
 
+                if isinstance(result, dict) and result.get("guard_status") in {"block", "defer"}:
+                    blocked_tool_signatures[signature] = turn + 2
+
                 # Format result for message
                 result_str = json.dumps(result) if not isinstance(result, str) else result
 
@@ -1090,6 +1124,14 @@ async def run_agent(config, verbose: bool = False):
                     "tool_call_id": tc["id"],
                     "content": result_str,
                 })
+                if isinstance(result, dict) and result.get("guard_status") in {"block", "defer"}:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"Guard blocked `{fn_name}` ({result.get('guard_reason', 'unknown')}). "
+                            f"First do: {result.get('next_action_hint', 'advance_or_refresh_state')}."
+                        ),
+                    })
 
                 # Check for game over
                 if isinstance(result, dict) and result.get("done"):

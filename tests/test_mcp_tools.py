@@ -2600,6 +2600,8 @@ def _make_env_with_tools(obs_dict):
     env._planning_turns_used = 0
     env._pending_placements = {}
     env._attempted_placements = {}
+    env._pending_placement_baselines = {}
+    env._processing_pending_placements = False
     env._placement_results = []
     env._player_faction = "russia"
     env._last_production_progress = {}
@@ -3157,6 +3159,219 @@ class TestPendingPlacementGuards:
         result = tool.fn(building_type="powr")
         assert "note" in result
         assert "automatic" in result["note"]
+
+
+class TestCanonicalGuardBehavior:
+    """Canonical aliases and anti-loop behavior in tool path."""
+
+    def test_build_structure_alias_normalized_to_canonical(self):
+        obs = {
+            "tick": 100,
+            "done": False,
+            "result": "",
+            "economy": {"cash": 9999, "ore": 0, "power_provided": 200, "power_drained": 0, "resource_capacity": 5000, "harvester_count": 1},
+            "military": {"units_killed": 0, "units_lost": 0, "buildings_killed": 0, "buildings_lost": 0, "army_value": 0, "active_unit_count": 0},
+            "units": [],
+            "buildings": [{"actor_id": 1, "type": "fact", "cell_x": 5, "cell_y": 5}],
+            "production": [],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 128, "height": 128, "map_name": "Test"},
+            "available_production": ["powr", "weap"],
+        }
+        env, mcp = _make_env_with_tools(obs)
+        captured = {}
+
+        def _exec(cmds):
+            captured["item_type"] = cmds[0].item_type
+            return {"tick": 101, "done": False, "result": "", "economy": obs["economy"], "own_units": 0, "own_buildings": 1, "visible_enemies": 0, "production": []}
+
+        env._execute_commands = _exec
+        tool = mcp._tool_manager._tools["build_structure"]
+        result = tool.fn(building_type="weaf")
+        assert "error" not in result
+        assert captured["item_type"] == "weap"
+
+    def test_place_building_alias_not_ready_returns_defer(self):
+        obs = {
+            "tick": 200,
+            "done": False,
+            "result": "",
+            "economy": {"cash": 2000, "ore": 0, "power_provided": 200, "power_drained": 0, "resource_capacity": 5000, "harvester_count": 1},
+            "military": {"units_killed": 0, "units_lost": 0, "buildings_killed": 0, "buildings_lost": 0, "army_value": 0, "active_unit_count": 0},
+            "units": [],
+            "buildings": [{"actor_id": 1, "type": "fact", "cell_x": 5, "cell_y": 5}],
+            "production": [{"queue_type": "Building", "item": "proc", "progress": 0.4}],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 128, "height": 128, "map_name": "Test"},
+            "available_production": ["powr", "proc"],
+        }
+        env, mcp = _make_env_with_tools(obs)
+        tool = mcp._tool_manager._tools["place_building"]
+        result = tool.fn(building_type="syrf")
+        assert result.get("guard_status") == "defer"
+        assert result.get("guard_reason") == "not_ready_to_place"
+
+    def test_place_building_reports_not_effective_when_state_unchanged(self):
+        obs = {
+            "tick": 210,
+            "done": False,
+            "result": "",
+            "economy": {"cash": 2000, "ore": 0, "power_provided": 200, "power_drained": 0, "resource_capacity": 5000, "harvester_count": 1},
+            "military": {"units_killed": 0, "units_lost": 0, "buildings_killed": 0, "buildings_lost": 0, "army_value": 0, "active_unit_count": 0},
+            "units": [],
+            "buildings": [{"actor_id": 1, "type": "fact", "cell_x": 5, "cell_y": 5}],
+            "production": [{"queue_type": "Building", "item": "proc", "progress": 1.0}],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 128, "height": 128, "map_name": "Test"},
+            "available_production": ["powr", "proc"],
+        }
+        env, mcp = _make_env_with_tools(obs)
+        env._execute_commands = lambda cmds: {
+            "tick": 211,
+            "done": False,
+            "result": "",
+            "economy": obs["economy"],
+            "own_units": 0,
+            "own_buildings": 1,
+            "visible_enemies": 0,
+            "production": ["proc@100%"],
+        }
+        tool = mcp._tool_manager._tools["place_building"]
+        result = tool.fn(building_type="proc")
+        assert result.get("effective") is False
+        assert result.get("placement_failed") is True
+
+    def test_cancel_build_loop_is_deferred(self):
+        obs = {
+            "tick": 1000,
+            "done": False,
+            "result": "",
+            "economy": {"cash": 6000, "ore": 0, "power_provided": 200, "power_drained": 0, "resource_capacity": 5000, "harvester_count": 1},
+            "military": {"units_killed": 0, "units_lost": 0, "buildings_killed": 0, "buildings_lost": 0, "army_value": 0, "active_unit_count": 0},
+            "units": [],
+            "buildings": [{"actor_id": 1, "type": "fact", "cell_x": 5, "cell_y": 5}],
+            "production": [],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 128, "height": 128, "map_name": "Test"},
+            "available_production": ["powr", "proc"],
+        }
+        env, mcp = _make_env_with_tools(obs)
+        env._execute_commands = lambda cmds: {"tick": obs["tick"], "done": False, "result": "", "economy": obs["economy"], "own_units": 0, "own_buildings": 1, "visible_enemies": 0, "production": []}
+
+        build_tool = mcp._tool_manager._tools["build_structure"]
+        cancel_tool = mcp._tool_manager._tools["cancel_production"]
+
+        first = build_tool.fn(building_type="powr")
+        assert "error" not in first
+
+        obs["tick"] = 1001
+        obs["production"] = [{"queue_type": "Building", "item": "powr", "progress": 0.2}]
+        env._last_obs = obs
+        second = cancel_tool.fn(item_type="powr")
+        assert "error" not in second
+
+        obs["tick"] = 1002
+        obs["production"] = []
+        env._last_obs = obs
+        third = build_tool.fn(building_type="powr")
+        assert third.get("guard_status") == "defer"
+        assert third.get("guard_reason") == "cancel_build_loop"
+
+    def test_build_unit_count_10_still_allowed(self):
+        obs = {
+            "tick": 300,
+            "done": False,
+            "result": "",
+            "economy": {"cash": 10000, "ore": 0, "power_provided": 200, "power_drained": 50, "resource_capacity": 5000, "harvester_count": 1},
+            "military": {"units_killed": 0, "units_lost": 0, "buildings_killed": 0, "buildings_lost": 0, "army_value": 0, "active_unit_count": 0},
+            "units": [],
+            "buildings": [{"actor_id": 1, "type": "fact", "cell_x": 5, "cell_y": 5}],
+            "production": [],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 128, "height": 128, "map_name": "Test"},
+            "available_production": ["e1", "powr"],
+        }
+        env, mcp = _make_env_with_tools(obs)
+        captured = {"n": 0}
+
+        def _exec(cmds):
+            captured["n"] = len(cmds)
+            return {"tick": 301, "done": False, "result": "", "economy": obs["economy"], "own_units": 0, "own_buildings": 1, "visible_enemies": 0, "production": []}
+
+        env._execute_commands = _exec
+        tool = mcp._tool_manager._tools["build_unit"]
+        result = tool.fn(unit_type="e1", count=10)
+        assert "error" not in result
+        assert captured["n"] == 10
+
+    def test_cancel_production_clears_pending_state_for_alias(self):
+        obs = {
+            "tick": 500,
+            "done": False,
+            "result": "",
+            "economy": {"cash": 5000, "ore": 0, "power_provided": 200, "power_drained": 50, "resource_capacity": 5000, "harvester_count": 1},
+            "military": {"units_killed": 0, "units_lost": 0, "buildings_killed": 0, "buildings_lost": 0, "army_value": 0, "active_unit_count": 0},
+            "units": [],
+            "buildings": [{"actor_id": 1, "type": "fact", "cell_x": 5, "cell_y": 5}],
+            "production": [{"queue_type": "Building", "item": "proc", "progress": 1.0}],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 128, "height": 128, "map_name": "Test"},
+            "available_production": ["powr", "proc"],
+        }
+        env, mcp = _make_env_with_tools(obs)
+        env._pending_placements = {"proc": [{"cell_x": 0, "cell_y": 0}]}
+        env._attempted_placements = {"proc": 2}
+        env._pending_placement_baselines = {"proc": 1}
+        env._execute_commands = lambda cmds: {
+            "tick": 501, "done": False, "result": "", "economy": obs["economy"],
+            "own_units": 0, "own_buildings": 1, "visible_enemies": 0, "production": [],
+        }
+
+        tool = mcp._tool_manager._tools["cancel_production"]
+        result = tool.fn(item_type="syrf")
+        assert "error" not in result
+        assert "proc" not in env._pending_placements
+        assert "proc" not in env._attempted_placements
+        assert "proc" not in env._pending_placement_baselines
+
+    def test_pending_queue_removed_without_building_marks_cleared_not_success(self):
+        env = OpenRAEnvironment.__new__(OpenRAEnvironment)
+        from openra_env.config import OpenRARLConfig
+        env._app_config = OpenRARLConfig()
+        env._pending_placements = {"powr": [{"cell_x": 0, "cell_y": 0}]}
+        env._attempted_placements = {"powr": 1}
+        env._pending_placement_baselines = {"powr": 2}
+        env._processing_pending_placements = False
+        env._placement_results = []
+        env._last_obs = {
+            "tick": 1000,
+            "done": False,
+            "result": "",
+            "economy": {"cash": 0, "ore": 0, "power_provided": 200, "power_drained": 100, "resource_capacity": 0, "harvester_count": 0},
+            "military": {"units_killed": 0, "units_lost": 0, "buildings_killed": 0, "buildings_lost": 0, "army_value": 0, "active_unit_count": 0},
+            "units": [],
+            "buildings": [
+                {"actor_id": 1, "type": "fact", "cell_x": 5, "cell_y": 5},
+                {"actor_id": 2, "type": "powr", "cell_x": 6, "cell_y": 5},
+                {"actor_id": 3, "type": "powr", "cell_x": 7, "cell_y": 5},
+            ],
+            "production": [],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 128, "height": 128, "map_name": "Test"},
+            "available_production": [],
+        }
+
+        env._process_pending_placements()
+
+        assert any("PLACEMENT CLEARED: powr" in msg for msg in env._placement_results)
+        assert not any("AUTO-PLACED: powr" in msg for msg in env._placement_results)
 
 
 class TestAlertPriorityAndCap:
