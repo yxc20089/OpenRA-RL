@@ -23,6 +23,7 @@ logger = logging.getLogger("openra-rl-mcp")
 _client = None
 _server_url = "http://localhost:8000"
 _game_started = False
+_directives_manager = None
 
 mcp = FastMCP(
     "openra-rl",
@@ -41,6 +42,28 @@ async def _get_client():
     return _client
 
 
+def _load_directives_manager():
+    """Load directives manager from config file if available."""
+    global _directives_manager
+    if _directives_manager is not None:
+        return _directives_manager
+
+    try:
+        from openra_env.config import load_config
+        from openra_env.directives import DirectivesManager
+
+        config = load_config()
+        if getattr(config, "directives", None) and config.directives.enabled:
+            _directives_manager = DirectivesManager(config.directives)
+        else:
+            _directives_manager = None
+    except Exception:
+        # If config loading fails, directives are simply unavailable
+        _directives_manager = None
+
+    return _directives_manager
+
+
 async def _ensure_game() -> None:
     """Ensure game server is running and a game is started."""
     global _game_started
@@ -57,6 +80,7 @@ async def _ensure_game() -> None:
             client = await _get_client()
             await client.reset()
             _game_started = True
+            _load_directives_manager()  # Load directives on game start
             return
     except (urllib.error.URLError, OSError):
         pass
@@ -84,6 +108,7 @@ async def _ensure_game() -> None:
     client = await _get_client()
     await client.reset()
     _game_started = True
+    _load_directives_manager()  # Load directives on game start
 
 
 async def _call(tool_name: str, **kwargs) -> Any:
@@ -529,6 +554,47 @@ async def get_terrain_at(
 ) -> str:
     """Get terrain type at a specific cell."""
     return _format(await _call("get_terrain_at", cell_x=cell_x, cell_y=cell_y))
+
+
+# ── Strategic Directives ───────────────────────────────────────────
+
+@mcp.tool()
+async def check_directives() -> str:
+    """Get all active strategic directives from high command.
+    Shows pregame strategy, standing orders, and tactical adjustments.
+    Use this to review your orders or when you need strategic guidance."""
+    manager = _load_directives_manager()
+    if manager is None:
+        return "No directives configured. Set directives.enabled=true in config.yaml."
+    return manager.format_for_mcp_tool()
+
+
+@mcp.tool()
+async def acknowledge_directive(
+    directive_id: Annotated[int, Field(description="The ID of the directive to acknowledge")],
+) -> str:
+    """Acknowledge that you have received and understood a directive.
+    Confirms to high command that orders are being followed."""
+    manager = _load_directives_manager()
+    if manager is None:
+        return "No directives configured. Set directives.enabled=true in config.yaml."
+
+    success = manager.acknowledge_directive(directive_id)
+    if success:
+        directive = manager.get_directive_by_id(directive_id)
+        return f"Acknowledged directive {directive_id}: {directive.text}"
+    else:
+        return f"Error: Directive {directive_id} not found"
+
+
+@mcp.tool()
+async def get_directives_status() -> str:
+    """Get status of all directives (total, acknowledged, unacknowledged).
+    Shows which directives have been acknowledged and which need attention."""
+    manager = _load_directives_manager()
+    if manager is None:
+        return "No directives configured. Set directives.enabled=true in config.yaml."
+    return _format(manager.get_status_summary())
 
 
 # ── Entry Point ────────────────────────────────────────────────────

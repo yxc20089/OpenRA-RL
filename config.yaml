@@ -8,7 +8,7 @@
 
 # ── Game Engine ───────────────────────────────────────────────────────
 game:
-  openra_path: "/Users/berta/Projects/OpenRA-RL/OpenRA"  # Path to OpenRA installation ($OPENRA_PATH)
+  openra_path: "/Users/alexiswu-brain/openra-rl-clonne/OpenRA-RL/OpenRA"  # Path to OpenRA installation ($OPENRA_PATH)
 #   mod: "ra"                         # Game mod (ra, cnc, d2k)
 #   map_name: "singles.oramap"        # Map to play
 #   grpc_port: 9999                   # gRPC bridge port
@@ -31,6 +31,26 @@ opponent:
 #   enabled: true                     # Enable pre-game planning phase ($PLANNING_ENABLED)
 #   max_turns: 10                     # Max planning turns ($PLANNING_MAX_TURNS)
 #   max_time_s: 60.0                  # Max planning seconds ($PLANNING_MAX_TIME)
+
+# ── Strategic Directives (Human-as-High-Command) ──────────────────────
+# Enable high-level strategic guidance from humans to AI agents.
+# Directives are injected into system prompt and accessible via MCP tools.
+# See examples/directives-*.yaml for complete strategy templates.
+# directives:
+#   enabled: false                    # Enable directive system ($DIRECTIVES_ENABLED)
+#   pregame_strategy: ""              # Overall game plan ($PREGAME_STRATEGY)
+#                                     # Example: "Rush - attack early to disrupt economy"
+#   standing_orders: []               # Persistent directives throughout game
+#                                     # Example:
+#                                     #   - "Maintain at least 2 harvesters"
+#                                     #   - "Keep 3+ units defending base perimeter"
+#   midgame_adjustments: []           # Dynamic tactical orders added mid-game
+#                                     # Example:
+#                                     #   - "Flank enemy from the east"
+#                                     #   - "Counter enemy tanks with anti-armor"
+#   directives_file: ""               # Load from external YAML ($DIRECTIVES_FILE)
+#                                     # Example: "examples/directives-rush.yaml"
+#   acknowledgment_required: true     # Agent should acknowledge directives
 
 # ── Reward Function ───────────────────────────────────────────────────
 # reward:
@@ -64,6 +84,7 @@ opponent:
 #     knowledge: true                 # lookup_unit, lookup_building, etc.
 #     bulk_knowledge: true            # get_faction_briefing, get_map_analysis, batch_lookup
 #     planning: true                  # start/end_planning_phase, get_opponent_intel, etc.
+#     directives: true                # check_directives, acknowledge_directive, get_directives_status
 #     game_control: true              # advance
 #     movement: true                  # move_units, attack_move, attack_target, stop_units
 #     production: true                # build_unit, build_structure, build_and_place

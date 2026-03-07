@@ -35,6 +35,16 @@ def main() -> None:
     play_parser.add_argument("--local", action="store_true", help="Run server locally instead of Docker (for developers)")
     play_parser.add_argument("--version", dest="image_version", default=None, help="Docker image version to use (default: latest)")
 
+    # Strategic directives (human-as-high-command)
+    play_parser.add_argument(
+        "--strategy",
+        help="Strategic directives: 'rush', 'turtle', 'balanced', or path to custom YAML file"
+    )
+    play_parser.add_argument(
+        "--directive", action="append", dest="directives",
+        help="Add individual directive (can be used multiple times). Example: --directive 'Maintain 2 harvesters'"
+    )
+
     # ── config ──────────────────────────────────────────────────────
     subparsers.add_parser("config", help="Re-run the setup wizard")
 
@@ -139,6 +149,8 @@ def main() -> None:
             server_url=args.server_url,
             local=args.local,
             image_version=args.image_version,
+            strategy=getattr(args, 'strategy', None),
+            directives=getattr(args, 'directives', None),
         )
     elif args.command == "config":
         commands.cmd_config()

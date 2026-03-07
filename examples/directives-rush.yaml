@@ -1,0 +1,16 @@
+# Strategic directives for aggressive rush strategy
+# This configuration enables an early-game offensive playstyle focused on
+# quick military buildup and immediate pressure on the enemy.
+
+pregame_strategy: "Rush - Build a small army quickly and attack early to disrupt enemy economy"
+
+standing_orders:
+  - "Maintain exactly 1 harvester - minimize economy investment"
+  - "Build barracks immediately after first power plant"
+  - "Train combat units continuously - prioritize quantity over quality"
+  - "Attack enemy harvesters and exposed buildings as soon as you have 4+ combat units"
+  - "Do not build advanced tech buildings (War Factory, Tech Center) until after first attack"
+
+midgame_adjustments:
+  - "If initial rush succeeds, continue pressure with reinforcements"
+  - "If initial rush fails, retreat damaged units and regroup for second wave"
