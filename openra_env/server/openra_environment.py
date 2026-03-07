@@ -282,6 +282,7 @@ class OpenRAEnvironment(MCPEnvironment):
         self._pending_placement_baselines: dict[str, int] = {}  # building_type → placed count baseline
         self._processing_pending_placements: bool = False  # re-entrancy guard for auto-placement
         self._placement_results: list[str] = []  # alerts from auto-placement attempts
+        self._manual_place_attempt_tick: dict[str, int] = {}  # building_type -> tick of last manual place attempt
         self._player_faction: str = ""
         self._enemy_faction: str = ""
         self._last_production_progress: dict[str, float] = {}  # item → progress for stall detection
@@ -421,12 +422,17 @@ class OpenRAEnvironment(MCPEnvironment):
             if acfg.building_ready:
                 pending = getattr(env, "_pending_placements", {})
                 attempted = getattr(env, "_attempted_placements", {})
+                recent_manual_place = getattr(env, "_manual_place_attempt_tick", {})
+                cur_tick = int(obs.get("tick", 0))
                 for p in obs["production"]:
                     if p["queue_type"] in env._PLACEABLE_QUEUE_TYPES and p["progress"] >= 0.99:
                         btype = p["item"]
                         if btype in attempted:
                             alerts.append((3, pcfg.building_stuck.format(building=btype)))
-                        elif btype not in pending:
+                        elif (
+                            btype not in pending
+                            and cur_tick - int(recent_manual_place.get(btype, -10_000)) > 25
+                        ):
                             alerts.append((3, pcfg.ready_to_place.format(building=btype)))
 
             # Auto-placement results from build_and_place (always shown — these are action feedback)
@@ -1735,10 +1741,40 @@ class OpenRAEnvironment(MCPEnvironment):
                 if not guard.allowed:
                     return guard.to_result(tick=pre_obs.get("tick", 0))
 
+            if not hasattr(env, "_manual_place_attempt_tick"):
+                env._manual_place_attempt_tick = {}
+            env._manual_place_attempt_tick[building_type] = int((pre_obs or {}).get("tick", 0))
+            baseline_count = sum(
+                1 for b in (pre_obs or {}).get("buildings", [])
+                if b.get("type") == building_type
+            )
             env._dequeue_pending_placement(building_type)
             commands = [CommandModel(action=ActionType.PLACE_BUILDING,
                                     item_type=building_type, target_x=cell_x, target_y=cell_y)]
-            return env._execute_commands(commands)
+            result = env._execute_commands(commands)
+
+            post_obs = env._last_obs or {}
+            post_count = sum(
+                1 for b in post_obs.get("buildings", [])
+                if b.get("type") == building_type
+            )
+            effective = post_count > baseline_count
+            result["effective"] = effective
+            if not effective:
+                queue_still_ready = any(
+                    p.get("queue_type", "") in env._PLACEABLE_QUEUE_TYPES
+                    and p.get("item", "") == building_type
+                    and float(p.get("progress", 0.0)) >= 0.99
+                    for p in post_obs.get("production", [])
+                )
+                result["placement_failed"] = True
+                result["error"] = (
+                    f"'{building_type}' placement command had no effect; still waiting in queue."
+                    if queue_still_ready
+                    else f"'{building_type}' placement command had no confirmed effect."
+                )
+                result["next_action_hint"] = "get_valid_placements_or_advance"
+            return result
 
         @configurable_tool
         def cancel_production(item_type: str) -> dict:
@@ -3127,6 +3163,7 @@ class OpenRAEnvironment(MCPEnvironment):
         self._pending_placement_baselines.clear()
         self._processing_pending_placements = False
         self._placement_results.clear()
+        self._manual_place_attempt_tick.clear()
         self._planning_active = False
         self._planning_start_time = 0.0
         self._planning_turns_used = 0

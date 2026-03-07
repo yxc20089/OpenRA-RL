@@ -3213,6 +3213,37 @@ class TestCanonicalGuardBehavior:
         assert result.get("guard_status") == "defer"
         assert result.get("guard_reason") == "not_ready_to_place"
 
+    def test_place_building_reports_not_effective_when_state_unchanged(self):
+        obs = {
+            "tick": 210,
+            "done": False,
+            "result": "",
+            "economy": {"cash": 2000, "ore": 0, "power_provided": 200, "power_drained": 0, "resource_capacity": 5000, "harvester_count": 1},
+            "military": {"units_killed": 0, "units_lost": 0, "buildings_killed": 0, "buildings_lost": 0, "army_value": 0, "active_unit_count": 0},
+            "units": [],
+            "buildings": [{"actor_id": 1, "type": "fact", "cell_x": 5, "cell_y": 5}],
+            "production": [{"queue_type": "Building", "item": "proc", "progress": 1.0}],
+            "visible_enemies": [],
+            "visible_enemy_buildings": [],
+            "map_info": {"width": 128, "height": 128, "map_name": "Test"},
+            "available_production": ["powr", "proc"],
+        }
+        env, mcp = _make_env_with_tools(obs)
+        env._execute_commands = lambda cmds: {
+            "tick": 211,
+            "done": False,
+            "result": "",
+            "economy": obs["economy"],
+            "own_units": 0,
+            "own_buildings": 1,
+            "visible_enemies": 0,
+            "production": ["proc@100%"],
+        }
+        tool = mcp._tool_manager._tools["place_building"]
+        result = tool.fn(building_type="proc")
+        assert result.get("effective") is False
+        assert result.get("placement_failed") is True
+
     def test_cancel_build_loop_is_deferred(self):
         obs = {
             "tick": 1000,

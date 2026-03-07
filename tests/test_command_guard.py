@@ -50,7 +50,7 @@ def test_build_structure_duplicate_blocked_when_already_in_queue():
     obs = _base_obs()
     obs["production"] = [{"queue_type": "Building", "item": "powr", "progress": 0.3}]
     decision = guard.evaluate("build_structure", {"building_type": "powr"}, obs)
-    assert decision.status == "block"
+    assert decision.status == "defer"
     assert decision.reason == "already_in_queue"
 
 
@@ -99,3 +99,28 @@ def test_build_unit_count_10_remains_allowed():
     obs = _base_obs(tick=900)
     decision = guard.evaluate("build_unit", {"unit_type": "e1", "count": 10}, obs)
     assert decision.allowed
+
+
+def test_build_unit_deferred_when_same_type_queue_limit_reached():
+    guard = CommandGuard()
+    obs = _base_obs(tick=910)
+    obs["production"] = [
+        {"queue_type": "Vehicle", "item": "1tnk", "progress": 0.0}
+        for _ in range(8)
+    ]
+    decision = guard.evaluate("build_unit", {"unit_type": "1tnk", "count": 1}, obs)
+    assert decision.status == "defer"
+    assert decision.reason == "unit_queue_type_limit"
+
+
+def test_cancel_repeat_backoff_deferred():
+    guard = CommandGuard()
+    obs = _base_obs(tick=1000)
+    obs["production"] = [{"queue_type": "Building", "item": "powr", "progress": 0.2}]
+    first = guard.evaluate("cancel_production", {"item_type": "powr"}, obs)
+    assert first.allowed
+    second = guard.evaluate("cancel_production", {"item_type": "powr"}, _base_obs(tick=1001) | {
+        "production": [{"queue_type": "Building", "item": "powr", "progress": 0.1}]
+    })
+    assert second.status == "defer"
+    assert second.reason == "cancel_repeat_backoff"

@@ -55,6 +55,9 @@ class CommandGuard:
     _LOOP_WINDOW_TICKS = 120
     _BUILD_COOLDOWN_TICKS = 50
     _PLACE_COOLDOWN_TICKS = 25
+    _CANCEL_COOLDOWN_TICKS = 40
+    _MAX_UNIT_QUEUE_PER_TYPE = 8
+    _MAX_UNIT_QUEUE_TOTAL = 24
 
     def __init__(self) -> None:
         self._cooldowns: dict[str, int] = {}
@@ -120,6 +123,9 @@ class CommandGuard:
         placeable_queue_types = placeable_queue_types or {"Building", "Defense"}
         self.sync_building_states(obs, pending_placements, placeable_queue_types)
 
+        if tool_name == "build_unit":
+            return self._evaluate_unit_build_tool(tool_name, params, obs, placeable_queue_types)
+
         if tool_name in {"build_structure", "build_and_place", "place_building", "cancel_production"}:
             return self._evaluate_building_tool(
                 tool_name,
@@ -133,6 +139,42 @@ class CommandGuard:
         if tool_name in self._CONTROL_TOOLS:
             return self._evaluate_control_tool(tool_name, params, tick)
 
+        return GuardDecision(status="allow")
+
+    def _evaluate_unit_build_tool(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        obs: dict[str, Any],
+        placeable_queue_types: set[str],
+    ) -> GuardDecision:
+        unit_type = normalize_name(params.get("unit_type", ""))
+        if not unit_type:
+            return GuardDecision(status="allow")
+
+        production = obs.get("production", [])
+        unit_queue = [p for p in production if p.get("queue_type", "") not in placeable_queue_types]
+        same_type_count = sum(1 for p in unit_queue if get_production_item(p) == unit_type)
+        if same_type_count >= self._MAX_UNIT_QUEUE_PER_TYPE:
+            return GuardDecision(
+                status="defer",
+                reason="unit_queue_type_limit",
+                message=(
+                    f"'{unit_type}' already has {same_type_count} queued items "
+                    f"(limit {self._MAX_UNIT_QUEUE_PER_TYPE})."
+                ),
+                next_action_hint="advance_or_change_unit_mix",
+            )
+        if len(unit_queue) >= self._MAX_UNIT_QUEUE_TOTAL:
+            return GuardDecision(
+                status="defer",
+                reason="unit_queue_total_limit",
+                message=(
+                    f"Total unit queue is {len(unit_queue)} "
+                    f"(limit {self._MAX_UNIT_QUEUE_TOTAL})."
+                ),
+                next_action_hint="advance_or_trim_queue",
+            )
         return GuardDecision(status="allow")
 
     def _evaluate_building_tool(
@@ -165,18 +207,24 @@ class CommandGuard:
 
         if tool_name in {"build_structure", "build_and_place"}:
             if pending:
+                until_tick = tick + self._BUILD_COOLDOWN_TICKS
+                self._cooldowns[cooldown_key] = until_tick
                 return GuardDecision(
                     status="defer",
                     reason="already_pending",
                     message=f"'{btype}' is already queued and pending placement.",
-                    next_action_hint="advance_or_wait",
+                    next_action_hint="get_production_or_advance",
+                    cooldown_until_tick=until_tick,
                 )
             if queue_entry is not None:
+                until_tick = tick + self._BUILD_COOLDOWN_TICKS
+                self._cooldowns[cooldown_key] = until_tick
                 return GuardDecision(
-                    status="block",
+                    status="defer",
                     reason="already_in_queue",
                     message=f"'{btype}' is already being built.",
-                    next_action_hint="advance_or_wait",
+                    next_action_hint="get_production_or_advance",
+                    cooldown_until_tick=until_tick,
                 )
             if self._is_toggle_loop(btype, "build", tick):
                 until_tick = tick + self._BUILD_COOLDOWN_TICKS
@@ -217,6 +265,8 @@ class CommandGuard:
                     next_action_hint="advance_until_ready",
                     cooldown_until_tick=until_tick,
                 )
+            # Even if currently ready, back off immediate repeated place calls.
+            self._cooldowns[cooldown_key] = tick + self._PLACE_COOLDOWN_TICKS
             self._record_building_action(btype, "place", tick)
             return GuardDecision(status="allow")
 
@@ -228,6 +278,16 @@ class CommandGuard:
                     reason="not_in_queue",
                     message=f"'{btype}' is not in the production queue.",
                     next_action_hint="refresh_queue_first",
+                )
+            if self._is_repeated_action(btype, "cancel", tick, self._CANCEL_COOLDOWN_TICKS):
+                until_tick = tick + self._CANCEL_COOLDOWN_TICKS
+                self._cooldowns[cooldown_key] = until_tick
+                return GuardDecision(
+                    status="defer",
+                    reason="cancel_repeat_backoff",
+                    message=f"Repeated cancel on '{btype}' detected. Backing off briefly.",
+                    next_action_hint="advance_or_refresh_queue",
+                    cooldown_until_tick=until_tick,
                 )
             if self._is_toggle_loop(btype, "cancel", tick):
                 until_tick = tick + self._BUILD_COOLDOWN_TICKS
@@ -315,3 +375,10 @@ class CommandGuard:
         if tick - last_tick > self._LOOP_WINDOW_TICKS:
             return False
         return prev_action_2 == action and prev_action_1 != action
+
+    def _is_repeated_action(self, item: str, action: str, tick: int, window: int) -> bool:
+        hist = self._building_action_history.get(item, [])
+        if not hist:
+            return False
+        last_tick, last_action = hist[-1]
+        return last_action == action and tick - last_tick <= window
