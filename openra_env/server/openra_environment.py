@@ -8,6 +8,7 @@ computes rewards, and exposes MCP tools for LLM agents.
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -178,6 +179,11 @@ class OpenRAEnvironment(MCPEnvironment):
     """
 
     SUPPORTS_CONCURRENT_SESSIONS = True
+
+    # Limit concurrent .NET process launches across all sessions in this
+    # container. OpenRA's JIT compilation is CPU-intensive; launching too
+    # many simultaneously causes starvation and startup timeouts.
+    _launch_semaphore = threading.Semaphore(int(os.environ.get("MAX_CONCURRENT_LAUNCHES", "2")))
 
     def __init__(
         self,
@@ -2853,14 +2859,17 @@ class OpenRAEnvironment(MCPEnvironment):
             self._config.map_name = map_name
             self._state.map_name = map_name
 
-        # Launch OpenRA
+        # Launch OpenRA — serialized via semaphore to prevent CPU starvation
+        # when multiple sessions reset simultaneously (JIT compilation is heavy).
         logger.info(f"Launching OpenRA: map={self._config.map_name}, mod={self._config.mod}")
-        self._process.launch()
-        logger.info(f"OpenRA process launched (PID={self._process.pid})")
+        with self._launch_semaphore:
+            self._process.launch()
+            logger.info(f"OpenRA process launched (PID={self._process.pid})")
 
-        # Wait for gRPC server to be ready
-        logger.info("Waiting for gRPC bridge to become ready...")
-        ready = self._bridge.wait_for_ready(max_retries=120, retry_interval=2.0)
+            # Wait for gRPC server to be ready (still under semaphore so the
+            # next launch doesn't start until this game's gRPC is responsive)
+            logger.info("Waiting for gRPC bridge to become ready...")
+            ready = self._bridge.wait_for_ready(max_retries=120, retry_interval=2.0)
         if not ready:
             alive = self._process.is_alive()
             logger.error(f"Bridge failed to start. Process alive={alive}")
@@ -2942,6 +2951,14 @@ class OpenRAEnvironment(MCPEnvironment):
         except Exception:
             pass
         self._process.kill()
+        # Return port to the pool so it can be reused by new sessions
+        pool_ref = getattr(self, "_port_pool_ref", None)
+        if pool_ref is not None:
+            pool, lock, port = pool_ref
+            with lock:
+                if port not in pool:
+                    pool.append(port)
+            self._port_pool_ref = None
 
     def __del__(self):
         try:
