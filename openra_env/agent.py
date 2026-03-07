@@ -133,7 +133,7 @@ def _load_default_prompt() -> str:
 SYSTEM_PROMPT = _load_default_prompt()
 
 
-def load_system_prompt(config) -> str:
+def load_system_prompt(config, directives_manager=None) -> str:
     """Resolve system prompt from config: inline > file > default.
 
     Priority:
@@ -142,6 +142,22 @@ def load_system_prompt(config) -> str:
       3. config.agent.system_prompt (deprecated, backward compat)
       4. config.agent.system_prompt_file (deprecated, backward compat)
       5. Built-in default (openra_env/prompts/default.txt)
+
+    If directives_manager is provided and contains directives, appends the
+    directives section to the system prompt.
+
+    Parameters
+    ----------
+    config : OpenRARLConfig
+        Configuration object.
+    directives_manager : DirectivesManager, optional
+        Directives manager instance. If provided, directives will be appended
+        to the system prompt.
+
+    Returns
+    -------
+    str
+        The resolved system prompt, optionally with directives section.
     """
     from pathlib import Path
 
@@ -149,27 +165,47 @@ def load_system_prompt(config) -> str:
     prompts_cfg = getattr(config, "prompts", None)
     if prompts_cfg:
         if getattr(prompts_cfg, "system_prompt", ""):
-            return prompts_cfg.system_prompt
-        prompt_file = getattr(prompts_cfg, "system_prompt_file", "")
-        if prompt_file:
-            p = Path(prompt_file).expanduser()
-            if p.is_file():
-                return p.read_text(encoding="utf-8").strip()
-            raise FileNotFoundError(f"system_prompt_file not found: {p}")
+            prompt = prompts_cfg.system_prompt
+        else:
+            prompt_file = getattr(prompts_cfg, "system_prompt_file", "")
+            if prompt_file:
+                p = Path(prompt_file).expanduser()
+                if p.is_file():
+                    prompt = p.read_text(encoding="utf-8").strip()
+                else:
+                    raise FileNotFoundError(f"system_prompt_file not found: {p}")
+            else:
+                prompt = None
+    else:
+        prompt = None
 
     # Backward compat: check agent.* (deprecated)
-    agent_cfg = config.agent if hasattr(config, "agent") else config
-    if getattr(agent_cfg, "system_prompt", ""):
-        return agent_cfg.system_prompt
-    prompt_file = getattr(agent_cfg, "system_prompt_file", "")
-    if prompt_file:
-        p = Path(prompt_file).expanduser()
-        if p.is_file():
-            return p.read_text(encoding="utf-8").strip()
-        raise FileNotFoundError(f"system_prompt_file not found: {p}")
+    if prompt is None:
+        agent_cfg = config.agent if hasattr(config, "agent") else config
+        if getattr(agent_cfg, "system_prompt", ""):
+            prompt = agent_cfg.system_prompt
+        else:
+            prompt_file = getattr(agent_cfg, "system_prompt_file", "")
+            if prompt_file:
+                p = Path(prompt_file).expanduser()
+                if p.is_file():
+                    prompt = p.read_text(encoding="utf-8").strip()
+                else:
+                    raise FileNotFoundError(f"system_prompt_file not found: {p}")
+            else:
+                prompt = None
 
     # Default
-    return SYSTEM_PROMPT
+    if prompt is None:
+        prompt = SYSTEM_PROMPT
+
+    # Append directives section if enabled
+    if directives_manager is not None:
+        directives_section = directives_manager.format_for_system_prompt()
+        if directives_section:
+            prompt = f"{prompt}\n\n{directives_section}"
+
+    return prompt
 
 
 def compose_pregame_briefing(state: dict) -> str:
@@ -704,15 +740,62 @@ async def run_agent(config, verbose: bool = False):
         # Discover and convert tools
         mcp_tools = await env.list_tools()
         openai_tools = mcp_tools_to_openai(mcp_tools)
+
+        # Add directive tools if enabled (client-side tools)
+        if directives_manager:
+            directive_tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "check_directives",
+                        "description": "Get all active strategic directives from high command. Shows pregame strategy, standing orders, and tactical adjustments.",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "acknowledge_directive",
+                        "description": "Acknowledge that you have received and understood a directive. Confirms to high command that orders are being followed.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "directive_id": {
+                                    "type": "integer",
+                                    "description": "The ID of the directive to acknowledge",
+                                },
+                            },
+                            "required": ["directive_id"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_directives_status",
+                        "description": "Get status of all directives (total, acknowledged, unacknowledged). Shows which directives have been acknowledged.",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                },
+            ]
+            openai_tools.extend(directive_tools)
+
         tool_names = {t["function"]["name"] for t in openai_tools}
-        print(f"Discovered {len(mcp_tools)} MCP tools")
+        print(f"Discovered {len(openai_tools)} tools ({len(mcp_tools)} MCP + {len(openai_tools) - len(mcp_tools)} client-side)")
 
         if verbose:
             for t in mcp_tools:
                 print(f"  - {t.name}: {t.description[:60]}...")
 
+        # ─── Strategic Directives (Human-as-High-Command) ─────────────
+        directives_manager = None
+        if getattr(config, "directives", None) and config.directives.enabled:
+            from openra_env.directives import DirectivesManager
+            directives_manager = DirectivesManager(config.directives)
+            print(f"Strategic directives enabled: {len(directives_manager.get_all_directives())} directive(s)")
+
         # Initialize conversation
-        system_prompt = load_system_prompt(config)
+        system_prompt = load_system_prompt(config, directives_manager)
 
         # ─── Cross-Episode Memory (ERL) ─────────────────────────────
         memory = None
@@ -1052,13 +1135,33 @@ async def run_agent(config, verbose: bool = False):
                         args_str = args_str[:80] + "..."
                     print(f"  [Tool] {fn_name}({args_str})")
 
+                # Handle directive tools locally (client-side)
                 try:
-                    result = await env.call_tool(fn_name, **fn_args)
-                    consecutive_errors = 0
-                    # Track tool results for cross-episode reflection
-                    if event_tracker and isinstance(result, dict):
-                        _tick = result.get("tick", 0)
-                        event_tracker.update_from_tool_result(fn_name, fn_args, result, _tick)
+                    if directives_manager and fn_name in ("check_directives", "acknowledge_directive", "get_directives_status"):
+                        if fn_name == "check_directives":
+                            result = directives_manager.format_for_mcp_tool()
+                        elif fn_name == "acknowledge_directive":
+                            directive_id = fn_args.get("directive_id")
+                            if directive_id is None:
+                                result = {"error": "Missing required parameter: directive_id"}
+                            else:
+                                success = directives_manager.acknowledge_directive(directive_id)
+                                if success:
+                                    directive = directives_manager.get_directive_by_id(directive_id)
+                                    result = f"Acknowledged directive {directive_id}: {directive.text}"
+                                else:
+                                    result = {"error": f"Directive {directive_id} not found"}
+                        elif fn_name == "get_directives_status":
+                            result = directives_manager.get_status_summary()
+                        consecutive_errors = 0
+                    else:
+                        # Regular tool call to server
+                        result = await env.call_tool(fn_name, **fn_args)
+                        consecutive_errors = 0
+                        # Track tool results for cross-episode reflection
+                        if event_tracker and isinstance(result, dict):
+                            _tick = result.get("tick", 0)
+                            event_tracker.update_from_tool_result(fn_name, fn_args, result, _tick)
                 except Exception as e:
                     result = {"error": str(e)}
                     # Suggest similar tools for unknown tool errors

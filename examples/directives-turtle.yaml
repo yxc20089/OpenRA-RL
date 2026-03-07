@@ -1,0 +1,18 @@
+# Strategic directives for defensive turtle strategy
+# This configuration enables a late-game oriented playstyle focused on
+# strong defenses, economic development, and advanced technology.
+
+pregame_strategy: "Turtle - Focus on defense and economy, build up advanced forces before engaging"
+
+standing_orders:
+  - "Maintain at least 2 harvesters at all times"
+  - "Build Tesla Coils or Pillboxes to defend base perimeter"
+  - "Keep 3+ units patrolling near base as mobile defense"
+  - "Prioritize power plants to ensure sufficient energy"
+  - "Do not attack enemy base until you have War Factory and 8+ combat units"
+  - "Expand economy before military - aim for 3+ harvesters before heavy army building"
+
+midgame_adjustments:
+  - "Scout enemy base to identify composition before major assault"
+  - "Build counter-units based on enemy force composition"
+  - "Maintain defensive line while building offensive force"
