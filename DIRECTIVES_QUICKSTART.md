@@ -296,6 +296,64 @@ openra-rl play --help
 
 ---
 
+## Real-World Example: Extreme Directive
+
+This example shows how well the agent follows directives - sometimes *too* well! 😄
+
+### Command Given
+```bash
+openra-rl play --local --directive="only focus on economy" --verbose
+```
+
+### Result
+```
+--- SCORECARD ---
+Planning:         ON — ECONOMY-FIRST STRATEGY vs Beginner AI
+Directive:        "only focus on economy"
+
+Ticks played:     9235
+Units killed:     0 (value: $0)       ← Followed directive perfectly!
+Units lost:       0 (value: $0)
+Army value:       $0                  ← Zero military as instructed
+Cash remaining:   $2100                ← Built economy successfully
+Orders issued:    58
+Explored:         9.0%
+
+Reward vector:
+  economy         +0.238  ← Economy development worked
+  infrastructure  +3.167  ← Buildings were built
+  combat          +0.000  ← No combat per directive
+  outcome         -1.000  ← Lost due to no military
+
+Result: DEFEAT
+```
+
+### What Happened
+✅ **Agent perfectly followed the directive**: Focused only on economy
+✅ **Built infrastructure**: High infrastructure score (+3.167)
+✅ **Avoided combat**: 0 kills, 0 military spending
+❌ **Lost the game**: No defense against enemy attacks
+
+### Lesson Learned
+This demonstrates:
+1. **Directives work**: Agent follows orders precisely
+2. **Be specific**: "Only focus on economy" means *only* economy
+3. **Balance matters**: Real strategies need both economy and military
+
+### Better Directive
+Instead of extreme focus, try:
+```bash
+openra-rl play --local \
+  --directive="Prioritize economy early - maintain 3 harvesters" \
+  --directive="Build defenses once economy is stable" \
+  --directive="Attack only when you have 8+ units" \
+  --verbose
+```
+
+This gives the agent strategic guidance while allowing tactical flexibility.
+
+---
+
 ## Next Steps
 
 1. **Try a quick game**: `openra-rl play --strategy=rush --verbose`
