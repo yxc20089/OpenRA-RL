@@ -5,7 +5,6 @@ directives from human commanders. Uses observable game state to infer adherence.
 """
 
 import re
-from collections import defaultdict
 from typing import Optional
 
 from openra_env.directives import Directive, DirectiveType, DirectivesManager
