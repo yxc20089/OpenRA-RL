@@ -733,6 +733,13 @@ async def run_agent(config, verbose: bool = False):
             print("  Aborting before game launch (no match started).")
             return
 
+    # ─── Strategic Directives (Human-as-High-Command) ─────────────
+    directives_manager = None
+    if getattr(config, "directives", None) and config.directives.enabled:
+        from openra_env.directives import DirectivesManager
+        directives_manager = DirectivesManager(config.directives)
+        print(f"Strategic directives enabled: {len(directives_manager.get_all_directives())} directive(s)")
+
     async with OpenRAMCPClient(base_url=url, message_timeout_s=300.0) as env:
         print("Resetting environment (launching OpenRA)...")
         await env.reset()
@@ -786,13 +793,6 @@ async def run_agent(config, verbose: bool = False):
         if verbose:
             for t in mcp_tools:
                 print(f"  - {t.name}: {t.description[:60]}...")
-
-        # ─── Strategic Directives (Human-as-High-Command) ─────────────
-        directives_manager = None
-        if getattr(config, "directives", None) and config.directives.enabled:
-            from openra_env.directives import DirectivesManager
-            directives_manager = DirectivesManager(config.directives)
-            print(f"Strategic directives enabled: {len(directives_manager.get_all_directives())} directive(s)")
 
         # Initialize conversation
         system_prompt = load_system_prompt(config, directives_manager)
