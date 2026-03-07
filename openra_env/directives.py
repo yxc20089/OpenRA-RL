@@ -4,7 +4,7 @@ Enables humans to provide high-level strategic guidance to AI agents.
 Directives are injected into the system prompt and accessible via MCP tools.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Optional
