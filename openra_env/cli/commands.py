@@ -30,6 +30,58 @@ from openra_env.cli.wizard import (
 from openra_env.local.arena_app import start_background_arena_app
 
 
+def _resolve_strategy(strategy_arg: Optional[str]) -> Optional[dict]:
+    """Resolve strategy argument to directives config.
+
+    Parameters
+    ----------
+    strategy_arg : str or None
+        Strategy name ('rush', 'turtle', 'balanced') or path to YAML file
+
+    Returns
+    -------
+    dict or None
+        Directives configuration dict, or None if no strategy specified
+    """
+    if not strategy_arg:
+        return None
+
+    # Built-in strategy names
+    builtin_strategies = {
+        "rush": "examples/directives-rush.yaml",
+        "turtle": "examples/directives-turtle.yaml",
+        "balanced": "examples/directives-balanced.yaml",
+    }
+
+    # Check if it's a built-in strategy name
+    if strategy_arg.lower() in builtin_strategies:
+        strategy_file = builtin_strategies[strategy_arg.lower()]
+    else:
+        # Assume it's a path to a custom YAML file
+        strategy_file = strategy_arg
+
+    # Check if file exists
+    from pathlib import Path
+    strategy_path = Path(strategy_file)
+    if not strategy_path.exists():
+        # Try relative to current directory
+        if not strategy_path.is_absolute():
+            # Try relative to package root
+            import openra_env
+            package_root = Path(openra_env.__file__).parent.parent
+            strategy_path = package_root / strategy_file
+
+    if not strategy_path.exists():
+        error(f"Strategy file not found: {strategy_file}")
+        sys.exit(1)
+
+    # Return directives config that points to the file
+    return {
+        "enabled": True,
+        "directives_file": str(strategy_path.absolute()),
+    }
+
+
 def cmd_play(
     provider: Optional[str] = None,
     model: Optional[str] = None,
@@ -40,6 +92,8 @@ def cmd_play(
     server_url: Optional[str] = None,
     local: bool = False,
     image_version: Optional[str] = None,
+    strategy: Optional[str] = None,
+    directives: Optional[list[str]] = None,
 ) -> None:
     """Run the LLM agent against the game server."""
     use_docker = server_url is None and not local
@@ -129,6 +183,24 @@ def cmd_play(
             if not docker.wait_for_health(port=port):
                 sys.exit(1)
 
+    # 3b. Handle strategy/directives
+    directives_config = None
+    if strategy or directives:
+        directives_config = _resolve_strategy(strategy) or {"enabled": True}
+
+        # Add individual directives if specified
+        if directives:
+            directives_config.setdefault("standing_orders", []).extend(directives)
+
+        # Show what directives are being used
+        if strategy:
+            if strategy.lower() in ["rush", "turtle", "balanced"]:
+                info(f"Strategy: {strategy}")
+            else:
+                info(f"Strategy: custom ({strategy})")
+        if directives:
+            info(f"Custom directives: {len(directives)}")
+
     # 4. Run the LLM agent
     header("Starting LLM agent...")
     provider_name = config.get("provider", "custom")
@@ -136,7 +208,7 @@ def cmd_play(
     print()
 
     try:
-        _run_llm_agent(config, actual_url, verbose)
+        _run_llm_agent(config, actual_url, verbose, directives_config)
     except KeyboardInterrupt:
         print("\nInterrupted.")
     except ConnectionRefusedError:
@@ -177,7 +249,7 @@ def cmd_play(
                 docker.stop_server()
 
 
-def _run_llm_agent(config: dict, server_url: str, verbose: bool) -> None:
+def _run_llm_agent(config: dict, server_url: str, verbose: bool, directives_config: Optional[dict] = None) -> None:
     """Import and run the LLM agent with the given config."""
     import asyncio
 
@@ -191,6 +263,10 @@ def _run_llm_agent(config: dict, server_url: str, verbose: bool) -> None:
     cli_overrides.setdefault("agent", {})["server_url"] = server_url
     if verbose:
         cli_overrides.setdefault("agent", {})["verbose"] = True
+
+    # Add directives config if provided
+    if directives_config:
+        cli_overrides["directives"] = directives_config
 
     app_config = load_config(cli_overrides=cli_overrides)
 
