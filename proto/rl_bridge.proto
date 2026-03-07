@@ -13,6 +13,10 @@ service RLBridge {
 
   // Unary: query current game state on demand.
   rpc GetState(StateRequest) returns (GameState);
+
+  // Unary: advance N ticks with optional commands, return observation.
+  // Bypasses streaming — works reliably on all platforms.
+  rpc FastAdvance(FastAdvanceRequest) returns (GameObservation);
 }
 
 // ─── Observations (Game → Agent) ────────────────────────────────────────────
@@ -188,3 +192,10 @@ message GameState {
 }
 
 message StateRequest {}
+
+// ─── Fast Advance (Unary) ───────────────────────────────────────────────────
+
+message FastAdvanceRequest {
+  int32 ticks = 1;
+  repeated Command commands = 2;
+}

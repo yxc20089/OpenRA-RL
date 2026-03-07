@@ -1,19 +1,18 @@
 """gRPC bridge client for communicating with the OpenRA ExternalBotBridge.
 
 This client connects to the gRPC server running inside the OpenRA process
-and handles bidirectional streaming of observations and actions.
+using synchronous unary RPCs. Each environment runs in its own thread,
+so sync gRPC calls naturally block that thread without affecting others.
 
 Protocol:
-  - Bidirectional streaming RPC (GameSession): game sends observations, agent sends actions
+  - Unary RPC (FastAdvance): send commands + advance N ticks, get observation back
   - Unary RPC (GetState): query current game state on demand
-  - Real-time: game runs at normal speed, observations stream continuously,
-    actions are sent whenever the agent is ready
 """
 
-import asyncio
 import base64
 import logging
-from typing import AsyncIterator, Optional
+import time
+from typing import Optional
 
 import grpc
 
@@ -23,33 +22,24 @@ logger = logging.getLogger(__name__)
 
 
 class BridgeClient:
-    """Async gRPC client for the OpenRA RL Bridge.
+    """Synchronous gRPC client for the OpenRA RL Bridge.
 
-    Uses bidirectional streaming: the game sends observations continuously
-    at its natural tick rate, and the agent sends actions when ready.
-    A background reader task keeps the latest observation cached.
+    Uses unary RPCs only (FastAdvance, GetState). No streaming, no async,
+    no shared poller — scales to hundreds of concurrent connections.
     """
 
     def __init__(self, host: str = "localhost", port: int = 9999, timeout_s: float = 30.0):
         self.host = host
         self.port = port
         self.timeout_s = timeout_s
-        self._channel: Optional[grpc.aio.Channel] = None
+        self._channel: Optional[grpc.Channel] = None
         self._stub: Optional[rl_bridge_pb2_grpc.RLBridgeStub] = None
-        self._session_call = None
-        self._action_queue: asyncio.Queue[rl_bridge_pb2.AgentAction] = asyncio.Queue()
         self._connected = False
 
-        # Background observation reader state
-        self._latest_obs: Optional[rl_bridge_pb2.GameObservation] = None
-        self._obs_event: asyncio.Event = asyncio.Event()
-        self._obs_tick: int = 0
-        self._obs_reader_task: Optional[asyncio.Task] = None
-
-    async def connect(self) -> None:
+    def connect(self) -> None:
         """Establish gRPC channel."""
         target = f"{self.host}:{self.port}"
-        self._channel = grpc.aio.insecure_channel(
+        self._channel = grpc.insecure_channel(
             target,
             options=[
                 ("grpc.max_receive_message_length", 64 * 1024 * 1024),
@@ -62,212 +52,68 @@ class BridgeClient:
         self._connected = True
         logger.info(f"Connected to OpenRA bridge at {target}")
 
-    async def wait_for_ready(self, max_retries: int = 30, retry_interval: float = 1.0) -> bool:
+    def wait_for_ready(self, max_retries: int = 30, retry_interval: float = 1.0) -> bool:
         """Wait for the gRPC server to become available."""
         for attempt in range(max_retries):
             try:
-                await self.connect()
-                state = await self.get_state()
+                self.connect()
+                state = self.get_state()
+                if state.phase == "waiting":
+                    logger.debug(f"Bridge not fully active (attempt {attempt + 1}), phase=waiting")
+                    time.sleep(retry_interval)
+                    continue
                 logger.info(f"Bridge ready after {attempt + 1} attempts, phase={state.phase}")
                 return True
-            except grpc.aio.AioRpcError as e:
+            except grpc.RpcError as e:
                 if attempt < max_retries - 1:
                     logger.debug(f"Bridge not ready (attempt {attempt + 1}): {e.code()}")
-                    await asyncio.sleep(retry_interval)
+                    time.sleep(retry_interval)
                 else:
                     logger.error(f"Bridge failed to become ready after {max_retries} attempts")
                     return False
             except Exception as e:
                 if attempt < max_retries - 1:
                     logger.debug(f"Connection attempt {attempt + 1} failed: {e}")
-                    await asyncio.sleep(retry_interval)
+                    time.sleep(retry_interval)
                 else:
                     return False
         return False
 
     @property
     def session_started(self) -> bool:
-        """Whether the streaming session has been started."""
-        return self._session_call is not None
+        """Always False — no streaming session in sync mode."""
+        return False
 
-    async def start_session(self) -> rl_bridge_pb2.GameObservation:
-        """Start a bidirectional streaming session and return the first observation.
+    def fast_advance_unary(self, ticks: int, commands=None) -> rl_bridge_pb2.GameObservation:
+        """Advance N ticks via unary RPC.
 
-        The game sends observations continuously; a background reader task
-        keeps the latest observation cached. Actions are sent via step().
-
-        Idempotent: if the session is already started, returns the latest observation.
+        Works reliably on all platforms including aarch64 where
+        gRPC bidirectional streaming has transport issues.
         """
-        if self._session_call is not None:
-            # Already started — return latest cached observation
-            return self._latest_obs
-
         if not self._connected:
-            await self.connect()
+            self.connect()
 
-        self._action_queue = asyncio.Queue()
-        self._session_call = self._stub.GameSession(self._action_request_iterator())
+        request = rl_bridge_pb2.FastAdvanceRequest(ticks=ticks)
+        if commands:
+            request.commands.extend(commands)
 
-        first_obs = await self._session_call.read()
-        if first_obs is None:
-            raise ConnectionError("Bridge stream closed before sending initial observation")
+        return self._stub.FastAdvance(request, timeout=300.0)
 
-        # Initialize observation state and start background reader
-        self._latest_obs = first_obs
-        self._obs_tick = first_obs.tick
-        self._obs_event = asyncio.Event()
-        self._obs_event.set()
-        self._obs_reader_task = asyncio.create_task(self._bg_obs_reader())
-
-        logger.info(f"Session started, initial tick={first_obs.tick}")
-        return first_obs
-
-    async def _action_request_iterator(self) -> AsyncIterator[rl_bridge_pb2.AgentAction]:
-        """Yield actions from the queue as the gRPC stream requests them."""
-        while True:
-            action = await self._action_queue.get()
-            yield action
-
-    async def _bg_obs_reader(self):
-        """Background task: continuously read observations from the gRPC stream.
-
-        Updates _latest_obs and signals _obs_event each time a new
-        observation arrives. The game sends observations at its natural
-        tick rate regardless of agent actions.
-        """
-        try:
-            while True:
-                obs = await self._session_call.read()
-                if obs is None:
-                    logger.info("gRPC observation stream ended")
-                    break
-                self._latest_obs = obs
-                self._obs_tick = obs.tick
-                self._obs_event.set()
-                if obs.done:
-                    logger.info(f"Game over at tick {obs.tick}: {obs.result}")
-                    break
-        except grpc.aio.AioRpcError as e:
-            logger.error(f"Background observation reader error: {e.code()}")
-        except asyncio.CancelledError:
-            logger.debug("Background observation reader cancelled")
-
-    def _check_reader_alive(self):
-        """Raise if the background observation reader has exited (game died)."""
-        if self._obs_reader_task is not None and self._obs_reader_task.done():
-            exc = self._obs_reader_task.exception()
-            if exc:
-                raise ConnectionError(f"Game connection lost: {exc}") from exc
-            raise ConnectionError("Game connection lost (observation stream ended)")
-
-    async def step(self, action: rl_bridge_pb2.AgentAction) -> rl_bridge_pb2.GameObservation:
-        """Send an action and wait for the next observation.
-
-        The action is queued immediately. Then we wait for an observation
-        with a tick newer than the current one (confirming the game has
-        processed at least one more tick since the action was sent).
-        """
-        if self._session_call is None:
-            raise RuntimeError("Session not started. Call start_session() first.")
-
-        current_tick = self._obs_tick
-        await self._action_queue.put(action)
-
-        # Wait for an observation newer than when we sent the action
-        while self._obs_tick <= current_tick:
-            self._check_reader_alive()
-            self._obs_event.clear()
-            if self._obs_tick > current_tick:
-                break
-            await asyncio.wait_for(self._obs_event.wait(), timeout=self.timeout_s)
-
-        return self._latest_obs
-
-    async def wait_ticks(self, n: int) -> rl_bridge_pb2.GameObservation:
-        """Wait for approximately N game ticks to pass.
-
-        The game runs at its natural speed (~25 ticks/sec at default).
-        Returns the observation at or after the target tick.
-        """
-        target_tick = self._obs_tick + n
-        while self._obs_tick < target_tick:
-            self._check_reader_alive()
-            if self._latest_obs and self._latest_obs.done:
-                break
-            self._obs_event.clear()
-            if self._obs_tick >= target_tick:
-                break
-            await asyncio.wait_for(self._obs_event.wait(), timeout=self.timeout_s)
-        return self._latest_obs
-
-    async def fast_advance(self, n: int) -> rl_bridge_pb2.GameObservation:
-        """Fast-forward N game ticks at CPU speed (no real-time sleeping).
-
-        Sends a FAST_ADVANCE command that temporarily sets the game engine's
-        tickScale to near-zero, processing N ticks as fast as the CPU allows.
-        Normal game speed is restored automatically after N ticks.
-
-        Returns the observation at or after the target tick.
-        """
-        if self._session_call is None:
-            raise RuntimeError("Session not started. Call start_session() first.")
-
-        n = max(1, min(n, 5000))
-        target_tick = self._obs_tick + n
-        action = rl_bridge_pb2.AgentAction(
-            commands=[
-                rl_bridge_pb2.Command(
-                    action=rl_bridge_pb2.FAST_ADVANCE,
-                    ticks=n,
-                )
-            ]
-        )
-        await self._action_queue.put(action)
-
-        # Wait for the game to reach the target tick
-        while self._obs_tick < target_tick:
-            self._check_reader_alive()
-            if self._latest_obs and self._latest_obs.done:
-                break
-            self._obs_event.clear()
-            if self._obs_tick >= target_tick:
-                break
-            await asyncio.wait_for(self._obs_event.wait(), timeout=self.timeout_s)
-        return self._latest_obs
-
-    async def observe(self) -> Optional[rl_bridge_pb2.GameObservation]:
-        """Return the latest cached observation without sending any action."""
-        return self._latest_obs
-
-    async def get_state(self) -> rl_bridge_pb2.GameState:
+    def get_state(self) -> rl_bridge_pb2.GameState:
         """Query current game state via unary RPC."""
         if not self._connected or self._stub is None:
             raise RuntimeError("Not connected. Call connect() first.")
         request = rl_bridge_pb2.StateRequest()
-        return await self._stub.GetState(request, timeout=self.timeout_s)
+        return self._stub.GetState(request, timeout=self.timeout_s)
 
-    async def close(self) -> None:
-        """Close the gRPC channel and clean up."""
-        # Cancel background observation reader
-        if self._obs_reader_task is not None:
-            self._obs_reader_task.cancel()
-            try:
-                await self._obs_reader_task
-            except asyncio.CancelledError:
-                pass
-            self._obs_reader_task = None
-
-        if self._session_call is not None:
-            self._session_call.cancel()
-            self._session_call = None
-
+    def close(self) -> None:
+        """Close the gRPC channel."""
         if self._channel is not None:
-            await self._channel.close()
+            self._channel.close()
             self._channel = None
 
         self._stub = None
         self._connected = False
-        self._latest_obs = None
         logger.info("Bridge connection closed")
 
     @property

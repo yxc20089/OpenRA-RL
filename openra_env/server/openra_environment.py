@@ -5,7 +5,6 @@ translates between the OpenEnv API and the gRPC bridge protocol,
 computes rewards, and exposes MCP tools for LLM agents.
 """
 
-import asyncio
 import logging
 import os
 import sys
@@ -181,6 +180,11 @@ class OpenRAEnvironment(MCPEnvironment):
 
     SUPPORTS_CONCURRENT_SESSIONS = True
 
+    # Limit concurrent .NET process launches across all sessions in this
+    # container. OpenRA's JIT compilation is CPU-intensive; launching too
+    # many simultaneously causes starvation and startup timeouts.
+    _launch_semaphore = threading.Semaphore(int(os.environ.get("MAX_CONCURRENT_LAUNCHES", "2")))
+
     def __init__(
         self,
         openra_path: Optional[str] = None,
@@ -290,14 +294,7 @@ class OpenRAEnvironment(MCPEnvironment):
         self._planning_turns_used: int = 0
         self._planning_strategy: str = ""
 
-        # Persistent event loop for async gRPC bridge operations.
-        # Runs in a background thread so it doesn't conflict with
-        # FastAPI/uvicorn's event loop when MCP tools call it.
-        self._loop = asyncio.new_event_loop()
-        self._loop_thread = threading.Thread(
-            target=self._loop.run_forever, daemon=True, name="openra-bridge-loop"
-        )
-        self._loop_thread.start()
+        # No event loop needed — bridge uses sync gRPC calls directly.
 
     def _register_tools(self, mcp: FastMCP) -> None:
         """Register MCP tools for LLM agent interaction (filtered by config)."""
@@ -1331,20 +1328,18 @@ class OpenRAEnvironment(MCPEnvironment):
             env._state.planning_strategy = env._planning_strategy
             env._state.planning_turns_used = env._planning_turns_used
 
-            # Start the streaming session NOW — this unpauses the game.
-            # The game has been paused since reset, so tick should still be 0.
+            # Unpause the game via a 1-tick unary FastAdvance.
+            # This also connects the agent and returns the first observation.
             try:
-                loop = getattr(env, '_loop', None)
                 bridge = getattr(env, '_bridge', None)
-                if loop and bridge:
-                    asyncio.run_coroutine_threadsafe(
-                        env._ensure_session_started(), loop
-                    ).result(timeout=30)
+                if bridge:
+                    proto_obs = bridge.fast_advance_unary(1)
+                    obs_dict = observation_to_dict(proto_obs)
+                    env._last_obs = obs_dict
+                    env._state.game_tick = obs_dict["tick"]
             except (AttributeError, RuntimeError) as e:
-                logger.debug(f"Could not start session in end_planning_phase: {e}")
+                logger.debug(f"Could not start game in end_planning_phase: {e}")
 
-            # Get current game state to hand off
-            env._refresh_obs()
             obs = env._last_obs or {}
 
             return {
@@ -1393,18 +1388,10 @@ class OpenRAEnvironment(MCPEnvironment):
             requested = ticks
             ticks = max(1, min(ticks, 5000))  # clamp to [1, 5000]
             try:
-                async def _do_fast_advance():
-                    await env._ensure_session_started()
-                    return await env._bridge.fast_advance(ticks)
-                future = asyncio.run_coroutine_threadsafe(
-                    _do_fast_advance(), env._loop
-                )
-                proto_obs = future.result(timeout=300)
+                proto_obs = env._bridge.fast_advance_unary(ticks)
                 obs_dict = observation_to_dict(proto_obs)
                 env._last_obs = obs_dict
             except Exception:
-                # Connection lost — check if game ended while waiting
-                env._refresh_obs()
                 obs_dict = env._last_obs
                 if obs_dict is None or not obs_dict.get("done"):
                     raise
@@ -2448,38 +2435,22 @@ class OpenRAEnvironment(MCPEnvironment):
             "spatial_channels": 0,
         }
 
-    async def _ensure_session_started(self) -> None:
-        """Start the streaming session (unpauses game) if not already started.
+    def _ensure_session_started(self) -> None:
+        """Unpause game via a 1-tick unary FastAdvance if not already done.
 
         Called lazily from end_planning_phase() or the first game action,
         so the game stays paused during the planning phase and while the
         LLM processes its first prompt.
         """
-        if not self._bridge.session_started:
-            proto_obs = await self._bridge.start_session()
-            obs_dict = observation_to_dict(proto_obs)
-            self._last_obs = obs_dict
-            self._state.game_tick = obs_dict["tick"]
-            logger.info("Streaming session started — game unpaused")
+        # No streaming session — just do a 1-tick advance to unpause
+        pass
 
     def _refresh_obs(self) -> None:
-        """Update _last_obs from the bridge's background observation reader.
+        """Process pending placements using cached observation.
 
-        In real-time mode, the game runs continuously. This fetches the
-        latest cached observation so read tools return fresh state.
+        With sync unary RPCs, observations are always fresh from the last
+        fast_advance_unary() call. No background reader to poll.
         """
-        if not getattr(self, '_bridge', None) or not self._bridge.session_started:
-            return  # Session not started yet; use cached _last_obs from reset
-        try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._bridge.observe(), self._loop
-            )
-            proto_obs = future.result(timeout=5)
-            if proto_obs is not None:
-                self._last_obs = observation_to_dict(proto_obs)
-                self._state.game_tick = self._last_obs["tick"]
-        except Exception:
-            pass  # Keep existing _last_obs if refresh fails
         self._process_pending_placements()
 
     # Naval buildings that require water tiles
@@ -2759,14 +2730,9 @@ class OpenRAEnvironment(MCPEnvironment):
         """Send commands, step the game, update cache, return summary."""
         action = OpenRAAction(commands=commands)
         try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._async_step_internal(action), self._loop
-            )
-            obs_dict = future.result(timeout=300)
+            obs_dict = self._step_internal(action)
             self._last_obs = obs_dict
         except Exception:
-            # Connection lost — check if game ended while we weren't looking
-            self._refresh_obs()
             obs_dict = self._last_obs
             if obs_dict is None:
                 raise
@@ -2789,15 +2755,15 @@ class OpenRAEnvironment(MCPEnvironment):
             "production": [f"{p['item']}@{p['progress']:.0%}" for p in obs_dict["production"]],
         }
 
-    async def _async_step_internal(self, action: OpenRAAction) -> dict:
-        """Core step logic: send action via gRPC, receive observation dict."""
-        await self._ensure_session_started()  # Start session on first action if not already started
+    def _step_internal(self, action: OpenRAAction) -> dict:
+        """Core step logic: send action via unary FastAdvance RPC, receive observation dict."""
         self._state.step_count += 1
 
         cmd_dicts = [cmd.model_dump() for cmd in action.commands]
         proto_action = commands_to_proto(cmd_dicts)
+        proto_commands = list(proto_action.commands)
 
-        proto_obs = await self._bridge.step(proto_action)
+        proto_obs = self._bridge.fast_advance_unary(1, proto_commands)
         obs_dict = observation_to_dict(proto_obs)
 
         self._state.game_tick = obs_dict["tick"]
@@ -2843,19 +2809,8 @@ class OpenRAEnvironment(MCPEnvironment):
         **kwargs: Any,
     ) -> OpenRAObservation:
         """Reset the environment for a new episode."""
-        future = asyncio.run_coroutine_threadsafe(
-            self._async_reset(seed, episode_id, **kwargs), self._loop
-        )
-        return future.result(timeout=300)
-
-    async def _async_reset(
-        self,
-        seed: Optional[int] = None,
-        episode_id: Optional[str] = None,
-        **kwargs: Any,
-    ) -> OpenRAObservation:
         # Clean up previous episode
-        await self._bridge.close()
+        self._bridge.close()
         self._process.kill()
 
         # Initialize new episode state
@@ -2887,14 +2842,34 @@ class OpenRAEnvironment(MCPEnvironment):
         if seed is not None:
             self._config.seed = seed
 
-        # Launch OpenRA
-        logger.info(f"Launching OpenRA: map={self._config.map_name}, mod={self._config.mod}")
-        self._process.launch()
-        logger.info(f"OpenRA process launched (PID={self._process.pid})")
+        # Update map if provided (for scenario-based training)
+        map_name = kwargs.get("map_name")
+        map_data = kwargs.get("map_data")  # base64-encoded .oramap bytes
+        if map_data:
+            import base64
+            raw = base64.b64decode(map_data)
+            maps_dir = Path(self._config.openra_path) / "mods" / self._config.mod / "maps"
+            maps_dir.mkdir(parents=True, exist_ok=True)
+            if not map_name:
+                map_name = f"_scenario_{ep_id[:8]}.oramap"
+            dest = maps_dir / map_name
+            dest.write_bytes(raw)
+            logger.info(f"Wrote scenario map: {dest} ({len(raw)} bytes)")
+        if map_name:
+            self._config.map_name = map_name
+            self._state.map_name = map_name
 
-        # Wait for gRPC server to be ready
-        logger.info("Waiting for gRPC bridge to become ready...")
-        ready = await self._bridge.wait_for_ready(max_retries=120, retry_interval=2.0)
+        # Launch OpenRA — serialized via semaphore to prevent CPU starvation
+        # when multiple sessions reset simultaneously (JIT compilation is heavy).
+        logger.info(f"Launching OpenRA: map={self._config.map_name}, mod={self._config.mod}")
+        with self._launch_semaphore:
+            self._process.launch()
+            logger.info(f"OpenRA process launched (PID={self._process.pid})")
+
+            # Wait for gRPC server to be ready (still under semaphore so the
+            # next launch doesn't start until this game's gRPC is responsive)
+            logger.info("Waiting for gRPC bridge to become ready...")
+            ready = self._bridge.wait_for_ready(max_retries=120, retry_interval=2.0)
         if not ready:
             alive = self._process.is_alive()
             logger.error(f"Bridge failed to start. Process alive={alive}")
@@ -2903,7 +2878,7 @@ class OpenRAEnvironment(MCPEnvironment):
         # Get faction info from GameState (unary RPC — game stays paused)
         game_state = None
         try:
-            game_state = await self._bridge.get_state()
+            game_state = self._bridge.get_state()
             self._player_faction = game_state.player_faction or ""
             self._enemy_faction = game_state.enemy_faction or ""
         except Exception:
@@ -2928,10 +2903,7 @@ class OpenRAEnvironment(MCPEnvironment):
     ) -> Observation:
         """Handle non-MCP actions (OpenRAAction for backward compat)."""
         if isinstance(action, OpenRAAction):
-            future = asyncio.run_coroutine_threadsafe(
-                self._async_step_internal(action), self._loop
-            )
-            obs_dict = future.result(timeout=300)
+            obs_dict = self._step_internal(action)
             self._last_obs = obs_dict
             reward, reward_vec = self._reward_fn.compute_all(obs_dict)
             if reward_vec:
@@ -2975,19 +2947,18 @@ class OpenRAEnvironment(MCPEnvironment):
     def close(self) -> None:
         """Clean up resources."""
         try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._bridge.close(), self._loop
-            )
-            future.result(timeout=10)
+            self._bridge.close()
         except Exception:
             pass
         self._process.kill()
-        try:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            self._loop_thread.join(timeout=5)
-            self._loop.close()
-        except Exception:
-            pass
+        # Return port to the pool so it can be reused by new sessions
+        pool_ref = getattr(self, "_port_pool_ref", None)
+        if pool_ref is not None:
+            pool, lock, port = pool_ref
+            with lock:
+                if port not in pool:
+                    pool.append(port)
+            self._port_pool_ref = None
 
     def __del__(self):
         try:

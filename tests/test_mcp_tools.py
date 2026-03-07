@@ -1,10 +1,10 @@
 """Tests for MCP tool registration, game data module, and environment integration."""
 
-import asyncio
+
 from pathlib import Path
 
 import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 
 from openra_env.game_data import (
     RA_BUILDINGS,
@@ -1100,7 +1100,9 @@ class TestExecuteCommandsTriggersPlacement:
         """When _execute_commands runs, pending placements should be processed."""
         env = OpenRAEnvironment.__new__(OpenRAEnvironment)
         from openra_env.config import OpenRARLConfig
+        from openra_env.models import OpenRAState
         env._app_config = OpenRARLConfig()
+        env._state = OpenRAState(episode_id="test", step_count=0, game_tick=0)
         env._pending_placements = {"powr": {"cell_x": 5, "cell_y": 5}}
         env._attempted_placements = {}
         env._placement_results = []
@@ -1158,14 +1160,19 @@ class TestExecuteCommandsTriggersPlacement:
 
         env._process_pending_placements = mock_process_pending
 
-        # Patch run_coroutine_threadsafe to return obs_dict directly
-        mock_future = MagicMock()
-        mock_future.result.return_value = obs_dict
+        # Mock bridge.fast_advance_unary to return a proto obs
+        from openra_env.generated import rl_bridge_pb2
+        proto_obs = rl_bridge_pb2.GameObservation()
+        proto_obs.tick = 100
+        proto_obs.economy.cash = 5000
+        proto_obs.map_info.width = 64
+        proto_obs.map_info.height = 64
+        mock_bridge = MagicMock()
+        mock_bridge.fast_advance_unary = MagicMock(return_value=proto_obs)
+        env._bridge = mock_bridge
 
-        with patch("asyncio.run_coroutine_threadsafe", return_value=mock_future):
-            env._loop = MagicMock()
-            from openra_env.models import CommandModel, ActionType
-            result = env._execute_commands([CommandModel(action=ActionType.NO_OP)])
+        from openra_env.models import CommandModel, ActionType
+        result = env._execute_commands([CommandModel(action=ActionType.NO_OP)])
 
         assert len(placement_called) == 1, "_process_pending_placements was not called by _execute_commands"
         assert result["tick"] == 100
@@ -2515,18 +2522,16 @@ class TestAdvanceClamping:
         }
         env._last_obs = obs_dict
 
-        # Mock the async bridge with a running loop in a background thread
-        loop = asyncio.new_event_loop()
-        import threading
-        thread = threading.Thread(target=loop.run_forever, daemon=True)
-        thread.start()
-        env._loop = loop
+        # Mock the sync bridge
+        from openra_env.generated import rl_bridge_pb2
+        proto_obs = rl_bridge_pb2.GameObservation()
+        proto_obs.tick = obs_dict.get("tick", 0)
+        proto_obs.economy.cash = obs_dict.get("economy", {}).get("cash", 0)
+        proto_obs.map_info.width = 128
+        proto_obs.map_info.height = 128
 
         mock_bridge = MagicMock()
-        async def mock_wait_ticks(t):
-            return MagicMock()
-        mock_bridge.wait_ticks = mock_wait_ticks
-        mock_bridge.fast_advance = AsyncMock(return_value=MagicMock())
+        mock_bridge.fast_advance_unary = MagicMock(return_value=proto_obs)
         env._bridge = mock_bridge
 
         # Patch observation_to_dict
@@ -2536,9 +2541,6 @@ class TestAdvanceClamping:
 
         env._register_tools(mcp)
         yield env, mcp
-        loop.call_soon_threadsafe(loop.stop)
-        thread.join(timeout=2)
-        loop.close()
         openra_environment.observation_to_dict = original_fn
 
     def test_advance_clamp_note(self, env_with_advance):

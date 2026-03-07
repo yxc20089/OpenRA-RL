@@ -15,7 +15,6 @@ Usage:
 """
 
 import argparse
-import asyncio
 import logging
 import os
 import sys
@@ -36,31 +35,31 @@ logging.basicConfig(
 logger = logging.getLogger("integration-test")
 
 
-async def test_bridge_connection(port: int) -> bool:
+def test_bridge_connection(port: int) -> bool:
     """Test 1: Can we connect to the gRPC bridge?"""
     logger.info("--- Test 1: Bridge Connection ---")
     bridge = BridgeClient(port=port)
     try:
-        ready = await bridge.wait_for_ready(max_retries=30, retry_interval=1.0)
+        ready = bridge.wait_for_ready(max_retries=30, retry_interval=1.0)
         if ready:
             logger.info("PASS: Bridge connection established")
-            state = await bridge.get_state()
+            state = bridge.get_state()
             logger.info(f"  Game phase: {state.phase}, tick: {state.tick}")
             return True
         else:
             logger.error("FAIL: Bridge not ready after 30 attempts")
             return False
     finally:
-        await bridge.close()
+        bridge.close()
 
 
-async def test_session_start(port: int) -> bool:
-    """Test 2: Can we start a streaming session and get an initial observation?"""
-    logger.info("--- Test 2: Session Start ---")
+def test_unary_advance(port: int) -> bool:
+    """Test 2: Can we advance the game via unary FastAdvance RPC?"""
+    logger.info("--- Test 2: Unary FastAdvance ---")
     bridge = BridgeClient(port=port)
     try:
-        await bridge.connect()
-        obs = await bridge.start_session()
+        bridge.connect()
+        obs = bridge.fast_advance_unary(1)
         obs_dict = observation_to_dict(obs)
 
         logger.info(f"  Initial tick: {obs_dict['tick']}")
@@ -68,24 +67,24 @@ async def test_session_start(port: int) -> bool:
         logger.info(f"  Units: {len(obs_dict['units'])}")
         logger.info(f"  Buildings: {len(obs_dict['buildings'])}")
         logger.info(f"  Map: {obs_dict['map_info']['width']}x{obs_dict['map_info']['height']}")
-        logger.info("PASS: Session started, initial observation received")
+        logger.info("PASS: Unary FastAdvance returned observation")
         return True
     except Exception as e:
-        logger.error(f"FAIL: Session start failed: {e}")
+        logger.error(f"FAIL: Unary advance failed: {e}")
         return False
     finally:
-        await bridge.close()
+        bridge.close()
 
 
-async def test_step_cycle(port: int, num_steps: int) -> bool:
+def test_step_cycle(port: int, num_steps: int) -> bool:
     """Test 3: Can we run a full step cycle (send actions, receive observations)?"""
     logger.info(f"--- Test 3: Step Cycle ({num_steps} steps) ---")
     bridge = BridgeClient(port=port)
     reward_fn = OpenRARewardFunction()
 
     try:
-        await bridge.connect()
-        obs = await bridge.start_session()
+        bridge.connect()
+        obs = bridge.fast_advance_unary(1)
         obs_dict = observation_to_dict(obs)
         reward_fn.reset()
 
@@ -111,7 +110,8 @@ async def test_step_cycle(port: int, num_steps: int) -> bool:
                 commands.append({"action": "no_op"})
 
             proto_action = commands_to_proto(commands)
-            obs = await bridge.step(proto_action)
+            proto_commands = list(proto_action.commands)
+            obs = bridge.fast_advance_unary(1, proto_commands)
             obs_dict = observation_to_dict(obs)
 
             reward = reward_fn.compute(obs_dict)
@@ -144,17 +144,17 @@ async def test_step_cycle(port: int, num_steps: int) -> bool:
         traceback.print_exc()
         return False
     finally:
-        await bridge.close()
+        bridge.close()
 
 
-async def test_observation_model_parsing(port: int) -> bool:
+def test_observation_model_parsing(port: int) -> bool:
     """Test 4: Can observation dicts be parsed into Pydantic models?"""
     logger.info("--- Test 4: Observation Model Parsing ---")
     bridge = BridgeClient(port=port)
 
     try:
-        await bridge.connect()
-        obs = await bridge.start_session()
+        bridge.connect()
+        obs = bridge.fast_advance_unary(1)
         obs_dict = observation_to_dict(obs)
 
         from openra_env.server.openra_environment import OpenRAEnvironment
@@ -180,7 +180,7 @@ async def test_observation_model_parsing(port: int) -> bool:
         traceback.print_exc()
         return False
     finally:
-        await bridge.close()
+        bridge.close()
 
 
 def main():
@@ -216,26 +216,14 @@ def main():
             logger.info("=== Skipping OpenRA launch (--skip-launch) ===")
 
         # Run tests
-        loop = asyncio.new_event_loop()
-        try:
-            results["bridge_connection"] = loop.run_until_complete(
-                test_bridge_connection(args.port)
-            )
+        results["bridge_connection"] = test_bridge_connection(args.port)
 
-            if results["bridge_connection"]:
-                results["session_start"] = loop.run_until_complete(
-                    test_session_start(args.port)
-                )
+        if results["bridge_connection"]:
+            results["unary_advance"] = test_unary_advance(args.port)
 
-                results["observation_parsing"] = loop.run_until_complete(
-                    test_observation_model_parsing(args.port)
-                )
+            results["observation_parsing"] = test_observation_model_parsing(args.port)
 
-                results["step_cycle"] = loop.run_until_complete(
-                    test_step_cycle(args.port, args.steps)
-                )
-        finally:
-            loop.close()
+            results["step_cycle"] = test_step_cycle(args.port, args.steps)
 
     finally:
         # Clean up
