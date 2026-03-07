@@ -276,9 +276,11 @@ class OpenRAEnvironment(MCPEnvironment):
         self._state = OpenRAState()
         self._last_obs: Optional[dict] = None
         self._unit_groups: dict[str, list[int]] = {}  # named groups of unit IDs
-        self._pending_placements: dict[str, dict] = {}  # building_type → {cell_x, cell_y}
+        self._pending_placements: dict[str, list[dict]] = {}  # building_type → [{cell_x, cell_y}, ...]
         self._move_targets: dict[int, tuple[int, int]] = {}  # unit_id → (target_x, target_y)
         self._attempted_placements: dict[str, int] = {}  # building_type → attempt_count (for failure detection)
+        self._pending_placement_baselines: dict[str, int] = {}  # building_type → placed count baseline
+        self._processing_pending_placements: bool = False  # re-entrancy guard for auto-placement
         self._placement_results: list[str] = []  # alerts from auto-placement attempts
         self._player_faction: str = ""
         self._enemy_faction: str = ""
@@ -1690,7 +1692,7 @@ class OpenRAEnvironment(MCPEnvironment):
                     return guard.to_result(tick=env._last_obs.get("tick", 0))
             commands = [CommandModel(action=ActionType.BUILD, item_type=building_type)]
             result = env._execute_commands(commands)
-            env._pending_placements[building_type] = {"cell_x": cell_x, "cell_y": cell_y}
+            env._enqueue_pending_placement(building_type, cell_x=cell_x, cell_y=cell_y)
             # Factual build confirmation with estimated ticks
             stats = get_building_stats(building_type)
             bld_cost = stats["cost"] if stats else 0
@@ -1733,7 +1735,7 @@ class OpenRAEnvironment(MCPEnvironment):
                 if not guard.allowed:
                     return guard.to_result(tick=pre_obs.get("tick", 0))
 
-            env._pending_placements.pop(building_type, None)
+            env._dequeue_pending_placement(building_type)
             commands = [CommandModel(action=ActionType.PLACE_BUILDING,
                                     item_type=building_type, target_x=cell_x, target_y=cell_y)]
             return env._execute_commands(commands)
@@ -1752,7 +1754,10 @@ class OpenRAEnvironment(MCPEnvironment):
                     result["current_queue"] = [get_production_item(p) for p in queue]
                 return result
             commands = [CommandModel(action=ActionType.CANCEL_PRODUCTION, item_type=item_type)]
-            return env._execute_commands(commands)
+            result = env._execute_commands(commands)
+            # Keep auto-placement state in sync with explicit cancellation.
+            env._clear_pending_placement(item_type)
+            return result
 
         @configurable_tool
         def deploy_unit(unit_id: int) -> dict:
@@ -2158,27 +2163,36 @@ class OpenRAEnvironment(MCPEnvironment):
 
                 actions = step.get("actions", [])
                 all_commands = []
-                action_names = []
+                action_statuses = []
                 for action in actions:
                     cmds = env._action_to_commands(action, obs)
-                    all_commands.extend(cmds)
-                    action_names.append(action.get("tool", "?"))
+                    tool_name = action.get("tool", "?")
+                    if cmds:
+                        all_commands.extend(cmds)
+                        action_statuses.append(tool_name)
+                    else:
+                        action_statuses.append(f"{tool_name}:SKIPPED")
 
-                if all_commands:
-                    try:
-                        result = env._execute_commands(all_commands)
-                        if result.get("done"):
-                            execution_log.append(
-                                f"Step {step_num}: {', '.join(action_names)} -> game over"
-                            )
-                            break
-                    except Exception as e:
+                if not all_commands:
+                    execution_log.append(
+                        f"Step {step_num}: NO-OP ({', '.join(action_statuses)})"
+                    )
+                    continue
+
+                try:
+                    result = env._execute_commands(all_commands)
+                    if result.get("done"):
                         execution_log.append(
-                            f"Step {step_num}: {', '.join(action_names)} -> ERROR {e}"
+                            f"Step {step_num}: {', '.join(action_statuses)} -> game over"
                         )
                         break
+                except Exception as e:
+                    execution_log.append(
+                        f"Step {step_num}: {', '.join(action_statuses)} -> ERROR {e}"
+                    )
+                    break
 
-                execution_log.append(f"Step {step_num}: {', '.join(action_names)} OK")
+                execution_log.append(f"Step {step_num}: OK ({', '.join(action_statuses)})")
 
             env._refresh_obs()
             obs = env._last_obs or {}
@@ -2252,6 +2266,51 @@ class OpenRAEnvironment(MCPEnvironment):
             eco = obs.get("economy", {})
             return eco.get("cash", 0) + eco.get("ore", 0) < threshold
         return True  # unknown condition → proceed
+
+    def _iter_pending_entries(self, building_type: str) -> list[dict]:
+        """Return normalized pending entries for one building type."""
+        if not hasattr(self, "_pending_placements"):
+            self._pending_placements = {}
+        raw = self._pending_placements.get(building_type)
+        if raw is None:
+            return []
+        if isinstance(raw, list):
+            entries = [dict(x) for x in raw if isinstance(x, dict)]
+        elif isinstance(raw, dict):
+            entries = [dict(raw)]
+        else:
+            entries = []
+        self._pending_placements[building_type] = entries
+        return entries
+
+    def _enqueue_pending_placement(self, building_type: str, cell_x: int, cell_y: int) -> None:
+        """Append one pending placement request for a building type."""
+        entries = self._iter_pending_entries(building_type)
+        entries.append({"cell_x": cell_x, "cell_y": cell_y})
+        self._pending_placements[building_type] = entries
+
+    def _dequeue_pending_placement(self, building_type: str) -> None:
+        """Consume one pending placement request for a building type."""
+        entries = self._iter_pending_entries(building_type)
+        if entries:
+            entries.pop(0)
+        if entries:
+            self._pending_placements[building_type] = entries
+        else:
+            self._pending_placements.pop(building_type, None)
+            if hasattr(self, "_attempted_placements"):
+                self._attempted_placements.pop(building_type, None)
+            if hasattr(self, "_pending_placement_baselines"):
+                self._pending_placement_baselines.pop(building_type, None)
+
+    def _clear_pending_placement(self, building_type: str) -> None:
+        """Drop all pending/attempt state for a building type."""
+        if hasattr(self, "_pending_placements"):
+            self._pending_placements.pop(building_type, None)
+        if hasattr(self, "_attempted_placements"):
+            self._attempted_placements.pop(building_type, None)
+        if hasattr(self, "_pending_placement_baselines"):
+            self._pending_placement_baselines.pop(building_type, None)
 
     # Category selectors for _resolve_unit_ids
     _UNIT_CATEGORY_SELECTORS = {
@@ -2437,9 +2496,11 @@ class OpenRAEnvironment(MCPEnvironment):
                 return []
             if not self._evaluate_guard("build_and_place", {"building_type": btype}, obs=obs).allowed:
                 return []
-            self._pending_placements[btype] = {
-                "cell_x": action.get("cell_x", 0), "cell_y": action.get("cell_y", 0)
-            }
+            self._enqueue_pending_placement(
+                btype,
+                cell_x=action.get("cell_x", 0),
+                cell_y=action.get("cell_y", 0),
+            )
             return [CommandModel(action=ActionType.BUILD, item_type=btype)]
         elif tool == "place_building":
             btype = normalize_name(action["building_type"])
@@ -2815,105 +2876,134 @@ class OpenRAEnvironment(MCPEnvironment):
         around the Construction Yard, tries them in order. Cancels after
         _MAX_PLACEMENT_ATTEMPTS failures to avoid blocking the queue.
         """
-        if not self._last_obs:
+        if getattr(self, "_processing_pending_placements", False):
             return
-        production = self._last_obs.get("production", [])
-        attempted = getattr(self, "_attempted_placements", {})
+        self._processing_pending_placements = True
+        try:
+            if not self._last_obs:
+                return
+            if not hasattr(self, "_attempted_placements"):
+                self._attempted_placements = {}
+            if not hasattr(self, "_pending_placement_baselines"):
+                self._pending_placement_baselines = {}
+            production = self._last_obs.get("production", [])
+            attempted = getattr(self, "_attempted_placements", {})
 
-        # Phase 2: Check previously attempted placements for failure
-        failed = []
-        for btype, attempt_idx in list(attempted.items()):
-            still_in_queue = any(
-                p["queue_type"] in self._PLACEABLE_QUEUE_TYPES and p["item"] == btype and p["progress"] >= 0.99
-                for p in production
-            )
-            if still_in_queue:
-                # Building is still in queue → last placement failed, try next candidate
-                candidates = self._find_placement_candidates(btype, self._last_obs)
-                if attempt_idx < min(len(candidates), self._MAX_PLACEMENT_ATTEMPTS):
-                    # Try the next candidate position
-                    pos = candidates[attempt_idx]
-                    try:
-                        commands = [CommandModel(
-                            action=ActionType.PLACE_BUILDING,
-                            item_type=btype,
-                            target_x=pos["cell_x"],
-                            target_y=pos["cell_y"],
-                        )]
-                        self._execute_commands(commands)
-                        attempted[btype] = attempt_idx + 1
-                    except Exception:
-                        attempted[btype] = attempt_idx + 1
-                else:
-                    # Exhausted all candidates — report failure and cancel
-                    if btype in self._WATER_BUILDINGS:
-                        reason = f"{btype} requires water tiles — must be placed on water, not land"
+            # Phase 2: Check previously attempted placements for failure
+            failed = []
+            for btype, attempt_idx in list(attempted.items()):
+                still_in_queue = any(
+                    p["queue_type"] in self._PLACEABLE_QUEUE_TYPES and p["item"] == btype and p["progress"] >= 0.99
+                    for p in production
+                )
+                if still_in_queue:
+                    # Building is still in queue -> last placement failed, try next candidate
+                    candidates = self._find_placement_candidates(btype, self._last_obs)
+                    if attempt_idx < min(len(candidates), self._MAX_PLACEMENT_ATTEMPTS):
+                        # Try the next candidate position
+                        pos = candidates[attempt_idx]
+                        try:
+                            commands = [CommandModel(
+                                action=ActionType.PLACE_BUILDING,
+                                item_type=btype,
+                                target_x=pos["cell_x"],
+                                target_y=pos["cell_y"],
+                            )]
+                            self._execute_commands(commands)
+                            attempted[btype] = attempt_idx + 1
+                        except Exception:
+                            attempted[btype] = attempt_idx + 1
                     else:
-                        reason = f"no valid position found (tried {attempt_idx} spots)"
+                        # Exhausted all candidates -> report failure and cancel
+                        if btype in self._WATER_BUILDINGS:
+                            reason = f"{btype} requires water tiles — must be placed on water, not land"
+                        else:
+                            reason = f"no valid position found (tried {attempt_idx} spots)"
+                        self._placement_results.append(
+                            self._app_config.prompts.placement_failed.format(
+                                building=btype, reason=reason)
+                        )
+                        try:
+                            cancel_cmd = [CommandModel(action=ActionType.CANCEL_PRODUCTION, item_type=btype)]
+                            self._execute_commands(cancel_cmd)
+                        except Exception:
+                            pass
+                        failed.append(btype)
+                else:
+                    # Queue item gone: treat as success only if building count increased.
+                    baseline = self._pending_placement_baselines.get(btype, 0)
+                    cur_count = sum(1 for b in self._last_obs.get("buildings", []) if b.get("type") == btype)
+                    if cur_count > baseline:
+                        self._placement_results.append(
+                            self._app_config.prompts.placement_success.format(building=btype)
+                        )
+                    else:
+                        self._placement_results.append(
+                            f"PLACEMENT CLEARED: {btype} left queue without confirmed placement"
+                        )
+                    failed.append(btype)
+
+            for btype in failed:
+                attempted.pop(btype, None)
+                self._dequeue_pending_placement(btype)
+
+            # Phase 1: Send placement commands for newly ready buildings
+            if not getattr(self, "_pending_placements", None):
+                return
+            for btype in list(self._pending_placements.keys()):
+                entries = self._iter_pending_entries(btype)
+                if not entries:
+                    self._clear_pending_placement(btype)
+                    continue
+                if btype in attempted:
+                    continue  # already being tracked
+                ready = any(
+                    p["queue_type"] in self._PLACEABLE_QUEUE_TYPES and p["item"] == btype and p["progress"] >= 0.99
+                    for p in production
+                )
+                if not ready:
+                    continue
+
+                # Water buildings can't auto-place on land — warn and skip
+                if btype in self._WATER_BUILDINGS:
+                    self._placement_results.append(
+                        self._app_config.prompts.placement_water.format(building=btype)
+                    )
+                    self._dequeue_pending_placement(btype)
+                    continue
+
+                coords = entries[0]
+
+                # Find best placement position using full CY radius search
+                candidates = self._find_placement_candidates(btype, self._last_obs)
+
+                # Use user-specified coords if provided and valid, otherwise use best candidate
+                cx, cy = coords["cell_x"], coords["cell_y"]
+                if cx == 0 and cy == 0 and candidates:
+                    cx, cy = candidates[0]["cell_x"], candidates[0]["cell_y"]
+
+                # Snapshot current placed count to validate true success later.
+                self._pending_placement_baselines[btype] = sum(
+                    1 for b in self._last_obs.get("buildings", []) if b.get("type") == btype
+                )
+
+                try:
+                    commands = [CommandModel(
+                        action=ActionType.PLACE_BUILDING,
+                        item_type=btype,
+                        target_x=cx,
+                        target_y=cy,
+                    )]
+                    self._execute_commands(commands)
+                    attempted[btype] = 1  # start tracking from candidate index 1
+                except Exception:
                     self._placement_results.append(
                         self._app_config.prompts.placement_failed.format(
-                            building=btype, reason=reason)
+                            building=btype, reason="command error")
                     )
-                    try:
-                        cancel_cmd = [CommandModel(action=ActionType.CANCEL_PRODUCTION, item_type=btype)]
-                        self._execute_commands(cancel_cmd)
-                    except Exception:
-                        pass
-                    failed.append(btype)
-            else:
-                # Building no longer in queue → placement succeeded
-                self._placement_results.append(
-                    self._app_config.prompts.placement_success.format(building=btype))
-                failed.append(btype)
-
-        for btype in failed:
-            attempted.pop(btype, None)
-            self._pending_placements.pop(btype, None)
-
-        # Phase 1: Send placement commands for newly ready buildings
-        if not getattr(self, "_pending_placements", None):
-            return
-        for btype, coords in list(self._pending_placements.items()):
-            if btype in attempted:
-                continue  # already being tracked
-            ready = any(
-                p["queue_type"] in self._PLACEABLE_QUEUE_TYPES and p["item"] == btype and p["progress"] >= 0.99
-                for p in production
-            )
-            if not ready:
-                continue
-
-            # Water buildings can't auto-place on land — warn and skip
-            if btype in self._WATER_BUILDINGS:
-                self._placement_results.append(
-                    self._app_config.prompts.placement_water.format(building=btype)
-                )
-                self._pending_placements.pop(btype, None)
-                continue
-
-            # Find best placement position using full CY radius search
-            candidates = self._find_placement_candidates(btype, self._last_obs)
-
-            # Use user-specified coords if provided and valid, otherwise use best candidate
-            cx, cy = coords["cell_x"], coords["cell_y"]
-            if cx == 0 and cy == 0 and candidates:
-                cx, cy = candidates[0]["cell_x"], candidates[0]["cell_y"]
-
-            try:
-                commands = [CommandModel(
-                    action=ActionType.PLACE_BUILDING,
-                    item_type=btype,
-                    target_x=cx,
-                    target_y=cy,
-                )]
-                self._execute_commands(commands)
-                attempted[btype] = 1  # start tracking from candidate index 1
-            except Exception:
-                self._placement_results.append(
-                    self._app_config.prompts.placement_failed.format(
-                        building=btype, reason="command error")
-                )
-                self._pending_placements.pop(btype, None)
+                    self._dequeue_pending_placement(btype)
+        finally:
+            self._processing_pending_placements = False
 
     def _execute_commands(self, commands: list[CommandModel]) -> dict:
         """Send commands, step the game, update cache, return summary."""
@@ -3034,6 +3124,8 @@ class OpenRAEnvironment(MCPEnvironment):
         self._pending_placements.clear()
         self._move_targets.clear()
         self._attempted_placements.clear()
+        self._pending_placement_baselines.clear()
+        self._processing_pending_placements = False
         self._placement_results.clear()
         self._planning_active = False
         self._planning_start_time = 0.0

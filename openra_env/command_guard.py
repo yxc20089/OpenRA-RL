@@ -161,7 +161,7 @@ class CommandGuard:
             )
 
         queue_entry = self._find_queue_entry(obs, btype, placeable_queue_types)
-        pending = btype in {normalize_name(k) for k in pending_placements.keys()}
+        pending = self._has_pending_type(pending_placements, btype)
 
         if tool_name in {"build_structure", "build_and_place"}:
             if pending:
@@ -287,6 +287,19 @@ class CommandGuard:
             if get_production_item(p) == item:
                 return p
         return None
+
+    @staticmethod
+    def _has_pending_type(pending_placements: dict[str, Any], btype: str) -> bool:
+        """True when a building type has at least one pending placement entry."""
+        for key, value in pending_placements.items():
+            if normalize_name(key) != btype:
+                continue
+            if isinstance(value, list):
+                return len(value) > 0
+            if isinstance(value, dict):
+                return True
+            return bool(value)
+        return False
 
     def _record_building_action(self, item: str, action: str, tick: int) -> None:
         hist = self._building_action_history.setdefault(item, [])
