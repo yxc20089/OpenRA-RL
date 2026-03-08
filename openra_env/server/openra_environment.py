@@ -2179,6 +2179,9 @@ class OpenRAEnvironment(MCPEnvironment):
             Returns: game state summary + execution log.
             """
             execution_log = []
+            steps_executed = 0
+            steps_skipped = 0
+            steps_partial = 0
             start_tick = env._last_obs["tick"] if env._last_obs else 0
 
             for i, step in enumerate(steps):
@@ -2195,31 +2198,40 @@ class OpenRAEnvironment(MCPEnvironment):
                 condition = step.get("condition")
                 if condition and not env._check_plan_condition(condition, obs):
                     execution_log.append(f"Step {step_num}: SKIPPED ({condition} = false)")
+                    steps_skipped += 1
                     continue
 
                 actions = step.get("actions", [])
                 all_commands = []
                 action_statuses = []
+                skipped_actions = 0
                 for action in actions:
                     cmds = env._action_to_commands(action, obs)
                     tool_name = action.get("tool", "?")
                     if cmds:
                         all_commands.extend(cmds)
-                        action_statuses.append(tool_name)
+                        action_statuses.append(f"{tool_name}:OK")
                     else:
                         action_statuses.append(f"{tool_name}:SKIPPED")
+                        skipped_actions += 1
 
                 if not all_commands:
                     execution_log.append(
-                        f"Step {step_num}: NO-OP ({', '.join(action_statuses)})"
+                        f"Step {step_num}: SKIPPED ({', '.join(action_statuses)})"
                     )
+                    steps_skipped += 1
                     continue
 
                 try:
                     result = env._execute_commands(all_commands)
+                    step_status = "PARTIAL" if skipped_actions > 0 else "OK"
+                    if step_status == "PARTIAL":
+                        steps_partial += 1
+                    else:
+                        steps_executed += 1
                     if result.get("done"):
                         execution_log.append(
-                            f"Step {step_num}: {', '.join(action_statuses)} -> game over"
+                            f"Step {step_num}: {step_status} ({', '.join(action_statuses)}) -> game over"
                         )
                         break
                 except Exception as e:
@@ -2228,18 +2240,16 @@ class OpenRAEnvironment(MCPEnvironment):
                     )
                     break
 
-                execution_log.append(f"Step {step_num}: OK ({', '.join(action_statuses)})")
+                execution_log.append(f"Step {step_num}: {step_status} ({', '.join(action_statuses)})")
 
             env._refresh_obs()
             obs = env._last_obs or {}
             end_tick = obs.get("tick", start_tick)
-            executed = sum(1 for e in execution_log if "OK" in e)
-            skipped = sum(1 for e in execution_log if "SKIPPED" in e)
-
             return {
                 "steps_total": len(steps),
-                "steps_executed": executed,
-                "steps_skipped": skipped,
+                "steps_executed": steps_executed,
+                "steps_skipped": steps_skipped,
+                "steps_partial": steps_partial,
                 "tick": end_tick,
                 "done": obs.get("done", False),
                 "result": obs.get("result", ""),
