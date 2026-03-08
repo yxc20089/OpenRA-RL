@@ -374,7 +374,13 @@ class CommandGuard:
         (_, prev_action_2), (last_tick, prev_action_1) = hist[-2], hist[-1]
         if tick - last_tick > self._LOOP_WINDOW_TICKS:
             return False
-        return prev_action_2 == action and prev_action_1 != action
+        # Only treat explicit build<->cancel alternation as a toggle loop.
+        # Legitimate sequences like build -> place -> build should remain allowed.
+        if action == "build":
+            return prev_action_2 == "build" and prev_action_1 == "cancel"
+        if action == "cancel":
+            return prev_action_2 == "cancel" and prev_action_1 == "build"
+        return False
 
     def _is_repeated_action(self, item: str, action: str, tick: int, window: int) -> bool:
         hist = self._building_action_history.get(item, [])

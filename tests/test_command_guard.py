@@ -124,3 +124,19 @@ def test_cancel_repeat_backoff_deferred():
     })
     assert second.status == "defer"
     assert second.reason == "cancel_repeat_backoff"
+
+
+def test_build_place_build_is_not_treated_as_toggle_loop():
+    guard = CommandGuard()
+
+    first_build = guard.evaluate("build_structure", {"building_type": "powr"}, _base_obs(tick=200))
+    assert first_build.allowed
+
+    place_obs = _base_obs(tick=201) | {
+        "production": [{"queue_type": "Building", "item": "powr", "progress": 1.0}]
+    }
+    place_decision = guard.evaluate("place_building", {"building_type": "powr"}, place_obs)
+    assert place_decision.allowed
+
+    second_build = guard.evaluate("build_structure", {"building_type": "powr"}, _base_obs(tick=202))
+    assert second_build.allowed
