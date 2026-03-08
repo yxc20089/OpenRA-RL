@@ -168,6 +168,120 @@ def _render_minimap(obs: dict, max_cols: int = 28) -> str:
     return header + "\n" + "\n".join(lines) + "\n" + legend
 
 
+def _render_minimap_png(obs: dict, cell_size: int = 6) -> str:
+    """Render the spatial tensor as a colored PNG for vision-capable LLMs.
+
+    Each map cell becomes a cell_size×cell_size pixel block. Color key:
+        dark gray  (60,60,60)   = unexplored (shroud)
+        dark blue  (40,80,160)  = water / impassable
+        yellow-green (200,200,50) = ore / resources
+        olive green  (80,120,60)  = explored land (default)
+    Unit/building overlays (center dot):
+        blue  (50,100,255)  = own building
+        cyan  (100,200,255) = own unit
+        dark red (200,50,50) = enemy building
+        bright red (255,80,80) = enemy unit
+
+    Returns a data-URI string ("data:image/png;base64,...") ready for the
+    OpenAI vision API, or an empty string if rendering is not possible
+    (e.g. Pillow not installed, or spatial data unavailable).
+    """
+    import base64
+    import io
+    import struct
+
+    try:
+        from PIL import Image
+    except ImportError:
+        return ""
+
+    map_info = obs.get("map_info", {})
+    w = map_info.get("width", 0)
+    h = map_info.get("height", 0)
+    channels = obs.get("spatial_channels", 0)
+    spatial = obs.get("spatial_map", "")
+
+    if w == 0 or h == 0 or channels == 0 or not spatial:
+        return ""
+
+    try:
+        raw = base64.b64decode(spatial)
+    except Exception:
+        return ""
+
+    COLOR_UNEXPLORED = (60, 60, 60)
+    COLOR_WATER = (40, 80, 160)
+    COLOR_ORE = (200, 200, 50)
+    COLOR_LAND = (80, 120, 60)
+    COLOR_OWN_BUILDING = (50, 100, 255)
+    COLOR_OWN_UNIT = (100, 200, 255)
+    COLOR_ENEMY_BUILDING = (200, 50, 50)
+    COLOR_ENEMY_UNIT = (255, 80, 80)
+
+    img_w = w * cell_size
+    img_h = h * cell_size
+    img = Image.new("RGB", (img_w, img_h), COLOR_UNEXPLORED)
+    pixels = img.load()
+
+    bytes_per_cell = channels * 4  # float32
+    for cy in range(h):
+        for cx in range(w):
+            byte_off = (cy * w + cx) * bytes_per_cell
+            try:
+                fog = struct.unpack_from("f", raw, byte_off + 4 * 4)[0]
+            except struct.error:
+                color = COLOR_UNEXPLORED
+            else:
+                if fog <= 0.25:
+                    color = COLOR_UNEXPLORED
+                else:
+                    try:
+                        passability = struct.unpack_from("f", raw, byte_off + 3 * 4)[0]
+                    except struct.error:
+                        passability = 1.0
+                    if passability < 0.5:
+                        color = COLOR_WATER
+                    else:
+                        try:
+                            resources = struct.unpack_from("f", raw, byte_off + 2 * 4)[0]
+                        except struct.error:
+                            resources = 0.0
+                        color = COLOR_ORE if resources > 0 else COLOR_LAND
+
+            px0, py0 = cx * cell_size, cy * cell_size
+            for dy in range(cell_size):
+                for dx in range(cell_size):
+                    pixels[px0 + dx, py0 + dy] = color
+
+    dot = max(2, cell_size // 3)
+
+    def _draw_dot(cell_x: int, cell_y: int, color: tuple) -> None:
+        if cell_x < 0 or cell_y < 0 or cell_x >= w or cell_y >= h:
+            return
+        cx0 = cell_x * cell_size + (cell_size - dot) // 2
+        cy0 = cell_y * cell_size + (cell_size - dot) // 2
+        for dy in range(dot):
+            for dx in range(dot):
+                px = cx0 + dx
+                py = cy0 + dy
+                if 0 <= px < img_w and 0 <= py < img_h:
+                    pixels[px, py] = color
+
+    for b in obs.get("buildings", []):
+        _draw_dot(b.get("cell_x", -1), b.get("cell_y", -1), COLOR_OWN_BUILDING)
+    for u in obs.get("units", []):
+        _draw_dot(u.get("cell_x", -1), u.get("cell_y", -1), COLOR_OWN_UNIT)
+    for b in obs.get("visible_enemy_buildings", []):
+        _draw_dot(b.get("cell_x", -1), b.get("cell_y", -1), COLOR_ENEMY_BUILDING)
+    for u in obs.get("visible_enemies", []):
+        _draw_dot(u.get("cell_x", -1), u.get("cell_y", -1), COLOR_ENEMY_UNIT)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
 class OpenRAEnvironment(MCPEnvironment):
     """OpenRA RL Environment with MCP tool support.
 

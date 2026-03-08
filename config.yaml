@@ -107,6 +107,8 @@ opponent:
 #   max_retries: 4                    # Retry on transient errors
 #   retry_backoff_s: 10               # Base backoff (multiplied by attempt)
 #   request_timeout_s: 120.0          # HTTP timeout per request
+#   vision_minimap: false             # Attach PNG minimap to each turn (requires Pillow + vision model)
+#   vision_minimap_cell_size: 6       # Pixels per map cell (larger = higher res, more tokens)
 #   extra_headers:                    # Custom headers (OpenRouter-specific)
 #     HTTP-Referer: "https://github.com/openra-rl"
 #     X-Title: "OpenRA-RL Agent"
