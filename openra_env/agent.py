@@ -5,8 +5,11 @@ that implements the OpenAI Chat Completions API with tool calling.
 """
 
 import asyncio
+import base64
+import io
 import json
 import logging
+import struct
 import time
 
 from collections import defaultdict
@@ -274,6 +277,102 @@ def compose_pregame_briefing(state: dict) -> str:
         *bldg_lines,
     ]
     return "\n".join(parts)
+
+
+def _render_minimap_png(obs: dict, cell_size: int = 6) -> str:
+    """Render spatial tensor as a colored PNG for vision-capable LLMs.
+
+    Returns a data-URI string ("data:image/png;base64,...") or "" if unavailable.
+    Requires Pillow: pip install -e ".[vision]"
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return ""
+
+    map_info = obs.get("map_info", {})
+    w = map_info.get("width", 0)
+    h = map_info.get("height", 0)
+    channels = obs.get("spatial_channels", 0)
+    spatial = obs.get("spatial_map", "")
+
+    if w == 0 or h == 0 or channels == 0 or not spatial:
+        return ""
+
+    try:
+        raw = base64.b64decode(spatial)
+    except Exception:
+        return ""
+
+    COLOR_UNEXPLORED = (60, 60, 60)
+    COLOR_WATER = (40, 80, 160)
+    COLOR_ORE = (200, 200, 50)
+    COLOR_LAND = (80, 120, 60)
+    COLOR_OWN_BUILDING = (50, 100, 255)
+    COLOR_OWN_UNIT = (100, 200, 255)
+    COLOR_ENEMY_BUILDING = (200, 50, 50)
+    COLOR_ENEMY_UNIT = (255, 80, 80)
+
+    img_w = w * cell_size
+    img_h = h * cell_size
+    img = Image.new("RGB", (img_w, img_h), COLOR_UNEXPLORED)
+    pixels = img.load()
+
+    bytes_per_cell = channels * 4
+    for cy in range(h):
+        for cx in range(w):
+            byte_off = (cy * w + cx) * bytes_per_cell
+            try:
+                fog = struct.unpack_from("f", raw, byte_off + 4 * 4)[0]
+            except struct.error:
+                color = COLOR_UNEXPLORED
+            else:
+                if fog <= 0.25:
+                    color = COLOR_UNEXPLORED
+                else:
+                    try:
+                        passability = struct.unpack_from("f", raw, byte_off + 3 * 4)[0]
+                    except struct.error:
+                        passability = 1.0
+                    if passability < 0.5:
+                        color = COLOR_WATER
+                    else:
+                        try:
+                            resources = struct.unpack_from("f", raw, byte_off + 2 * 4)[0]
+                        except struct.error:
+                            resources = 0.0
+                        color = COLOR_ORE if resources > 0 else COLOR_LAND
+
+            px0, py0 = cx * cell_size, cy * cell_size
+            for dy in range(cell_size):
+                for dx in range(cell_size):
+                    pixels[px0 + dx, py0 + dy] = color
+
+    dot = max(2, cell_size // 3)
+
+    def _dot(cell_x: int, cell_y: int, color: tuple) -> None:
+        if cell_x < 0 or cell_y < 0 or cell_x >= w or cell_y >= h:
+            return
+        x0 = cell_x * cell_size + (cell_size - dot) // 2
+        y0 = cell_y * cell_size + (cell_size - dot) // 2
+        for dy in range(dot):
+            for dx in range(dot):
+                px, py = x0 + dx, y0 + dy
+                if 0 <= px < img_w and 0 <= py < img_h:
+                    pixels[px, py] = color
+
+    for b in obs.get("buildings", []):
+        _dot(b.get("cell_x", -1), b.get("cell_y", -1), COLOR_OWN_BUILDING)
+    for u in obs.get("units", []):
+        _dot(u.get("cell_x", -1), u.get("cell_y", -1), COLOR_OWN_UNIT)
+    for b in obs.get("visible_enemy_buildings", []):
+        _dot(b.get("cell_x", -1), b.get("cell_y", -1), COLOR_ENEMY_BUILDING)
+    for u in obs.get("visible_enemies", []):
+        _dot(u.get("cell_x", -1), u.get("cell_y", -1), COLOR_ENEMY_UNIT)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 def format_state_briefing(state: dict) -> str:
@@ -925,7 +1024,21 @@ async def run_agent(config, verbose: bool = False):
                         event_tracker.update_from_state(briefing_state)
                     briefing = format_state_briefing(briefing_state)
                     if briefing:
-                        messages.append({"role": "user", "content": briefing})
+                        if llm_config.vision_minimap and isinstance(briefing_state, dict):
+                            png_uri = _render_minimap_png(
+                                briefing_state,
+                                cell_size=llm_config.vision_minimap_cell_size,
+                            )
+                            if png_uri:
+                                content = [
+                                    {"type": "text", "text": briefing},
+                                    {"type": "image_url", "image_url": {"url": png_uri}},
+                                ]
+                            else:
+                                content = briefing
+                        else:
+                            content = briefing
+                        messages.append({"role": "user", "content": content})
                         if verbose:
                             # Print just the alerts
                             for a in briefing_state.get("alerts", []):

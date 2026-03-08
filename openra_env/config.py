@@ -135,6 +135,8 @@ class LLMConfig(BaseModel):
     retry_backoff_s: int = 10
     request_timeout_s: float = 120.0
     reasoning_effort: Optional[str] = None  # "none", "low", "medium", "high"
+    vision_minimap: bool = False  # Attach PNG minimap image to each turn message (requires Pillow + vision model)
+    vision_minimap_cell_size: int = 6  # Pixels per map cell (larger = higher resolution, more tokens)
     extra_headers: dict[str, str] = Field(
         default_factory=lambda: {
             "HTTP-Referer": "https://github.com/openra-rl",

@@ -36,6 +36,9 @@ training = [
     "torch>=2.0.0",
     "transformers>=4.30.0",
 ]
+vision = [
+    "Pillow>=9.0",
+]
 
 [build-system]
 requires = ["hatchling"]
