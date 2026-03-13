@@ -64,6 +64,11 @@ def pull_image(version: Optional[str] = None, quiet: bool = False) -> bool:
     )
     if result.returncode != 0:
         error(f"Failed to pull {image}")
+        if version is None:
+            error(
+                "Hint: try pinning a specific version, e.g. "
+                "'openra-rl play --version 0.4.1'"
+            )
         return False
     if not quiet:
         success("Image pulled successfully.")
