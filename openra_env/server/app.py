@@ -28,10 +28,22 @@ _multi_session = True
 _base_grpc_port = int(os.getenv("GRPC_BASE_PORT", "9999"))
 _max_concurrent = int(os.getenv("MAX_CONCURRENT_GAMES", "64"))
 
+# Resolve OpenRA path from CLI arg or env var.
+# CLI: python -m openra_env.server.app --openra-path /workspace/openra-build
+# Env: OPENRA_PATH=/workspace/openra-build
+import sys as _sys
+_openra_path = os.environ.get("OPENRA_PATH", "/opt/openra")
+for _i, _arg in enumerate(_sys.argv):
+    if _arg == "--openra-path" and _i + 1 < len(_sys.argv):
+        _openra_path = _sys.argv[_i + 1]
+        os.environ["OPENRA_PATH"] = _openra_path
+        break
+
 # Single daemon process, shared gRPC channel.
 _daemon = OpenRAProcessManager(OpenRAConfig(
     grpc_port=_base_grpc_port,
     multi_session=True,
+    openra_path=_openra_path,
 ))
 
 _shared_channel = grpc.insecure_channel(
