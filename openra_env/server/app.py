@@ -21,59 +21,42 @@ from openra_env.models import OpenRAAction, OpenRAObservation
 from openra_env.server.openra_environment import OpenRAEnvironment
 from openra_env.server.openra_process import OpenRAConfig, OpenRAProcessManager
 
-# Mode selection: set MULTI_SESSION=1 to use the new single-process architecture
-_multi_session = os.getenv("MULTI_SESSION", "0") == "1"
+# Multi-session mode: single .NET daemon process handles all games.
+# Eliminates per-game JIT contention and startup timeouts.
+# Legacy single-session mode (one process per game) removed.
+_multi_session = True
 _base_grpc_port = int(os.getenv("GRPC_BASE_PORT", "9999"))
-_max_concurrent = int(os.getenv("MAX_CONCURRENT_GAMES", "8"))
+_max_concurrent = int(os.getenv("MAX_CONCURRENT_GAMES", "64"))
 
-if _multi_session:
-    # Multi-session mode: single daemon process, shared gRPC channel.
-    # Start the daemon if not already running.
-    _daemon = OpenRAProcessManager(OpenRAConfig(
+# Single daemon process, shared gRPC channel.
+_daemon = OpenRAProcessManager(OpenRAConfig(
+    grpc_port=_base_grpc_port,
+    multi_session=True,
+))
+
+_shared_channel = grpc.insecure_channel(
+    f"localhost:{_base_grpc_port}",
+    options=[
+        ("grpc.max_receive_message_length", 64 * 1024 * 1024),
+        ("grpc.max_send_message_length", 16 * 1024 * 1024),
+        ("grpc.keepalive_time_ms", 10000),
+        ("grpc.keepalive_timeout_ms", 5000),
+    ],
+)
+
+
+def _env_factory():
+    return OpenRAEnvironment(
         grpc_port=_base_grpc_port,
         multi_session=True,
-    ))
-
-    # Create shared gRPC channel
-    _shared_channel = grpc.insecure_channel(
-        f"localhost:{_base_grpc_port}",
-        options=[
-            ("grpc.max_receive_message_length", 64 * 1024 * 1024),
-            ("grpc.max_send_message_length", 16 * 1024 * 1024),
-            ("grpc.keepalive_time_ms", 10000),
-            ("grpc.keepalive_timeout_ms", 5000),
-        ],
+        shared_channel=_shared_channel,
     )
 
-    def _env_factory():
-        env = OpenRAEnvironment(
-            grpc_port=_base_grpc_port,
-            multi_session=True,
-            shared_channel=_shared_channel,
-        )
-        return env
 
-    # Launch daemon on first import (idempotent — checks if already running)
-    if not _daemon.is_alive():
-        _daemon.launch()
-        print(f"Multi-session daemon launched on port {_base_grpc_port}")
-
-else:
-    # Single-session (legacy) mode: port pool, one process per session
-    _port_pool = list(range(_base_grpc_port, _base_grpc_port + _max_concurrent))
-    _port_lock = __import__("threading").Lock()
-
-    def _env_factory():
-        with _port_lock:
-            if not _port_pool:
-                raise RuntimeError(
-                    f"No free gRPC ports (max {_max_concurrent} concurrent games). "
-                    "Increase MAX_CONCURRENT_GAMES or wait for a session to finish."
-                )
-            port = _port_pool.pop(0)
-        env = OpenRAEnvironment(grpc_port=port)
-        env._port_pool_ref = (_port_pool, _port_lock, port)
-        return env
+# Launch daemon on first import (idempotent — checks if already running)
+if not _daemon.is_alive():
+    _daemon.launch()
+    print(f"Game daemon launched on port {_base_grpc_port}")
 
 
 app = create_app(
