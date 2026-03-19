@@ -2916,7 +2916,7 @@ class OpenRAEnvironment(MCPEnvironment):
             logger.info(f"Session created: {session_id}")
 
             # Wait for session to be ready (game world created and paused)
-            ready = self._bridge.wait_for_ready(max_retries=60, retry_interval=0.5)
+            ready = self._bridge.wait_for_ready(max_retries=120, retry_interval=0.5)
         else:
             # Single-session mode: launch a new OpenRA process.
             # Serialized via semaphore to prevent CPU starvation from JIT.
