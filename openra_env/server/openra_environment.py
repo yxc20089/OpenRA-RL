@@ -2883,6 +2883,10 @@ class OpenRAEnvironment(MCPEnvironment):
         if seed is not None:
             self._config.seed = seed
 
+        # Update bot type if provided (empty = no AI, passive buildings only)
+        if "bot_type" in kwargs:
+            self._config.bot_type = kwargs["bot_type"]
+
         # Update map if provided (for scenario-based training)
         map_name = kwargs.get("map_name")
         map_data = kwargs.get("map_data")  # base64-encoded .oramap bytes
@@ -2907,7 +2911,12 @@ class OpenRAEnvironment(MCPEnvironment):
             logger.info(f"Creating session: map={self._config.map_name}")
             self._bridge.connect()
             actual_bot_type = BOT_TYPE_MAP.get(self._config.bot_type, self._config.bot_type)
-            bots = f"Multi1:rl-agent,{self._config.ai_slot}:{actual_bot_type}"
+            if actual_bot_type:
+                bots = f"Multi1:rl-agent,{self._config.ai_slot}:{actual_bot_type}"
+            else:
+                # No AI bot — enemy player exists but has no bot controller
+                # (passive buildings only, no unit production or attacks)
+                bots = "Multi1:rl-agent"
             session_id = self._bridge.create_session(
                 map_name=self._config.map_name,
                 bots=bots,
