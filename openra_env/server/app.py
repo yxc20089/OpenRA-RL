@@ -73,13 +73,8 @@ def _check_port_free(port: int) -> None:
         try:
             s.bind(("", port))
         except OSError as e:
-            import subprocess
-            holder = subprocess.run(
-                ["lsof", "-ti", f":{port}"], capture_output=True, text=True
-            ).stdout.strip()
             raise RuntimeError(
-                f"Port {port} already in use (PIDs: {holder or 'unknown'}). "
-                f"Kill stale processes: kill -9 {holder}"
+                f"Port {port} already in use. Kill stale processes on this port."
             ) from e
 
 if not _daemon.is_alive():
