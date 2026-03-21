@@ -151,14 +151,40 @@ def shutdown_server():
 
 @app.post("/restart-daemon")
 def restart_daemon():
-    """Kill and restart the .NET daemon for clean session state."""
+    """Kill and restart the .NET daemon + recreate gRPC channel for clean state."""
+    global _shared_channel
     try:
         if _daemon.is_alive():
             _daemon.kill(timeout=10.0)
         _daemon.reap()
         import time as _time
         _time.sleep(2)
+
+        # Close and recreate gRPC channel — old channel has stale state
+        try:
+            _shared_channel.close()
+        except Exception:
+            pass
+        _shared_channel = grpc.insecure_channel(
+            f"localhost:{_base_grpc_port}",
+            options=[
+                ("grpc.max_receive_message_length", 64 * 1024 * 1024),
+                ("grpc.max_send_message_length", 16 * 1024 * 1024),
+                ("grpc.keepalive_time_ms", 10000),
+                ("grpc.keepalive_timeout_ms", 5000),
+            ],
+        )
+
         _daemon.launch()
+
+        # Wait for daemon to be ready
+        for _ in range(30):
+            try:
+                grpc.channel_ready_future(_shared_channel).result(timeout=1.0)
+                break
+            except Exception:
+                _time.sleep(0.5)
+
         return {"status": "restarted", "daemon_pid": _daemon.pid}
     except Exception as e:
         return {"status": "failed", "error": str(e)}
