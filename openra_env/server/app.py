@@ -70,12 +70,19 @@ def _env_factory():
 import socket as _socket
 def _check_port_free(port: int) -> None:
     with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+        s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
         try:
             s.bind(("", port))
         except OSError as e:
-            raise RuntimeError(
-                f"Port {port} already in use. Kill stale processes on this port."
-            ) from e
+            # Check if a real process is using the port (not just TIME_WAIT)
+            import subprocess as _sp
+            result = _sp.run(["fuser", f"{port}/tcp"], capture_output=True)
+            if result.returncode == 0:
+                raise RuntimeError(
+                    f"Port {port} already in use (PID on port). Kill stale processes."
+                ) from e
+            # TIME_WAIT only — safe to proceed
+            print(f"Port {port} in TIME_WAIT, proceeding with SO_REUSEADDR")
 
 if not _daemon.is_alive():
     _daemon.reap()  # clean up zombie from previous run if any
@@ -105,14 +112,28 @@ def _on_shutdown():
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint. Reports daemon status and reaps zombies."""
+    """Health check endpoint. Auto-restarts daemon if dead, verifies gRPC."""
     alive = _daemon.is_alive()
     if not alive:
         _daemon.reap()
+        try:
+            _daemon.launch()
+            alive = _daemon.is_alive()
+            print(f"Auto-restarted game daemon (PID {_daemon.pid})")
+        except Exception as e:
+            print(f"Failed to auto-restart daemon: {e}")
+    grpc_ok = False
+    if alive:
+        try:
+            grpc.channel_ready_future(_shared_channel).result(timeout=2.0)
+            grpc_ok = True
+        except Exception:
+            pass
     return {
-        "status": "ok" if alive else "daemon_dead",
+        "status": "healthy" if (alive and grpc_ok) else "degraded",
         "daemon_pid": _daemon.pid,
         "daemon_alive": alive,
+        "grpc_ok": grpc_ok,
         "grpc_port": _base_grpc_port,
     }
 
@@ -127,6 +148,22 @@ def shutdown_server():
         os._exit(0)
     threading.Thread(target=_do_shutdown, daemon=True).start()
     return {"status": "shutting_down", "daemon_pid": _daemon.pid}
+
+@app.post("/restart-daemon")
+def restart_daemon():
+    """Kill and restart the .NET daemon for clean session state."""
+    try:
+        if _daemon.is_alive():
+            _daemon.kill(timeout=10.0)
+        _daemon.reap()
+        import time as _time
+        _time.sleep(2)
+        _daemon.launch()
+        return {"status": "restarted", "daemon_pid": _daemon.pid}
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
+
+
 
 
 # ── Try Agent: LLM demo endpoint ────────────────────────────────────────────
