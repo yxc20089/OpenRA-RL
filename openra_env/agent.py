@@ -782,7 +782,12 @@ async def run_agent(config, verbose: bool = False):
         openai_tools = mcp_tools_to_openai(mcp_tools)
 
         # Add directive tools if enabled (client-side tools)
-        if directives_manager:
+        directives_tools_enabled = getattr(
+            getattr(getattr(config, "tools", None), "categories", None),
+            "directives",
+            True,
+        )
+        if directives_manager and directives_tools_enabled:
             directive_tools = [
                 {
                     "type": "function",
@@ -1246,14 +1251,14 @@ async def run_agent(config, verbose: bool = False):
                         elif fn_name == "acknowledge_directive":
                             directive_id = fn_args.get("directive_id")
                             if directive_id is None:
-                                result = {"error": "Missing required parameter: directive_id"}
+                                result = "Error: missing required parameter directive_id"
                             else:
                                 success = directives_manager.acknowledge_directive(directive_id)
                                 if success:
                                     directive = directives_manager.get_directive_by_id(directive_id)
                                     result = f"Acknowledged directive {directive_id}: {directive.text}"
                                 else:
-                                    result = {"error": f"Directive {directive_id} not found"}
+                                    result = f"Error: directive {directive_id} not found"
                         elif fn_name == "get_directives_status":
                             result = directives_manager.get_status_summary()
                         consecutive_errors = 0

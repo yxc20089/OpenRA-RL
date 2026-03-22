@@ -15,12 +15,12 @@ class TestDirectivesConfig:
     """Test DirectivesConfig model."""
 
     def test_default_disabled(self):
-        """Directives should be disabled by default."""
+        """Directives should be disabled by default, with sentinel None values."""
         cfg = DirectivesConfig()
         assert cfg.enabled is False
-        assert cfg.pregame_strategy == ""
-        assert cfg.standing_orders == []
-        assert cfg.midgame_adjustments == []
+        assert cfg.pregame_strategy is None
+        assert cfg.standing_orders is None
+        assert cfg.midgame_adjustments is None
 
     def test_enable_with_directives(self):
         """Can enable directives with pregame strategy and orders."""
@@ -255,6 +255,49 @@ class TestDirectivesManager:
             directives = manager.get_all_directives()
 
             assert directives[0].text == "From inline config"
+        finally:
+            Path(yaml_path).unlink()
+
+    def test_inline_orders_additive_with_file(self):
+        """Inline standing_orders are appended to file orders (additive merge)."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml_content = {
+                "standing_orders": ["File order"],
+            }
+            yaml.dump(yaml_content, f)
+            yaml_path = f.name
+
+        try:
+            cfg = DirectivesConfig(
+                enabled=True,
+                directives_file=yaml_path,
+                standing_orders=["Inline order"],
+            )
+            manager = DirectivesManager(cfg)
+            texts = [d.text for d in manager.get_all_directives()]
+            assert "File order" in texts
+            assert "Inline order" in texts
+            assert len(texts) == 2
+        finally:
+            Path(yaml_path).unlink()
+
+    def test_explicit_empty_list_clears_file_orders(self):
+        """Explicitly setting standing_orders=[] clears file orders."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml_content = {
+                "standing_orders": ["File order"],
+            }
+            yaml.dump(yaml_content, f)
+            yaml_path = f.name
+
+        try:
+            cfg = DirectivesConfig(
+                enabled=True,
+                directives_file=yaml_path,
+                standing_orders=[],  # explicit clear
+            )
+            manager = DirectivesManager(cfg)
+            assert manager.get_all_directives() == []
         finally:
             Path(yaml_path).unlink()
 

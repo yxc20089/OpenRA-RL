@@ -23,7 +23,8 @@ logger = logging.getLogger("openra-rl-mcp")
 _client = None
 _server_url = "http://localhost:8000"
 _game_started = False
-_directives_manager = None
+_UNSET = object()  # Sentinel: distinguishes "not loaded yet" from "loaded but disabled/failed"
+_directives_manager = _UNSET
 
 mcp = FastMCP(
     "openra-rl",
@@ -43,10 +44,14 @@ async def _get_client():
 
 
 def _load_directives_manager():
-    """Load directives manager from config file if available."""
+    """Load directives manager from config file if available.
+
+    Uses a sentinel (_UNSET) so that a disabled/failed load is cached and
+    load_config() is not re-executed on every subsequent call.
+    """
     global _directives_manager
-    if _directives_manager is not None:
-        return _directives_manager
+    if _directives_manager is not _UNSET:
+        return _directives_manager  # Already loaded (may be None if disabled/failed)
 
     try:
         from openra_env.config import load_config
@@ -58,7 +63,7 @@ def _load_directives_manager():
         else:
             _directives_manager = None
     except Exception:
-        # If config loading fails, directives are simply unavailable
+        logger.warning("Failed to load directives config; directives will be unavailable", exc_info=True)
         _directives_manager = None
 
     return _directives_manager

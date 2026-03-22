@@ -27,7 +27,6 @@ class DirectiveMetrics:
         """
         self.directives_manager = directives_manager
         self.tick_count = 0
-        self.observations = []  # Store state observations for analysis
 
         # Per-tick measurements
         self.harvester_counts = []
@@ -36,6 +35,7 @@ class DirectiveMetrics:
         self.ore_values = []
         self.army_values = []
         self.enemy_engagement_ticks = []  # Ticks when enemies were engaged
+        self._prev_kills_cost = 0  # Track delta to detect per-tick kills
 
     def record_state(self, obs: dict, tick: int) -> None:
         """Record game state for a single tick.
@@ -73,8 +73,9 @@ class DirectiveMetrics:
             for unit in units:
                 ux, uy = unit.get("cell_x", 0), unit.get("cell_y", 0)
                 distance_sq = (ux - base_x) ** 2 + (uy - base_y) ** 2
-                # Combat units have attack range > 0
-                if distance_sq < 15 * 15 and unit.get("attack_range", 0) > 0:
+                # Use can_attack flag; units_summary doesn't expose attack_range
+                is_combat = unit.get("can_attack", False) or unit.get("attack_range", 0) > 0
+                if distance_sq < 15 * 15 and is_combat:
                     defending_count += 1
             self.defending_unit_counts.append(defending_count)
         else:
@@ -84,12 +85,18 @@ class DirectiveMetrics:
         military = obs.get("military", {})
         self.army_values.append(military.get("army_value", 0))
 
-        # Check if enemies are being engaged (visible enemies with low health or kills this tick)
+        # Check if enemies are being engaged this tick
         enemies = obs.get("visible_enemies_summary", [])
+        kills_cost = military.get("kills_cost", 0)
+        kills_this_tick = kills_cost - self._prev_kills_cost
+        self._prev_kills_cost = kills_cost
         if enemies:
-            # If any enemy is damaged (health < 100%), agent is engaging
-            engaged = any(e.get("health_percentage", 100) < 100 for e in enemies)
-            if engaged or military.get("kills_cost", 0) > 0:
+            # hp_percent is the field name in enemy_summary; health_percentage as fallback
+            engaged = any(
+                e.get("hp_percent", e.get("health_percentage", 100)) < 100
+                for e in enemies
+            )
+            if engaged or kills_this_tick > 0:
                 self.enemy_engagement_ticks.append(tick)
 
     def compute_adherence(self) -> dict:

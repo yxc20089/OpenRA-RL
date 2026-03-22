@@ -56,9 +56,11 @@ class DirectivesConfig(BaseModel):
     """
 
     enabled: bool = False  # Toggle directive system
-    pregame_strategy: str = ""  # Overall game plan (e.g., "Rush", "Economy boom")
-    standing_orders: list[str] = Field(default_factory=list)  # Persistent directives
-    midgame_adjustments: list[str] = Field(default_factory=list)  # Dynamic tactical orders
+    # None = not set (falls back to file); "" = explicitly clear; "text" = override file
+    pregame_strategy: Optional[str] = None  # Overall game plan (e.g., "Rush", "Economy boom")
+    # None = not set (falls back to file); [] = explicitly clear; [...] = additive merge with file
+    standing_orders: Optional[list[str]] = None  # Persistent directives
+    midgame_adjustments: Optional[list[str]] = None  # Dynamic tactical orders
     directives_file: str = ""  # Path to external YAML (prepared for future real-time updates)
     acknowledgment_required: bool = True  # Agent should acknowledge directives
 

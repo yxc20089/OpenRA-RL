@@ -58,26 +58,46 @@ class DirectivesManager:
         self._load_directives()
 
     def _load_directives(self) -> None:
-        """Load directives from config and optional external file."""
-        # Load from external YAML file if specified
+        """Load directives from config and optional external file.
+
+        Merge semantics:
+        - None (unset): fall back to file value
+        - [] or "" (explicitly empty): clears / overrides file value
+        - non-empty inline + file lists: additive (file then inline)
+        """
+        file_pregame = ""
+        file_standing: list[str] = []
+        file_midgame: list[str] = []
+
         if self.config.directives_file:
             file_path = Path(self.config.directives_file).expanduser()
             if file_path.exists():
                 with open(file_path, encoding="utf-8") as f:
                     file_config = yaml.safe_load(f) or {}
+                file_pregame = file_config.get("pregame_strategy", "")
+                file_standing = file_config.get("standing_orders", [])
+                file_midgame = file_config.get("midgame_adjustments", [])
 
-                # Merge file config with inline config (inline takes precedence)
-                pregame = self.config.pregame_strategy or file_config.get("pregame_strategy", "")
-                standing = self.config.standing_orders or file_config.get("standing_orders", [])
-                midgame = self.config.midgame_adjustments or file_config.get("midgame_adjustments", [])
-            else:
-                pregame = self.config.pregame_strategy
-                standing = self.config.standing_orders
-                midgame = self.config.midgame_adjustments
+        # pregame: None → use file; anything else → use inline (override, not additive)
+        if self.config.pregame_strategy is None:
+            pregame = file_pregame
         else:
             pregame = self.config.pregame_strategy
-            standing = self.config.standing_orders
-            midgame = self.config.midgame_adjustments
+
+        # lists: None → use file; [] → explicit clear; [...] → additive (file + inline)
+        if self.config.standing_orders is None:
+            standing = file_standing
+        elif len(self.config.standing_orders) == 0:
+            standing = []
+        else:
+            standing = file_standing + self.config.standing_orders
+
+        if self.config.midgame_adjustments is None:
+            midgame = file_midgame
+        elif len(self.config.midgame_adjustments) == 0:
+            midgame = []
+        else:
+            midgame = file_midgame + self.config.midgame_adjustments
 
         # Create directives from config
         if pregame:
