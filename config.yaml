@@ -8,7 +8,7 @@
 
 # ── Game Engine ───────────────────────────────────────────────────────
 game:
-#   openra_path: ""                   # Path to OpenRA installation ($OPENRA_PATH)
+  openra_path: "/Users/berta/Projects/OpenRA-RL/OpenRA"  # Path to OpenRA installation ($OPENRA_PATH)
 #   mod: "ra"                         # Game mod (ra, cnc, d2k)
 #   map_name: "singles.oramap"        # Map to play
 #   grpc_port: 9999                   # gRPC bridge port
