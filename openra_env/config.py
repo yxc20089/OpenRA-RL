@@ -48,6 +48,23 @@ class PlanningConfig(BaseModel):
     max_time_s: float = 60.0
 
 
+class DirectivesConfig(BaseModel):
+    """Configuration for human-as-high-command strategic directives.
+
+    Enables humans to provide high-level strategic guidance to AI agents.
+    Directives are injected into the system prompt and accessible via MCP tools.
+    """
+
+    enabled: bool = False  # Toggle directive system
+    # None = not set (falls back to file); "" = explicitly clear; "text" = override file
+    pregame_strategy: Optional[str] = None  # Overall game plan (e.g., "Rush", "Economy boom")
+    # None = not set (falls back to file); [] = explicitly clear; [...] = additive merge with file
+    standing_orders: Optional[list[str]] = None  # Persistent directives
+    midgame_adjustments: Optional[list[str]] = None  # Dynamic tactical orders
+    directives_file: str = ""  # Path to external YAML (prepared for future real-time updates)
+    acknowledgment_required: bool = True  # Agent should acknowledge directives
+
+
 class RewardConfig(BaseModel):
     survival: float = 0.001
     economic_efficiency: float = 0.01
@@ -92,6 +109,7 @@ class ToolCategoriesConfig(BaseModel):
     compound: bool = True
     utility: bool = True
     terrain: bool = True
+    directives: bool = True
 
 
 class ToolsConfig(BaseModel):
@@ -298,6 +316,7 @@ class OpenRARLConfig(BaseModel):
     game: GameConfig = Field(default_factory=GameConfig)
     opponent: OpponentConfig = Field(default_factory=OpponentConfig)
     planning: PlanningConfig = Field(default_factory=PlanningConfig)
+    directives: DirectivesConfig = Field(default_factory=DirectivesConfig)
     reward: RewardConfig = Field(default_factory=RewardConfig)
     reward_vector: RewardVectorConfig = Field(default_factory=RewardVectorConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
@@ -311,6 +330,13 @@ class OpenRARLConfig(BaseModel):
         """Auto-disable planning tools when planning is disabled."""
         if not self.planning.enabled:
             self.tools.categories.planning = False
+        return self
+
+    @model_validator(mode="after")
+    def sync_directive_tools(self) -> "OpenRARLConfig":
+        """Auto-disable directive tools when directives are disabled."""
+        if not self.directives.enabled:
+            self.tools.categories.directives = False
         return self
 
     @model_validator(mode="after")
@@ -387,6 +413,10 @@ TOOL_CATEGORIES: dict[str, str] = {
     "surrender": "utility",
     # Terrain
     "get_terrain_at": "terrain",
+    # Directives
+    "check_directives": "directives",
+    "acknowledge_directive": "directives",
+    "get_directives_status": "directives",
 }
 
 
@@ -404,6 +434,10 @@ _ENV_VAR_MAP: list[tuple[str, str]] = [
     ("PLANNING_ENABLED", "planning.enabled"),
     ("PLANNING_MAX_TURNS", "planning.max_turns"),
     ("PLANNING_MAX_TIME", "planning.max_time_s"),
+    # directives
+    ("DIRECTIVES_ENABLED", "directives.enabled"),
+    ("DIRECTIVES_FILE", "directives.directives_file"),
+    ("PREGAME_STRATEGY", "directives.pregame_strategy"),
     # llm — legacy OpenRouter names first, then generic LLM_ names (override)
     ("OPENROUTER_API_KEY", "llm.api_key"),
     ("OPENROUTER_MODEL", "llm.model"),

@@ -1,0 +1,18 @@
+# Strategic directives for balanced strategy
+# This configuration provides a flexible approach that adapts to the game situation,
+# balancing economy, defense, and offense.
+
+pregame_strategy: "Balanced - Develop economy and military in parallel, adapt to enemy actions"
+
+standing_orders:
+  - "Maintain 2 harvesters throughout early and mid game"
+  - "Build one defensive structure (Pillbox/Turret) near refinery"
+  - "Keep a small defensive force (2-3 units) near base"
+  - "Train new combat units regularly but not continuously - balance cash for buildings"
+  - "Scout enemy base by tick 2000 (~80 seconds) to assess their strategy"
+  - "Build War Factory when you have $2000+ cash and 2 active harvesters"
+
+midgame_adjustments:
+  - "If enemy attacks early, prioritize defense and counter-attack when they retreat"
+  - "If enemy turtles, expand economy to 3 harvesters before major assault"
+  - "Maintain roughly equal spending on economy and military buildings"
