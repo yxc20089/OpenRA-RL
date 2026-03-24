@@ -1413,7 +1413,7 @@ class OpenRAEnvironment(MCPEnvironment):
             # Accumulate reward vector if enabled
             try:
                 _, reward_vec = env._reward_fn.compute_all(obs_dict)
-                if reward_vec:
+                if reward_vec and hasattr(env, '_accumulated_reward_vector'):
                     for k, v in reward_vec.items():
                         env._accumulated_reward_vector[k] = env._accumulated_reward_vector.get(k, 0.0) + v
             except Exception:
@@ -1458,7 +1458,7 @@ class OpenRAEnvironment(MCPEnvironment):
                 "enemy_summary": _adv_enemies,
                 "enemy_buildings_summary": _adv_enemy_bldgs,
                 "explored_percent": obs_dict.get("explored_percent", 0),
-                "reward_vector": dict(env._accumulated_reward_vector),
+                "reward_vector": dict(getattr(env, "_accumulated_reward_vector", {})),
                 "map": {"width": obs_dict.get("map_width", 0),
                         "height": obs_dict.get("map_height", 0)},
             }
