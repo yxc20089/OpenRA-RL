@@ -310,6 +310,7 @@ def observation_to_dict(obs: rl_bridge_pb2.GameObservation) -> dict:
         "result": obs.result,
         "spatial_map": base64.b64encode(bytes(obs.spatial_map)).decode("ascii"),
         "spatial_channels": obs.spatial_channels,
+        "explored_percent": obs.explored_percent,
     }
 
 
@@ -337,6 +338,7 @@ def commands_to_proto(commands: list[dict]) -> rl_bridge_pb2.AgentAction:
         "power_down": rl_bridge_pb2.POWER_DOWN,
         "set_primary": rl_bridge_pb2.SET_PRIMARY,
         "surrender": rl_bridge_pb2.SURRENDER,
+        "patrol": rl_bridge_pb2.PATROL,
         "fast_advance": rl_bridge_pb2.FAST_ADVANCE,
     }
 

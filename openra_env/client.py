@@ -62,7 +62,7 @@ class OpenRAEnv(EnvClient[OpenRAAction, OpenRAObservation, OpenRAState]):
             self._ws = await ws_connect(
                 self._ws_url,
                 open_timeout=self._connect_timeout,
-                max_size=self._max_message_size,
+                max_size=50*1024*1024,  # 50MB
                 ping_interval=None,
             )
         except Exception as e:

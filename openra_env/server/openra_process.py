@@ -15,7 +15,6 @@ import signal
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from threading import Thread
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -36,6 +35,8 @@ BOT_TYPE_MAP: dict[str, str] = {
     "medium": "medium",
     "hard": "normal",
     "brutal": "rush",
+    "dummy": "dummy",
+    "": "dummy",
 }
 
 

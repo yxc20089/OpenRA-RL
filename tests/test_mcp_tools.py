@@ -285,7 +285,7 @@ class TestMCPToolRegistration:
         count = get_tool_count(mcp)
         # 2 read + 1 exploration + 1 terrain + 4 knowledge + 3 bulk + 4 planning + 27 action + 1 replay = 43
         # (5 redundant read tools disabled by default: get_economy/units/buildings/enemies/production)
-        assert count == 43, f"Expected 43 tools, got {count}"
+        assert count == 44, f"Expected 44 tools, got {count}"
 
 
 class TestMCPReadTools:

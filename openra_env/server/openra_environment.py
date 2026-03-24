@@ -545,6 +545,9 @@ class OpenRAEnvironment(MCPEnvironment):
                     explored_pct = round(100 * _explored / (_w * _h), 1)
                 except Exception:
                     pass
+            # Fall back to proto-computed explored_percent (C# side)
+            if explored_pct == 0.0:
+                explored_pct = obs.get("explored_percent", 0.0)
 
             result = {
                 "tick": obs["tick"],
@@ -1410,7 +1413,7 @@ class OpenRAEnvironment(MCPEnvironment):
             # Accumulate reward vector if enabled
             try:
                 _, reward_vec = env._reward_fn.compute_all(obs_dict)
-                if reward_vec:
+                if reward_vec and hasattr(env, '_accumulated_reward_vector'):
                     for k, v in reward_vec.items():
                         env._accumulated_reward_vector[k] = env._accumulated_reward_vector.get(k, 0.0) + v
             except Exception:
@@ -1419,6 +1422,29 @@ class OpenRAEnvironment(MCPEnvironment):
             if env._app_config.alerts.loss_tracking:
                 env._update_loss_tracking()
             env._process_pending_placements()
+            # Build compact summaries for interrupt checks (avoids separate get_game_state call)
+            _move_tgts = getattr(env, "_move_targets", {})
+            _adv_units = []
+            for _u in obs_dict["units"]:
+                _uid = _u["actor_id"]
+                _ue = {"id": _uid, "type": _u["type"], "idle": _u["is_idle"],
+                       "cell_x": _u["cell_x"], "cell_y": _u["cell_y"],
+                       "activity": _u.get("current_activity", "")}
+                if _u.get("hp_percent") is not None:
+                    _ue["hp_pct"] = _u["hp_percent"]
+                if _uid in _move_tgts:
+                    _ue["target_x"], _ue["target_y"] = _move_tgts[_uid]
+                _adv_units.append(_ue)
+            _adv_enemies = [
+                {"id": _e["actor_id"], "type": _e["type"],
+                 "cell_x": _e["cell_x"], "cell_y": _e["cell_y"]}
+                for _e in obs_dict["visible_enemies"]
+            ]
+            _adv_enemy_bldgs = [
+                {"id": _b["actor_id"], "type": _b["type"],
+                 "cell_x": _b["cell_x"], "cell_y": _b["cell_y"]}
+                for _b in obs_dict.get("visible_enemy_buildings", [])
+            ]
             result = {
                 "tick": obs_dict["tick"],
                 "done": obs_dict["done"],
@@ -1427,6 +1453,14 @@ class OpenRAEnvironment(MCPEnvironment):
                 "own_units": len(obs_dict["units"]),
                 "own_buildings": len(obs_dict["buildings"]),
                 "visible_enemies": len(obs_dict["visible_enemies"]),
+                # Interrupt fields — eliminates get_game_state() in advance loop
+                "units_summary": _adv_units,
+                "enemy_summary": _adv_enemies,
+                "enemy_buildings_summary": _adv_enemy_bldgs,
+                "explored_percent": obs_dict.get("explored_percent", 0),
+                "reward_vector": dict(getattr(env, "_accumulated_reward_vector", {})),
+                "map": {"width": obs_dict.get("map_width", 0),
+                        "height": obs_dict.get("map_height", 0)},
             }
             if requested > 500:
                 result["note"] = f"Clamped from {requested} to 500 ticks (max per call)."
@@ -1774,6 +1808,21 @@ class OpenRAEnvironment(MCPEnvironment):
                 return {"error": "No matching units found"}
             commands = [
                 CommandModel(action=ActionType.GUARD, actor_id=uid, target_actor_id=target_actor_id, queued=queued)
+                for uid in resolved
+            ]
+            result = env._execute_commands(commands)
+            return env._add_unit_feedback(result, resolved)
+
+        @configurable_tool
+        def patrol_units(unit_ids: str, target_x: int, target_y: int, queued: bool = False) -> dict:
+            """Order units to patrol between current position and target, engaging enemies on the way.
+            unit_ids: comma-separated IDs, \"all_combat\", \"all_idle\", \"type:e1\", or a group name."""
+            env._refresh_obs()
+            resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
+            if not resolved:
+                return {"error": "No matching units found"}
+            commands = [
+                CommandModel(action=ActionType.PATROL, actor_id=uid, target_x=target_x, target_y=target_y, queued=queued)
                 for uid in resolved
             ]
             result = env._execute_commands(commands)
@@ -2237,7 +2286,7 @@ class OpenRAEnvironment(MCPEnvironment):
         if "," in selector:
             result = []
             units = obs.get("units", [])
-            type_map = {u["type"].lower(): u["actor_id"] for u in units}
+            _type_map = {u["type"].lower(): u["actor_id"] for u in units}  # noqa: F841
             for token in selector.split(","):
                 token = token.strip()
                 if not token:
@@ -2911,12 +2960,12 @@ class OpenRAEnvironment(MCPEnvironment):
             logger.info(f"Creating session: map={self._config.map_name}")
             self._bridge.connect()
             actual_bot_type = BOT_TYPE_MAP.get(self._config.bot_type, self._config.bot_type)
-            # Enemy must join as rl-agent (passive — waits for connection that
+            # Enemy must join as dummy (passive — waits for connection that
             # never comes) when no bot_type specified. This keeps the player
             # slot filled so pre-placed buildings spawn, but no AI runs.
             # Using invalid types leaves the slot empty → no enemy actors.
             if not actual_bot_type:
-                actual_bot_type = "rl-agent"
+                actual_bot_type = "dummy"
             bots = f"Multi1:rl-agent,{self._config.ai_slot}:{actual_bot_type}"
             session_id = self._bridge.create_session(
                 map_name=self._config.map_name,
