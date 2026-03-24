@@ -116,6 +116,9 @@ class BridgeClient:
             self.connect()
 
         request = rl_bridge_pb2.FastAdvanceRequest(ticks=ticks, session_id=self.session_id)
+        if check_events_every > 0:
+            logger.info("FastAdvance: ticks=%d, check_events_every=%d, interrupts=%s",
+                        ticks, check_events_every, enabled_interrupts)
         if commands:
             request.commands.extend(commands)
         if check_events_every > 0:
