@@ -126,7 +126,7 @@ class BridgeClient:
         if enabled_interrupts:
             request.enabled_interrupts.extend(enabled_interrupts)
 
-        return self._stub.FastAdvance(request, timeout=30.0)
+        return self._stub.FastAdvance(request, timeout=120.0)
 
     def get_state(self) -> rl_bridge_pb2.GameState:
         """Query current game state via unary RPC."""

@@ -46,7 +46,7 @@ from openra_env.models import (
 from openra_env.config import OpenRARLConfig, load_config, should_register_tool
 from openra_env.reward import OpenRARewardFunction, RewardWeights
 from openra_env.server.bridge_client import BridgeClient, commands_to_proto, observation_to_dict
-from openra_env.server.grpc_worker import grpc_submit, start_worker
+# grpc_worker removed: per-session channels + asyncio.to_thread
 from openra_env.server.openra_process import OpenRAConfig, OpenRAProcessManager
 
 logger = logging.getLogger(__name__)
@@ -316,12 +316,8 @@ class OpenRAEnvironment(MCPEnvironment):
         def configurable_tool(fn):
             """Conditionally register *fn* as an MCP tool based on config.
 
-            Sync tools are dispatched to a single dedicated gRPC worker
-            thread via grpc_submit(). This avoids:
-            - Event loop blocking (coroutine awaits a Future, not a sync call)
-            - HTTP/2 contention (single thread owns the shared gRPC channel)
-            - Ghost threads (no asyncio.to_thread spawning)
-            - dotnet crash (shared channel = one TCP connection)
+            Sync tools are dispatched via asyncio.to_thread() with per-session
+            gRPC channels (no shared channel, no HTTP/2 contention).
             """
             if not should_register_tool(fn.__name__, tools_cfg):
                 return fn
@@ -329,7 +325,7 @@ class OpenRAEnvironment(MCPEnvironment):
                 import functools
                 @functools.wraps(fn)
                 async def async_wrapper(*args, **kwargs):
-                    return await grpc_submit(fn, *args, **kwargs)
+                    return await asyncio.to_thread(fn, *args, **kwargs)
                 return mcp.tool()(async_wrapper)
             return mcp.tool()(fn)
 

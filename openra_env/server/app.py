@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from openenv.core.env_server import create_app
 
 from openra_env.models import OpenRAAction, OpenRAObservation
-from openra_env.server.grpc_worker import start_worker, stop_worker
+# grpc_worker removed: per-session gRPC channels eliminate HTTP/2 contention
 from openra_env.server.openra_environment import OpenRAEnvironment
 from openra_env.server.openra_process import OpenRAConfig, OpenRAProcessManager
 
@@ -47,28 +47,14 @@ _daemon = OpenRAProcessManager(OpenRAConfig(
     openra_path=_openra_path,
 ))
 
-# Shared gRPC channel — single TCP connection to the .NET daemon.
-# All tool calls are dispatched to a single gRPC worker thread
-# (see grpc_worker.py) to avoid HTTP/2 contention and event loop blocking.
-
-_shared_channel = grpc.insecure_channel(
-    f"localhost:{_base_grpc_port}",
-    options=[
-        ("grpc.max_receive_message_length", 64 * 1024 * 1024),
-        ("grpc.max_send_message_length", 16 * 1024 * 1024),
-        ("grpc.keepalive_time_ms", 10000),
-        ("grpc.keepalive_timeout_ms", 5000),
-    ],
-)
-
-# gRPC worker thread started at startup (see @app.on_event("startup") below)
+# Per-session gRPC channels: each environment creates its own channel.
+# No shared channel needed — eliminates HTTP/2 contention and grpc_worker bottleneck.
 
 
 def _env_factory():
     return OpenRAEnvironment(
         grpc_port=_base_grpc_port,
         multi_session=True,
-        shared_channel=_shared_channel,
     )
 
 
@@ -109,14 +95,13 @@ app = create_app(
 
 @app.on_event("startup")
 def _on_startup():
-    """Start the single gRPC worker thread for all tool call dispatch."""
-    start_worker()
+    """Startup hook (grpc_worker removed — per-session channels)."""
+    pass
 
 
 @app.on_event("shutdown")
 def _on_shutdown():
-    """Kill the game daemon and stop the gRPC worker when uvicorn shuts down."""
-    stop_worker()
+    """Kill the game daemon when uvicorn shuts down."""
     if _daemon.is_alive():
         print(f"Shutting down game daemon (PID {_daemon.pid})...")
         _daemon.kill(timeout=10.0)
@@ -139,8 +124,10 @@ def health_check():
     grpc_ok = False
     if alive:
         try:
-            grpc.channel_ready_future(_shared_channel).result(timeout=2.0)
+            _ch = grpc.insecure_channel(f"localhost:{_base_grpc_port}")
+            grpc.channel_ready_future(_ch).result(timeout=2.0)
             grpc_ok = True
+            _ch.close()
         except Exception:
             pass
     return {
@@ -191,7 +178,7 @@ def _cleanup_scenario_maps():
 @app.post("/restart-daemon")
 def restart_daemon():
     """Kill and restart the .NET daemon on a NEW gRPC port for truly clean state."""
-    global _shared_channel, _base_grpc_port
+    global _base_grpc_port
     try:
         if _daemon.is_alive():
             _daemon.kill(timeout=10.0)
@@ -211,30 +198,17 @@ def restart_daemon():
         new_port = _base_grpc_port + _restart_port_offset[0]
         _daemon.config.grpc_port = new_port
 
-        # Close old channel, create new one on new port
-        try:
-            _shared_channel.close()
-        except Exception:
-            pass
-        _shared_channel = grpc.insecure_channel(
-            f"localhost:{new_port}",
-            options=[
-                ("grpc.max_receive_message_length", 64 * 1024 * 1024),
-                ("grpc.max_send_message_length", 16 * 1024 * 1024),
-                ("grpc.keepalive_time_ms", 10000),
-                ("grpc.keepalive_timeout_ms", 5000),
-            ],
-        )
-
         _daemon.launch()
 
         # Wait for daemon to be ready
+        _check_channel = grpc.insecure_channel(f"localhost:{new_port}")
         for _ in range(30):
             try:
-                grpc.channel_ready_future(_shared_channel).result(timeout=1.0)
+                grpc.channel_ready_future(_check_channel).result(timeout=1.0)
                 break
             except Exception:
                 _time.sleep(0.5)
+        _check_channel.close()
 
         return {"status": "restarted", "daemon_pid": _daemon.pid, "grpc_port": new_port}
     except Exception as e:
