@@ -6,8 +6,38 @@ version-agnostic helpers **and** a pytest autouse fixture that patches
 ``mcp._tool_manager._tools`` back in so existing tests work unmodified.
 """
 
+import sys
 import types
 import pytest
+
+# ── Stub missing optional dependencies ────────────────────────────────────────
+# openenv / openenv.core are runtime dependencies for the game client but are
+# not needed for unit tests of the observation / memory modules.  Install stubs
+# early (before any openra_env submodule is imported) so that the package-level
+# __init__.py can be imported without the real package present.
+
+def _install_stub(module_path: str, **attrs):
+    """Register a minimal stub module under *module_path* in sys.modules."""
+    if module_path in sys.modules:
+        return
+    mod = types.ModuleType(module_path)
+    mod.__path__ = []  # mark as a package so sub-imports work
+    for k, v in attrs.items():
+        setattr(mod, k, v)
+    sys.modules[module_path] = mod
+
+
+# openra_env.client and openra_env.models pull in heavy runtime dependencies
+# (openenv, websockets, grpc, …) that are not installed in the test environment.
+# Pre-register stubs so that openra_env/__init__.py can be imported without
+# the real packages present.  The actual classes are not needed by the tests.
+_install_stub("openra_env.client", OpenRAEnv=object)
+_install_stub(
+    "openra_env.models",
+    OpenRAAction=object,
+    OpenRAObservation=object,
+    OpenRAState=object,
+)
 
 
 # ── Version-agnostic tool access helpers ──────────────────────────────────────

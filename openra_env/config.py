@@ -292,6 +292,36 @@ class PromptsConfig(BaseModel):
     alerts: AlertPromptsConfig = Field(default_factory=AlertPromptsConfig)
 
 
+class ObservationConfig(BaseModel):
+    """Configuration for the RL observation tensor and enemy spatial memory.
+
+    These values are consumed by ``ObsTensorBuilder`` (via ``ObsTensorConfig``)
+    and can be set in ``config.yaml`` under the ``observation:`` key.
+
+    Attributes:
+        enemy_memory_enabled: When ``False`` (default), memory channels 9-12
+            in the spatial tensor are always 0.0 and no ``EnemySpatialMemory``
+            object is allocated.  The tensor shape is unchanged (H, W, 13) so
+            the observation space remains fixed regardless of this flag.
+        enemy_memory_max_age: Hard expiry threshold in RL steps.  A cell that
+            has not been re-observed for this many steps is cleared.
+        enemy_memory_decay_lambda: Exponential decay rate λ per step.
+            Confidence is multiplied by e^(−λ) each step.  λ=0.02 gives
+            ~50 % confidence after 35 steps.
+        enemy_memory_store_threat: When ``True``, a *threat* plane is
+            allocated inside ``EnemySpatialMemory``.  Currently stored
+            internally and not exported to the spatial tensor; available
+            for subclasses and post-step hooks.
+    """
+
+    enemy_memory_enabled: bool = False
+    enemy_memory_max_age: int = 200
+    enemy_memory_decay_lambda: float = 0.02
+    enemy_memory_store_threat: bool = False
+    enemy_memory_diffusion_enabled: bool = False
+    enemy_memory_diffusion_sigma: float = 0.8
+
+
 class OpenRARLConfig(BaseModel):
     """Root configuration for the OpenRA-RL system."""
 
@@ -305,6 +335,7 @@ class OpenRARLConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     prompts: PromptsConfig = Field(default_factory=PromptsConfig)
+    observation: ObservationConfig = Field(default_factory=ObservationConfig)
 
     @model_validator(mode="after")
     def sync_planning_tools(self) -> "OpenRARLConfig":
