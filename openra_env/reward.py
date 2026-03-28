@@ -144,17 +144,73 @@ class OpenRARewardFunction:
         if self._vector_computer is None:
             return None
         return self._vector_computer.compute(obs_dict)
+        
+    def compute_with_components(self, obs_dict: dict):
+        """Compute scalar reward and return component breakdown."""
 
-    def compute_all(self, obs_dict: dict) -> tuple[float, Optional[dict[str, float]]]:
-        """Compute both scalar reward and optional reward vector dict.
+        components = {}
 
-        Convenience method for the environment step() to get both signals.
+        economy = obs_dict.get("economy", {})
+        military = obs_dict.get("military", {})
+        done = obs_dict.get("done", False)
+        result = obs_dict.get("result", "")
 
-        Returns:
-            (scalar_reward, reward_vector_dict_or_None)
-        """
-        scalar = self.compute(obs_dict)
+        # Survival
+        components["survival"] = self.weights.survival
+
+        # Economic efficiency
+        cash = economy.get("cash", 0)
+        cash_delta = cash - self._state.prev_cash
+        econ_reward = 0.0
+        if cash_delta > 0:
+            econ_reward = self.weights.economic_efficiency * (cash_delta / 1000.0)
+
+        components["economic_efficiency"] = econ_reward
+
+        # Aggression
+        units_killed = military.get("units_killed", 0)
+        buildings_killed = military.get("buildings_killed", 0)
+
+        kills_delta = (units_killed - self._state.prev_units_killed) + (
+            buildings_killed - self._state.prev_buildings_killed
+        )
+
+        components["aggression"] = self.weights.aggression * kills_delta
+
+        # Defense
+        units_lost = military.get("units_lost", 0)
+        buildings_lost = military.get("buildings_lost", 0)
+
+        losses_delta = (units_lost - self._state.prev_units_lost) + (
+            buildings_lost - self._state.prev_buildings_lost
+        )
+
+        components["defense"] = -self.weights.defense * losses_delta
+
+        # Terminal rewards
+        components["victory"] = 0.0
+        components["defeat"] = 0.0
+
+        if done:
+            if result == "win":
+                components["victory"] = self.weights.victory
+            elif result == "lose":
+                components["defeat"] = self.weights.defeat
+
+        reward = sum(components.values())
+
+        return reward, components
+
+    def compute_all(
+        self, obs_dict: dict
+    ) -> tuple[float, Optional[dict[str, float]], dict[str, float]]:
+        """Compute scalar reward, optional reward vector, and scalar reward components."""
+
+        scalar, components = self.compute_with_components(obs_dict)
+
         vector = self.compute_vector(obs_dict)
+
         if vector is not None:
-            return scalar, vector.as_dict()
-        return scalar, None
+            return scalar, vector.as_dict(), components
+
+        return scalar, None, components        

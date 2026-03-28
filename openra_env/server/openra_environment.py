@@ -3060,7 +3060,7 @@ class OpenRAEnvironment(MCPEnvironment):
         self._last_obs = self._build_initial_obs_from_state(game_state)
 
         # Compute initial reward (should be 0)
-        reward, reward_vec = self._reward_fn.compute_all(self._last_obs)
+        reward, reward_vec, reward_components = self._reward_fn.compute_all(obs_dict)
 
         return self._build_observation(self._last_obs, reward, reward_vec)
 
@@ -3074,11 +3074,11 @@ class OpenRAEnvironment(MCPEnvironment):
         if isinstance(action, OpenRAAction):
             obs_dict = self._step_internal(action)
             self._last_obs = obs_dict
-            reward, reward_vec = self._reward_fn.compute_all(obs_dict)
+            reward, reward_vec, reward_components = self._reward_fn.compute_all(self._last_obs)
             if reward_vec:
                 for k, v in reward_vec.items():
                     self._accumulated_reward_vector[k] = self._accumulated_reward_vector.get(k, 0.0) + v
-            return self._build_observation(obs_dict, reward, reward_vec)
+            return self._build_observation(self._last_obs, reward, reward_vec, reward_components)
 
         return Observation(
             done=False,
@@ -3091,7 +3091,11 @@ class OpenRAEnvironment(MCPEnvironment):
         return self._state
 
     def _build_observation(
-        self, obs_dict: dict, reward: float, reward_vec: dict | None = None,
+        self,
+        obs_dict: dict,
+        reward: float,
+        reward_vec: dict | None = None,
+        reward_components: dict | None = None,
     ) -> OpenRAObservation:
         """Convert a raw observation dict to an OpenRAObservation model."""
         return OpenRAObservation(
@@ -3111,6 +3115,7 @@ class OpenRAEnvironment(MCPEnvironment):
             spatial_map=obs_dict.get("spatial_map", ""),
             spatial_channels=obs_dict.get("spatial_channels", 0),
             reward_vector=reward_vec,
+            reward_components=reward_components,
         )
 
     def close(self) -> None:
