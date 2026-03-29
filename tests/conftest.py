@@ -6,6 +6,7 @@ version-agnostic helpers **and** a pytest autouse fixture that patches
 ``mcp._tool_manager._tools`` back in so existing tests work unmodified.
 """
 
+import asyncio
 import types
 import pytest
 
@@ -68,10 +69,24 @@ def get_tool_count(mcp) -> int:
 
 
 class ToolWrapper:
-    """Compatibility wrapper matching FastMCP 2.x Tool interface."""
+    """Compatibility wrapper matching FastMCP 2.x Tool interface.
+
+    If the underlying function is async (e.g. wrapped by @configurable_tool's
+    async_wrapper), .fn transparently runs it synchronously so tests can call
+    ``tool.fn(...)`` without awaiting.
+    """
 
     def __init__(self, fn):
-        self.fn = fn
+        if asyncio.iscoroutinefunction(fn):
+            import functools
+
+            @functools.wraps(fn)
+            def _sync_caller(*args, **kwargs):
+                return asyncio.run(fn(*args, **kwargs))
+
+            self.fn = _sync_caller
+        else:
+            self.fn = fn
 
 
 def get_tool_obj(mcp, name):

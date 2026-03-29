@@ -325,8 +325,8 @@ class TestToolFiltering:
             assert category in valid_categories, f"Tool {tool_name} maps to unknown category {category}"
 
     def test_tool_count(self):
-        """Verify we have all 48 tools mapped."""
-        assert len(TOOL_CATEGORIES) == 48
+        """Verify we have all 50 tools mapped."""
+        assert len(TOOL_CATEGORIES) == 50
 
 
 # ── Planning Sync Validator ───────────────────────────────────────────

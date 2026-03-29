@@ -283,9 +283,9 @@ class TestMCPToolRegistration:
         _, mcp = env
         from tests.conftest import get_tool_count
         count = get_tool_count(mcp)
-        # 2 read + 1 exploration + 1 terrain + 4 knowledge + 3 bulk + 4 planning + 27 action + 1 replay = 43
+        # 2 read + 1 exploration + 1 terrain + 4 knowledge + 3 bulk + 4 planning + 29 action + 1 replay = 45
         # (5 redundant read tools disabled by default: get_economy/units/buildings/enemies/production)
-        assert count == 44, f"Expected 44 tools, got {count}"
+        assert count == 46, f"Expected 46 tools, got {count}"
 
 
 class TestMCPReadTools:
@@ -4214,6 +4214,7 @@ class TestActorValidation:
         env._attempted_placements = {}
         env._placement_results = []
         env._player_faction = "england"
+        env._unit_groups = {}
 
         env._last_obs = {
             "tick": 500,
@@ -4245,6 +4246,30 @@ class TestActorValidation:
                     "owner": "Multi0", "can_attack": False, "facing": 0,
                     "experience_level": 0, "stance": 3, "speed": 40,
                     "attack_range": 0, "passenger_count": -1, "is_building": False,
+                },
+                {
+                    "actor_id": 30, "type": "apc", "pos_x": 1100, "pos_y": 2100,
+                    "cell_x": 11, "cell_y": 21, "hp_percent": 1.0,
+                    "is_idle": True, "current_activity": "",
+                    "owner": "Multi0", "can_attack": True, "facing": 0,
+                    "experience_level": 0, "stance": 3, "speed": 80,
+                    "attack_range": 5, "passenger_count": 0, "is_building": False,
+                },
+                {
+                    "actor_id": 31, "type": "e1", "pos_x": 1050, "pos_y": 2050,
+                    "cell_x": 10, "cell_y": 20, "hp_percent": 1.0,
+                    "is_idle": True, "current_activity": "",
+                    "owner": "Multi0", "can_attack": True, "facing": 0,
+                    "experience_level": 0, "stance": 3, "speed": 28,
+                    "attack_range": 5, "passenger_count": -1, "is_building": False,
+                },
+                {
+                    "actor_id": 32, "type": "e3", "pos_x": 1060, "pos_y": 2060,
+                    "cell_x": 10, "cell_y": 20, "hp_percent": 1.0,
+                    "is_idle": True, "current_activity": "",
+                    "owner": "Multi0", "can_attack": True, "facing": 0,
+                    "experience_level": 0, "stance": 3, "speed": 28,
+                    "attack_range": 7, "passenger_count": -1, "is_building": False,
                 },
             ],
             "buildings": [
@@ -4417,6 +4442,78 @@ class TestActorValidation:
         result = tool.fn(item_type="E1")
         assert "error" not in result
 
+    # ── load_transport ──
+
+    def test_load_transport_rejects_missing_transport(self, env_with_actors):
+        env, mcp = env_with_actors
+        tool = mcp._tool_manager._tools["load_transport"]
+        result = tool.fn(unit_ids="31", transport_id=999)
+        assert "error" in result
+        assert "999" in result["error"]
+
+    def test_load_transport_rejects_no_matching_units(self, env_with_actors):
+        env, mcp = env_with_actors
+        tool = mcp._tool_manager._tools["load_transport"]
+        result = tool.fn(unit_ids="999", transport_id=30)
+        assert "error" in result
+        assert "No matching units" in result["error"]
+
+    def test_load_transport_rejects_non_transport(self, env_with_actors):
+        env, mcp = env_with_actors
+        tool = mcp._tool_manager._tools["load_transport"]
+        result = tool.fn(unit_ids="32", transport_id=31)  # e1 is not a transport
+        assert "error" in result
+        assert "not a transport" in result["error"]
+
+    def test_load_transport_rejects_self_load(self, env_with_actors):
+        env, mcp = env_with_actors
+        tool = mcp._tool_manager._tools["load_transport"]
+        result = tool.fn(unit_ids="30", transport_id=30)
+        assert "error" in result
+        assert "cannot load itself" in result["error"]
+
+    def test_load_transport_accepts_valid(self, env_with_actors):
+        env, mcp = env_with_actors
+        env._execute_commands = lambda cmds: {"tick": 501, "done": False, "result": ""}
+        tool = mcp._tool_manager._tools["load_transport"]
+        result = tool.fn(unit_ids="31,32", transport_id=30)
+        assert "error" not in result
+
+    def test_load_transport_single_unit(self, env_with_actors):
+        env, mcp = env_with_actors
+        env._execute_commands = lambda cmds: {"tick": 501, "done": False, "result": ""}
+        tool = mcp._tool_manager._tools["load_transport"]
+        result = tool.fn(unit_ids="31", transport_id=30)
+        assert "error" not in result
+
+    # ── unload_transport ──
+
+    def test_unload_transport_rejects_missing_transport(self, env_with_actors):
+        env, mcp = env_with_actors
+        tool = mcp._tool_manager._tools["unload_transport"]
+        result = tool.fn(transport_id=999)
+        assert "error" in result
+        assert "999" in result["error"]
+
+    def test_unload_transport_rejects_empty_transport(self, env_with_actors):
+        env, mcp = env_with_actors
+        tool = mcp._tool_manager._tools["unload_transport"]
+        result = tool.fn(transport_id=30)  # passenger_count=0
+        assert "error" in result
+        assert "no passengers" in result["error"]
+
+    def test_unload_transport_accepts_loaded(self, env_with_actors):
+        env, mcp = env_with_actors
+        # Simulate a loaded APC
+        for u in env._last_obs["units"]:
+            if u["actor_id"] == 30:
+                u["passenger_count"] = 2
+                break
+        env._execute_commands = lambda cmds: {"tick": 501, "done": False, "result": ""}
+        tool = mcp._tool_manager._tools["unload_transport"]
+        result = tool.fn(transport_id=30)
+        assert "error" not in result
+
 
 class TestEmptyProductionValidation:
     """Test that production tools reject commands when no production buildings exist."""
@@ -4502,6 +4599,7 @@ class TestActionToCommandsValidation:
         from openra_env.config import OpenRARLConfig
         env._app_config = OpenRARLConfig()
         env._pending_placements = {}
+        env._unit_groups = {}
         return env
 
     def test_build_unit_empty_production_returns_empty(self, env_for_batch):
@@ -4578,6 +4676,44 @@ class TestActionToCommandsValidation:
         result = env._action_to_commands({"tool": "cancel_production", "item_type": "e1"}, obs)
         assert len(result) == 1
         assert result[0].action == ActionType.CANCEL_PRODUCTION
+
+    # ── load_transport batch path ──
+
+    def test_load_transport_missing_transport_returns_empty(self, env_for_batch):
+        env = env_for_batch
+        obs = {"units": [{"actor_id": 31, "type": "e1"}], "buildings": [], "production": []}
+        result = env._action_to_commands({"tool": "load_transport", "unit_ids": "31", "transport_id": 999}, obs)
+        assert result == []
+
+    def test_load_transport_filters_self_load(self, env_for_batch):
+        env = env_for_batch
+        obs = {"units": [{"actor_id": 30, "type": "apc"}], "buildings": [], "production": []}
+        result = env._action_to_commands({"tool": "load_transport", "unit_ids": "30", "transport_id": 30}, obs)
+        assert result == []
+
+    def test_load_transport_valid_returns_commands(self, env_for_batch):
+        env = env_for_batch
+        obs = {"units": [{"actor_id": 30, "type": "apc"}, {"actor_id": 31, "type": "e1"}, {"actor_id": 32, "type": "e3"}], "buildings": [], "production": []}
+        result = env._action_to_commands({"tool": "load_transport", "unit_ids": "31,32", "transport_id": 30}, obs)
+        assert len(result) == 2
+        assert all(c.action == ActionType.ENTER_TRANSPORT for c in result)
+        assert all(c.target_actor_id == 30 for c in result)
+
+    # ── unload_transport batch path ──
+
+    def test_unload_transport_missing_transport_returns_empty(self, env_for_batch):
+        env = env_for_batch
+        obs = {"units": [{"actor_id": 30, "type": "apc"}], "buildings": [], "production": []}
+        result = env._action_to_commands({"tool": "unload_transport", "transport_id": 999}, obs)
+        assert result == []
+
+    def test_unload_transport_valid_returns_command(self, env_for_batch):
+        env = env_for_batch
+        obs = {"units": [{"actor_id": 30, "type": "apc"}], "buildings": [], "production": []}
+        result = env._action_to_commands({"tool": "unload_transport", "transport_id": 30}, obs)
+        assert len(result) == 1
+        assert result[0].action == ActionType.UNLOAD
+        assert result[0].actor_id == 30
 
 
 # ─── Exploration & Reward Vector Tests ──────────────────────────────────────
