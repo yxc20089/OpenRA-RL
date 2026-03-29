@@ -1416,7 +1416,7 @@ class OpenRAEnvironment(MCPEnvironment):
                 enabled_interrupts: Signal names to check, e.g. ["enemy_spotted", "building_discovered"].
                 If an interrupt fires, advance ends early with 'interrupted' and 'interrupt_reason' in result."""
             requested = ticks
-            ticks = max(1, min(ticks, 50))  # clamp to [1, 50] — keep each gRPC call <2s even at high game ticks
+            ticks = max(1, min(ticks, 500))  # raised from 50: C# fast-forward makes 500-tick calls ~450ms
             try:
                 # Server-side interrupt detection: check every 25 ticks.
                 # AllCells LINQ removed from CheckInterrupts(), only runs once
@@ -2930,9 +2930,12 @@ class OpenRAEnvironment(MCPEnvironment):
         **kwargs: Any,
     ) -> OpenRAObservation:
         """Reset the environment for a new episode."""
-        # Clean up previous episode
+        # Clean up previous episode's .NET session (prevents session leak)
         if self._multi_session:
-            self._bridge.destroy_session()
+            try:
+                self._bridge.destroy_session()
+            except Exception as e:
+                logger.warning("Failed to destroy previous session during reset: %s", e)
         else:
             self._bridge.close()
             self._process.kill()
@@ -3114,13 +3117,25 @@ class OpenRAEnvironment(MCPEnvironment):
         )
 
     def close(self) -> None:
-        """Clean up resources."""
+        """Clean up resources.
+
+        In multi-session mode, explicitly destroys the .NET game session
+        via gRPC before closing the bridge channel.  Without this,
+        sessions leak in the daemon and it becomes unresponsive after
+        ~40-60 leaked sessions.
+        """
         if self._multi_session:
             try:
                 self._bridge.destroy_session()
-            except Exception:
-                pass
-            # Don't close bridge — shared channel is managed by the caller
+            except Exception as e:
+                logger.warning("Failed to destroy session on close: %s", e)
+            # Close the bridge channel unless it's a shared channel
+            # managed by the caller.
+            if self._shared_channel is None:
+                try:
+                    self._bridge.close()
+                except Exception:
+                    pass
         else:
             try:
                 self._bridge.close()
