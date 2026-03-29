@@ -369,6 +369,8 @@ TOOL_CATEGORIES: dict[str, str] = {
     "set_rally_point": "building_actions",
     "guard_target": "building_actions",
     "set_stance": "building_actions",
+    "load_transport": "building_actions",
+    "unload_transport": "building_actions",
     "harvest": "building_actions",
     "power_down": "building_actions",
     "set_primary": "building_actions",

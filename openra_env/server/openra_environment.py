@@ -1863,6 +1863,50 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._add_unit_feedback(result, resolved)
 
         @configurable_tool
+        def load_transport(unit_ids: str, transport_id: int) -> dict:
+            """Load infantry/units into a transport (APC, helicopter, transport ship).
+            unit_ids: comma-separated IDs, "all_infantry", "type:e1", or a group name.
+            transport_id: actor ID of the transport vehicle to load into."""
+            env._refresh_obs()
+            obs = env._last_obs or {}
+            units = obs.get("units", [])
+            transport = next((u for u in units if u.get("actor_id") == transport_id), None)
+            if not transport:
+                return {"error": f"Transport {transport_id} not found. It may have been destroyed.",
+                        "your_units": [{"id": u["actor_id"], "type": u["type"]} for u in units[:20]]}
+            if transport.get("passenger_count", -1) < 0:
+                return {"error": f"Unit {transport_id} ({transport['type']}) is not a transport."}
+            resolved = env._resolve_unit_ids(unit_ids, obs)
+            if not resolved:
+                return {"error": "No matching units found"}
+            resolved = [uid for uid in resolved if uid != transport_id]
+            if not resolved:
+                return {"error": "No valid passengers found (transport cannot load itself)"}
+            commands = [
+                CommandModel(action=ActionType.ENTER_TRANSPORT, actor_id=uid, target_actor_id=transport_id)
+                for uid in resolved
+            ]
+            result = env._execute_commands(commands)
+            return env._add_unit_feedback(result, resolved)
+
+        @configurable_tool
+        def unload_transport(transport_id: int) -> dict:
+            """Unload all passengers from a transport at its current location.
+            transport_id: actor ID of the transport vehicle to unload."""
+            env._refresh_obs()
+            obs = env._last_obs or {}
+            units = obs.get("units", [])
+            transport = next((u for u in units if u.get("actor_id") == transport_id), None)
+            if not transport:
+                return {"error": f"Transport {transport_id} not found. It may have been destroyed.",
+                        "your_units": [{"id": u["actor_id"], "type": u["type"]} for u in units[:20]]}
+            if transport.get("passenger_count", -1) <= 0:
+                return {"error": f"Transport {transport_id} ({transport['type']}) has no passengers to unload."}
+            commands = [CommandModel(action=ActionType.UNLOAD, actor_id=transport_id)]
+            result = env._execute_commands(commands)
+            return env._add_unit_feedback(result, [transport_id])
+
+        @configurable_tool
         def set_stance(unit_ids: str, stance: str) -> dict:
             """Set combat stance for units.
             Stances: 'hold_fire' (0), 'return_fire' (1), 'defend' (2), 'attack_anything' (3).
@@ -2509,6 +2553,19 @@ class OpenRAEnvironment(MCPEnvironment):
             return [CommandModel(action=ActionType.HARVEST, actor_id=uid,
                                 target_x=action.get("cell_x", 0),
                                 target_y=action.get("cell_y", 0))]
+        elif tool == "load_transport":
+            transport_id = action["transport_id"]
+            if not any(u.get("actor_id") == transport_id for u in obs.get("units", [])):
+                return []
+            resolved = [uid for uid in unit_ids if uid != transport_id]
+            return [CommandModel(action=ActionType.ENTER_TRANSPORT, actor_id=uid,
+                                target_actor_id=transport_id)
+                    for uid in resolved]
+        elif tool == "unload_transport":
+            transport_id = action["transport_id"]
+            if not any(u.get("actor_id") == transport_id for u in obs.get("units", [])):
+                return []
+            return [CommandModel(action=ActionType.UNLOAD, actor_id=transport_id)]
         elif tool == "cancel_production":
             item = action["item_type"]
             queue = obs.get("production", [])

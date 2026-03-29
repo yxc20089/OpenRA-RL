@@ -10,6 +10,8 @@ Supports two modes:
 import asyncio
 import json
 import os
+import socket as _socket
+import sys as _sys
 import time
 
 import grpc
@@ -32,7 +34,6 @@ _max_concurrent = int(os.getenv("MAX_CONCURRENT_GAMES", "64"))
 # Resolve OpenRA path from CLI arg or env var.
 # CLI: python -m openra_env.server.app --openra-path /workspace/openra-build
 # Env: OPENRA_PATH=/workspace/openra-build
-import sys as _sys
 _openra_path = os.environ.get("OPENRA_PATH", "/opt/openra")
 for _i, _arg in enumerate(_sys.argv):
     if _arg == "--openra-path" and _i + 1 < len(_sys.argv):
@@ -60,7 +61,6 @@ def _env_factory():
 
 # Launch daemon on first import (idempotent — checks if already running)
 # Fail fast if port is already in use (stale daemon from crashed process)
-import socket as _socket
 def _check_port_free(port: int) -> None:
     with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
         s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
