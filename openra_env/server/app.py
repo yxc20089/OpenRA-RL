@@ -84,12 +84,17 @@ if not _daemon.is_alive():
     print(f"Game daemon launched on port {_base_grpc_port}")
 
 
+from openenv.core.env_server import ConcurrencyConfig
+
 app = create_app(
     _env_factory,
     OpenRAAction,
     OpenRAObservation,
     env_name="openra_env",
-    max_concurrent_envs=_max_concurrent,
+    concurrency_config=ConcurrencyConfig(
+        max_concurrent_envs=_max_concurrent,
+        session_timeout=300.0,  # 5 min — reap leaked sessions from crashed clients
+    ),
 )
 
 
