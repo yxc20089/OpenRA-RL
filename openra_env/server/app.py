@@ -93,9 +93,16 @@ app = create_app(
     env_name="openra_env",
     concurrency_config=ConcurrencyConfig(
         max_concurrent_envs=_max_concurrent,
-        session_timeout=300.0,  # 5 min — reap leaked sessions from crashed clients
+        session_timeout=None,  # Disabled: MCP websocket disconnect handles cleanup. Reaper bug: doesnt track MCP activity.
     ),
 )
+
+# Remove base-class routes that shadow our custom endpoints.
+# create_app() registers a trivial /health that always returns healthy;
+# our custom /health below checks daemon liveness and gRPC.
+_base_paths = {"/health"}
+app.routes[:] = [r for r in app.routes if not (hasattr(r, "path") and r.path in _base_paths)]
+
 
 
 @app.on_event("startup")
