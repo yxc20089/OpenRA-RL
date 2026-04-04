@@ -15,7 +15,7 @@ import time
 import grpc
 from fastapi import Query
 from fastapi.responses import HTMLResponse, StreamingResponse
-from openenv.core.env_server import create_app
+from openenv.core.env_server import create_app, HTTPEnvServer
 
 from openra_env.models import OpenRAAction, OpenRAObservation
 # grpc_worker removed: per-session gRPC channels eliminate HTTP/2 contention
@@ -84,21 +84,26 @@ if not _daemon.is_alive():
     print(f"Game daemon launched on port {_base_grpc_port}")
 
 
+from fastapi import FastAPI
 from openenv.core.env_server import ConcurrencyConfig
 
-app = create_app(
+# Use HTTPEnvServer directly so we hold a reference for /clear-sessions.
+# create_app() wraps this but discards the server object.
+_env_server = HTTPEnvServer(
     _env_factory,
     OpenRAAction,
     OpenRAObservation,
-    env_name="openra_env",
     concurrency_config=ConcurrencyConfig(
         max_concurrent_envs=_max_concurrent,
         session_timeout=None,  # Disabled: MCP websocket disconnect handles cleanup. Reaper bug: doesnt track MCP activity.
     ),
 )
+app = FastAPI(title="OpenRA-RL Environment", version="1.0.0")
+_env_server.register_routes(app)
+app.state.env_server = _env_server
 
 # Remove base-class routes that shadow our custom endpoints.
-# create_app() registers a trivial /health that always returns healthy;
+# register_routes() registers a trivial /health that always returns healthy;
 # our custom /health below checks daemon liveness and gRPC.
 _base_paths = {"/health"}
 app.routes[:] = [r for r in app.routes if not (hasattr(r, "path") and r.path in _base_paths)]
@@ -194,6 +199,7 @@ async def clear_sessions():
             server._sessions.clear()
             server._session_executors.clear()
             server._session_info.clear()
+            server._session_stacks.clear()
 
     return {
         "cleared": destroyed,
