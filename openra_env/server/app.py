@@ -1,6 +1,6 @@
 """FastAPI application for the OpenRA-RL environment.
 
-Creates the OpenEnv-compatible server using create_app().
+Creates the OpenEnv-compatible server using HTTPEnvServer.
 
 Supports two modes:
   - Single-session (legacy): One OpenRA process per game, port pool management
@@ -15,7 +15,7 @@ import time
 import grpc
 from fastapi import Query
 from fastapi.responses import HTMLResponse, StreamingResponse
-from openenv.core.env_server import create_app, HTTPEnvServer
+from openenv.core.env_server import HTTPEnvServer
 
 from openra_env.models import OpenRAAction, OpenRAObservation
 # grpc_worker removed: per-session gRPC channels eliminate HTTP/2 contention
@@ -121,7 +121,7 @@ def session_count():
 
 
 # ── Session reaper: catches leaked sessions the normal cleanup path missed ──
-_SESSION_MAX_AGE_S = float(os.getenv("SESSION_MAX_AGE_S", "300"))  # 5 min default
+_SESSION_MAX_AGE_S = float(os.getenv("SESSION_MAX_AGE_S", "600"))  # 10 min default
 
 
 async def _session_reaper():
