@@ -154,17 +154,28 @@ class BridgeClient:
         return response.session_id
 
     def destroy_session(self, session_id: str = "") -> None:
-        """Destroy a game session (multi-session mode)."""
-        if not self._connected or self._stub is None:
-            return
+        """Destroy a game session (multi-session mode).
 
+        Reconnects if the gRPC channel dropped — ensures the .NET daemon
+        is always notified so the session slot is freed.
+        """
         sid = session_id or self.session_id
         if not sid:
             return
 
+        # Reconnect if channel dropped (common after WebSocket disconnect)
+        if not self._connected or self._stub is None:
+            try:
+                self.connect()
+            except Exception:
+                logger.warning(f"Cannot reconnect to destroy session {sid}")
+                if sid == self.session_id:
+                    self.session_id = ""
+                return
+
         try:
             request = rl_bridge_pb2.DestroySessionRequest(session_id=sid)
-            self._stub.DestroySession(request, timeout=30.0)
+            self._stub.DestroySession(request, timeout=10.0)
             logger.info(f"Destroyed session {sid}")
         except grpc.RpcError as e:
             logger.warning(f"Failed to destroy session {sid}: {e.code()}")

@@ -13,7 +13,9 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
+
+from pydantic import Field
 
 from fastmcp import FastMCP
 from openenv.core.env_server.mcp_environment import MCPEnvironment
@@ -829,7 +831,10 @@ class OpenRAEnvironment(MCPEnvironment):
             return result
 
         @configurable_tool
-        def get_terrain_at(cell_x: int, cell_y: int) -> dict:
+        def get_terrain_at(
+            cell_x: Annotated[int, Field(description="Map cell X coordinate to inspect")],
+            cell_y: Annotated[int, Field(description="Map cell Y coordinate to inspect")],
+        ) -> dict:
             """Check terrain at a map cell. Returns passability and whether it's
             water. Useful before placing buildings (spen/syrd need water)."""
             env._refresh_obs()
@@ -877,7 +882,9 @@ class OpenRAEnvironment(MCPEnvironment):
         # ── Game Knowledge Tools (static mod data) ───────────────────────
 
         @configurable_tool
-        def lookup_unit(unit_type: str) -> dict:
+        def lookup_unit(
+            unit_type: Annotated[str, Field(description="Internal unit type name, e.g. 'e1', '3tnk', 'mig'")],
+        ) -> dict:
             """Look up stats for a unit type (e.g., 'e1', '3tnk', 'mig').
             Returns cost, HP, speed, armor, prerequisites, and description."""
             result = get_unit_stats(unit_type)
@@ -887,7 +894,9 @@ class OpenRAEnvironment(MCPEnvironment):
             return result
 
         @configurable_tool
-        def lookup_building(building_type: str) -> dict:
+        def lookup_building(
+            building_type: Annotated[str, Field(description="Internal building type name, e.g. 'powr', 'weap', 'stek'")],
+        ) -> dict:
             """Look up stats for a building type (e.g., 'powr', 'weap', 'stek').
             Returns cost, HP, power, prerequisites, and description."""
             result = get_building_stats(building_type)
@@ -897,13 +906,17 @@ class OpenRAEnvironment(MCPEnvironment):
             return result
 
         @configurable_tool
-        def lookup_tech_tree(faction: str = "soviet") -> dict:
+        def lookup_tech_tree(
+            faction: Annotated[str, Field(description="Faction name ('russia', 'england') or side ('allied', 'soviet')")] = "soviet",
+        ) -> dict:
             """Get the tech tree / build order for a faction or side.
             Accepts faction names ('russia', 'england') or sides ('allied', 'soviet')."""
             return get_tech_tree(faction)
 
         @configurable_tool
-        def lookup_faction(faction: str) -> dict:
+        def lookup_faction(
+            faction: Annotated[str, Field(description="Faction name: 'england', 'france', 'germany', 'russia', or 'ukraine'")],
+        ) -> dict:
             """Get faction info including all available units and buildings.
             Faction names: 'england', 'france', 'germany', 'russia', 'ukraine'."""
             result = get_faction_info(faction)
@@ -1161,7 +1174,9 @@ class OpenRAEnvironment(MCPEnvironment):
             return result
 
         @configurable_tool
-        def batch_lookup(queries: list[dict]) -> dict:
+        def batch_lookup(
+            queries: Annotated[list[dict], Field(description="List of lookup queries, each with 'type' ('unit'|'building'|'faction'|'tech_tree') and 'name' (e.g. '3tnk', 'weap', 'russia')")],
+        ) -> dict:
             """Look up multiple units, buildings, factions, or tech trees in one call.
             Each query: {"type": "unit"|"building"|"faction"|"tech_tree", "name": "..."}
             Example: [{"type":"unit","name":"3tnk"}, {"type":"building","name":"weap"}]
@@ -1332,7 +1347,9 @@ class OpenRAEnvironment(MCPEnvironment):
             }
 
         @configurable_tool
-        def end_planning_phase(strategy: str = "") -> dict:
+        def end_planning_phase(
+            strategy: Annotated[str, Field(description="Your formulated strategy as a text summary, available as context during gameplay")] = "",
+        ) -> dict:
             """End the planning phase and transition to gameplay.
 
             Args:
@@ -1403,7 +1420,9 @@ class OpenRAEnvironment(MCPEnvironment):
         # ── Action Tools (advance game state) ────────────────────────────
 
         @configurable_tool
-        def advance(ticks: int = 1) -> dict:
+        def advance(
+            ticks: Annotated[int, Field(description="Number of game ticks to advance (~25 ticks = 1 game-second, max 500)")] = 1,
+        ) -> dict:
             """Advance the game by N ticks at accelerated speed (~25 ticks = 1 game-second).
             Production, movement, combat, and building auto-placement all require
             game time to progress — nothing happens without calling advance().
@@ -1416,7 +1435,7 @@ class OpenRAEnvironment(MCPEnvironment):
                 enabled_interrupts: Signal names to check, e.g. ["enemy_spotted", "building_discovered"].
                 If an interrupt fires, advance ends early with 'interrupted' and 'interrupt_reason' in result."""
             requested = ticks
-            ticks = max(1, min(ticks, 50))  # clamp to [1, 50] — keep each gRPC call <2s even at high game ticks
+            ticks = max(1, min(ticks, 500))  # raised from 50: C# fast-forward makes 500-tick calls ~450ms
             try:
                 # Server-side interrupt detection: check every 25 ticks.
                 # AllCells LINQ removed from CheckInterrupts(), only runs once
@@ -1501,7 +1520,12 @@ class OpenRAEnvironment(MCPEnvironment):
             return result
 
         @configurable_tool
-        def move_units(unit_ids: str, target_x: int, target_y: int, queued: bool = False) -> dict:
+        def move_units(
+            unit_ids: Annotated[str, Field(description="Comma-separated unit IDs, 'all_combat', 'all_idle', 'type:e1', 'all_infantry', 'all_vehicles', or a group name")],
+            target_x: Annotated[int, Field(description="Target X coordinate on the map")],
+            target_y: Annotated[int, Field(description="Target Y coordinate on the map")],
+            queued: Annotated[bool, Field(description="If true, queue this command after the unit's current action")] = False,
+        ) -> dict:
             """Move units to a map cell position. Units pathfind automatically.
             unit_ids: comma-separated IDs, "all_combat", "all_idle", "type:e1", "all_infantry", "all_vehicles", or a group name."""
             env._refresh_obs()
@@ -1520,7 +1544,12 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._add_unit_feedback(result, resolved, target_x=target_x, target_y=target_y)
 
         @configurable_tool
-        def attack_move(unit_ids: str, target_x: int, target_y: int, queued: bool = False) -> dict:
+        def attack_move(
+            unit_ids: Annotated[str, Field(description="Comma-separated unit IDs, 'all_combat', 'all_idle', 'type:e1', 'all_infantry', 'all_vehicles', or a group name")],
+            target_x: Annotated[int, Field(description="Target X coordinate on the map")],
+            target_y: Annotated[int, Field(description="Target Y coordinate on the map")],
+            queued: Annotated[bool, Field(description="If true, queue this command after the unit's current action")] = False,
+        ) -> dict:
             """Move units toward a cell, attacking enemies encountered along the way.
             unit_ids: comma-separated IDs, "all_combat", "all_idle", "type:e1", "all_infantry", "all_vehicles", or a group name."""
             env._refresh_obs()
@@ -1539,7 +1568,11 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._add_unit_feedback(result, resolved, target_x=target_x, target_y=target_y)
 
         @configurable_tool
-        def attack_target(unit_ids: str, target_actor_id: int, queued: bool = False) -> dict:
+        def attack_target(
+            unit_ids: Annotated[str, Field(description="Comma-separated unit IDs, 'all_combat', 'all_idle', 'type:e1', 'all_infantry', 'all_vehicles', or a group name")],
+            target_actor_id: Annotated[int, Field(description="Actor ID of the enemy unit or building to attack")],
+            queued: Annotated[bool, Field(description="If true, queue this command after the unit's current action")] = False,
+        ) -> dict:
             """Order units to attack a specific enemy actor by ID.
             unit_ids: comma-separated IDs, "all_combat", "all_idle", "type:e1", "all_infantry", "all_vehicles", or a group name."""
             env._refresh_obs()
@@ -1554,7 +1587,9 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._add_unit_feedback(result, resolved)
 
         @configurable_tool
-        def stop_units(unit_ids: str) -> dict:
+        def stop_units(
+            unit_ids: Annotated[str, Field(description="Comma-separated unit IDs, 'all_combat', 'all_idle', 'type:e1', 'all_infantry', 'all_vehicles', or a group name")],
+        ) -> dict:
             """Stop units from their current activity.
             unit_ids: comma-separated IDs, "all_combat", "all_idle", "type:e1", "all_infantry", "all_vehicles", or a group name."""
             env._refresh_obs()
@@ -1566,7 +1601,10 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._add_unit_feedback(result, resolved)
 
         @configurable_tool
-        def build_unit(unit_type: str, count: int = 1) -> dict:
+        def build_unit(
+            unit_type: Annotated[str, Field(description="Internal unit type name to train, e.g. 'e1', '3tnk', 'mig'")],
+            count: Annotated[int, Field(description="Number of units to queue (1-10)")] = 1,
+        ) -> dict:
             """Start training units (infantry, vehicle, aircraft, ship).
             The unit_type is the internal name (e.g., 'e1', '3tnk', 'mig').
             Use count > 1 to queue multiple of the same type."""
@@ -1618,7 +1656,9 @@ class OpenRAEnvironment(MCPEnvironment):
             return result
 
         @configurable_tool
-        def build_structure(building_type: str) -> dict:
+        def build_structure(
+            building_type: Annotated[str, Field(description="Internal building type name, e.g. 'powr', 'barr', 'weap'")],
+        ) -> dict:
             """Start constructing a building (manual placement workflow).
             After calling this, call advance(ticks) to let construction finish,
             then call place_building() to place it on the map.
@@ -1677,7 +1717,11 @@ class OpenRAEnvironment(MCPEnvironment):
             return result
 
         @configurable_tool
-        def build_and_place(building_type: str, cell_x: int = 0, cell_y: int = 0) -> dict:
+        def build_and_place(
+            building_type: Annotated[str, Field(description="Internal building type name, e.g. 'powr', 'barr', 'weap'")],
+            cell_x: Annotated[int, Field(description="Preferred X coordinate for placement (0 = auto-place near base)")] = 0,
+            cell_y: Annotated[int, Field(description="Preferred Y coordinate for placement (0 = auto-place near base)")] = 0,
+        ) -> dict:
             """Build a structure and auto-place it when construction finishes.
             After calling this, you must call advance(ticks) to let construction
             complete — the building auto-places once done. Do NOT call
@@ -1738,7 +1782,11 @@ class OpenRAEnvironment(MCPEnvironment):
             return result
 
         @configurable_tool
-        def place_building(building_type: str, cell_x: int = 0, cell_y: int = 0) -> dict:
+        def place_building(
+            building_type: Annotated[str, Field(description="Internal building type name of the completed building to place")],
+            cell_x: Annotated[int, Field(description="Map X coordinate for placement (0 = auto-place near base)")] = 0,
+            cell_y: Annotated[int, Field(description="Map Y coordinate for placement (0 = auto-place near base)")] = 0,
+        ) -> dict:
             """Place a completed building on the map (only for build_structure workflow).
             The building must be at 100% in the production queue or this will error.
             Do NOT use this on buildings queued via build_and_place() — those
@@ -1771,7 +1819,9 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @configurable_tool
-        def cancel_production(item_type: str) -> dict:
+        def cancel_production(
+            item_type: Annotated[str, Field(description="Type name of the item to cancel from the production queue")],
+        ) -> dict:
             """Cancel production of an item currently in a production queue."""
             env._refresh_obs()
             obs = env._last_obs or {}
@@ -1784,7 +1834,9 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @configurable_tool
-        def deploy_unit(unit_id: int) -> dict:
+        def deploy_unit(
+            unit_id: Annotated[int, Field(description="Actor ID of the unit to deploy (e.g. MCV to Construction Yard)")],
+        ) -> dict:
             """Deploy a unit (e.g., MCV → Construction Yard)."""
             env._refresh_obs()
             obs = env._last_obs or {}
@@ -1796,7 +1848,9 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @configurable_tool
-        def sell_building(building_id: int) -> dict:
+        def sell_building(
+            building_id: Annotated[int, Field(description="Actor ID of the building to sell for a partial refund")],
+        ) -> dict:
             """Sell a building for partial refund."""
             env._refresh_obs()
             obs = env._last_obs or {}
@@ -1808,7 +1862,9 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @configurable_tool
-        def repair_building(building_id: int) -> dict:
+        def repair_building(
+            building_id: Annotated[int, Field(description="Actor ID of the building to toggle repair on")],
+        ) -> dict:
             """Toggle repair on a building. Costs credits over time."""
             env._refresh_obs()
             obs = env._last_obs or {}
@@ -1820,7 +1876,11 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @configurable_tool
-        def set_rally_point(building_id: int, cell_x: int, cell_y: int) -> dict:
+        def set_rally_point(
+            building_id: Annotated[int, Field(description="Actor ID of the production building")],
+            cell_x: Annotated[int, Field(description="Rally point X coordinate on the map")],
+            cell_y: Annotated[int, Field(description="Rally point Y coordinate on the map")],
+        ) -> dict:
             """Set rally point for a production building. Newly produced units
             will move to this location."""
             env._refresh_obs()
@@ -1833,7 +1893,11 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @configurable_tool
-        def guard_target(unit_ids: str, target_actor_id: int, queued: bool = False) -> dict:
+        def guard_target(
+            unit_ids: Annotated[str, Field(description="Comma-separated unit IDs, 'all_combat', 'all_idle', 'type:e1', 'all_infantry', 'all_vehicles', or a group name")],
+            target_actor_id: Annotated[int, Field(description="Actor ID of the unit or building to guard")],
+            queued: Annotated[bool, Field(description="If true, queue this command after the unit's current action")] = False,
+        ) -> dict:
             """Order units to guard another actor, following and protecting it.
             unit_ids: comma-separated IDs, "all_combat", "all_idle", "type:e1", "all_infantry", "all_vehicles", or a group name."""
             env._refresh_obs()
@@ -1848,7 +1912,12 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._add_unit_feedback(result, resolved)
 
         @configurable_tool
-        def patrol_units(unit_ids: str, target_x: int, target_y: int, queued: bool = False) -> dict:
+        def patrol_units(
+            unit_ids: Annotated[str, Field(description="Comma-separated unit IDs, 'all_combat', 'all_idle', 'type:e1', 'all_infantry', 'all_vehicles', or a group name")],
+            target_x: Annotated[int, Field(description="Patrol destination X coordinate on the map")],
+            target_y: Annotated[int, Field(description="Patrol destination Y coordinate on the map")],
+            queued: Annotated[bool, Field(description="If true, queue this command after the unit's current action")] = False,
+        ) -> dict:
             """Order units to patrol between current position and target, engaging enemies on the way.
             unit_ids: comma-separated IDs, \"all_combat\", \"all_idle\", \"type:e1\", or a group name."""
             env._refresh_obs()
@@ -1863,7 +1932,10 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._add_unit_feedback(result, resolved)
 
         @configurable_tool
-        def set_stance(unit_ids: str, stance: str) -> dict:
+        def set_stance(
+            unit_ids: Annotated[str, Field(description="Comma-separated unit IDs, 'all_combat', 'all_idle', 'type:e1', 'all_infantry', 'all_vehicles', or a group name")],
+            stance: Annotated[str, Field(description="Combat stance: 'hold_fire', 'return_fire', 'defend', or 'attack_anything'")],
+        ) -> dict:
             """Set combat stance for units.
             Stances: 'hold_fire' (0), 'return_fire' (1), 'defend' (2), 'attack_anything' (3).
             unit_ids: comma-separated IDs, "all_combat", "all_idle", "type:e1", "all_infantry", "all_vehicles", or a group name."""
@@ -1881,7 +1953,11 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._add_unit_feedback(result, resolved)
 
         @configurable_tool
-        def harvest(unit_id: int, cell_x: int = 0, cell_y: int = 0) -> dict:
+        def harvest(
+            unit_id: Annotated[int, Field(description="Actor ID of the harvester unit")],
+            cell_x: Annotated[int, Field(description="Ore field X coordinate (0 = auto-harvest nearest ore)")] = 0,
+            cell_y: Annotated[int, Field(description="Ore field Y coordinate (0 = auto-harvest nearest ore)")] = 0,
+        ) -> dict:
             """Send a harvester to collect ore. If cell_x/cell_y are provided,
             harvest at that location. Otherwise, auto-harvest nearest ore."""
             env._refresh_obs()
@@ -1894,7 +1970,9 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @configurable_tool
-        def power_down(building_id: int) -> dict:
+        def power_down(
+            building_id: Annotated[int, Field(description="Actor ID of the building to toggle power on/off")],
+        ) -> dict:
             """Toggle power on/off for a building. Reduces power consumption
             but disables the building's function."""
             env._refresh_obs()
@@ -1907,7 +1985,9 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._execute_commands(commands)
 
         @configurable_tool
-        def set_primary(building_id: int) -> dict:
+        def set_primary(
+            building_id: Annotated[int, Field(description="Actor ID of the production building to set as primary")],
+        ) -> dict:
             """Set a production building as the primary producer. New units will
             exit from this building."""
             env._refresh_obs()
@@ -1922,7 +2002,10 @@ class OpenRAEnvironment(MCPEnvironment):
         # ── Placement Helper ────────────────────────────────────────────
 
         @configurable_tool
-        def get_valid_placements(building_type: str, max_results: int = 8) -> dict:
+        def get_valid_placements(
+            building_type: Annotated[str, Field(description="Internal building type name to find placement positions for")],
+            max_results: Annotated[int, Field(description="Maximum number of placement suggestions to return (1-15)")] = 8,
+        ) -> dict:
             """Get suggested placement positions for a building near your base.
             Returns positions sorted by distance from Construction Yard.
             Use the first position with place_building(). If it fails, try the next."""
@@ -1955,7 +2038,10 @@ class OpenRAEnvironment(MCPEnvironment):
         # ── Unit Group Tools ────────────────────────────────────────────
 
         @configurable_tool
-        def assign_group(group_name: str, unit_ids: list[int]) -> dict:
+        def assign_group(
+            group_name: Annotated[str, Field(description="Name for the unit group (e.g. 'attackers', 'scouts')")],
+            unit_ids: Annotated[list[int], Field(description="List of actor IDs to assign to this group")],
+        ) -> dict:
             """Assign units to a named group (like Ctrl+1 in-game).
             Groups persist across turns. Use group names in other commands.
             Example: assign_group("attackers", [155, 160, 170])"""
@@ -1963,7 +2049,10 @@ class OpenRAEnvironment(MCPEnvironment):
             return {"group": group_name, "unit_count": len(unit_ids), "unit_ids": unit_ids}
 
         @configurable_tool
-        def add_to_group(group_name: str, unit_ids: list[int]) -> dict:
+        def add_to_group(
+            group_name: Annotated[str, Field(description="Name of the existing group to add units to")],
+            unit_ids: Annotated[list[int], Field(description="List of actor IDs to add to the group")],
+        ) -> dict:
             """Add units to an existing group (like Shift+Ctrl+1)."""
             existing = env._unit_groups.get(group_name, [])
             for uid in unit_ids:
@@ -1990,12 +2079,12 @@ class OpenRAEnvironment(MCPEnvironment):
 
         @configurable_tool
         def command_group(
-            group_name: str,
-            command: str,
-            target_x: int = 0,
-            target_y: int = 0,
-            target_actor_id: int = 0,
-            stance: str = "attack_anything",
+            group_name: Annotated[str, Field(description="Name of the unit group to command")],
+            command: Annotated[str, Field(description="Command to execute: 'attack_move', 'move_units', 'attack_target', 'set_stance', or 'stop_units'")],
+            target_x: Annotated[int, Field(description="Target X coordinate (for attack_move/move_units)")] = 0,
+            target_y: Annotated[int, Field(description="Target Y coordinate (for attack_move/move_units)")] = 0,
+            target_actor_id: Annotated[int, Field(description="Enemy actor ID to attack (for attack_target)")] = 0,
+            stance: Annotated[str, Field(description="Combat stance name (for set_stance): 'hold_fire', 'return_fire', 'defend', 'attack_anything'")] = "attack_anything",
         ) -> dict:
             """Send a command to all units in a named group.
             command: "attack_move", "move_units", "attack_target", "set_stance", "stop_units"
@@ -2067,7 +2156,9 @@ class OpenRAEnvironment(MCPEnvironment):
             return result
 
         @configurable_tool
-        def batch(actions: list[dict]) -> dict:
+        def batch(
+            actions: Annotated[list[dict], Field(description="List of action dicts to execute concurrently, e.g. [{'tool': 'build_unit', 'unit_type': 'e1', 'count': 3}, {'tool': 'attack_move', 'unit_ids': '155,160', 'target_x': 50, 'target_y': 30}]")],
+        ) -> dict:
             """Send multiple commands that all execute concurrently (same game tick).
 
             Actions use same format as individual tools:
@@ -2131,7 +2222,9 @@ class OpenRAEnvironment(MCPEnvironment):
                 return {"error": f"Command execution failed: {e}"}
 
         @configurable_tool
-        def plan(steps: list[dict]) -> dict:
+        def plan(
+            steps: Annotated[list[dict], Field(description="List of step dicts, each with 'actions' (list of action dicts) and optional 'condition' ('enemies_visible', 'funds_above:2000', etc.)")],
+        ) -> dict:
             """Execute steps sequentially. Each step's commands are sent, then
             the observation is refreshed before the next step. Use conditions
             to gate steps on game state.
@@ -2930,12 +3023,30 @@ class OpenRAEnvironment(MCPEnvironment):
         **kwargs: Any,
     ) -> OpenRAObservation:
         """Reset the environment for a new episode."""
-        # Clean up previous episode
+        # Clean up previous episode's .NET session (prevents session leak).
+        # Use _destroy_session_with_timeout to avoid blocking if the .NET
+        # daemon is slow (busy with concurrent sessions, pathfinding, etc.).
+        # A bare destroy_session() with no timeout was the main leak source.
         if self._multi_session:
-            self._bridge.destroy_session()
+            try:
+                self._destroy_session_with_timeout(timeout_s=10.0)
+            except Exception as e:
+                logger.warning("Failed to destroy previous session during reset: %s", e)
+            # Close and re-create bridge channel for a clean slate.
+            # If destroy_session failed, the channel may be in a bad state
+            # (half-closed, deadline exceeded, etc.). A fresh channel ensures
+            # create_session won't inherit stale connection state.
+            if self._shared_channel is None:
+                try:
+                    self._bridge.close()
+                except Exception:
+                    pass
         else:
             self._bridge.close()
             self._process.kill()
+
+        # Mark as open (close() guard)
+        self._closed = False
 
         # Initialize new episode state
         ep_id = episode_id or str(uuid.uuid4())
@@ -3113,14 +3224,65 @@ class OpenRAEnvironment(MCPEnvironment):
             reward_vector=reward_vec,
         )
 
+    def _destroy_session_with_timeout(self, timeout_s: float = 15.0) -> None:
+        """Destroy the .NET game session with a hard timeout.
+
+        Runs bridge.destroy_session() in a daemon thread so that if the gRPC
+        call hangs (unresponsive .NET daemon, network issue), we don't block
+        the caller indefinitely.  The daemon thread is abandoned after timeout
+        (shutdown(wait=False)) — the session reaper or /clear-sessions can
+        clean it up later.
+        """
+        import concurrent.futures
+
+        sid = self._bridge.session_id
+        if not sid:
+            return
+
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(self._bridge.destroy_session)
+        try:
+            future.result(timeout=timeout_s)
+        except concurrent.futures.TimeoutError:
+            logger.warning(
+                "destroy_session(%s) timed out after %.0fs — session may leak on .NET side",
+                sid, timeout_s,
+            )
+        except Exception as e:
+            logger.warning("destroy_session(%s) failed: %s", sid, e)
+        finally:
+            # Don't wait for the thread — it may be stuck in a gRPC call
+            pool.shutdown(wait=False)
+
     def close(self) -> None:
-        """Clean up resources."""
+        """Clean up resources.
+
+        In multi-session mode, explicitly destroys the .NET game session
+        via gRPC before closing the bridge channel.  Without this,
+        sessions leak in the daemon and it becomes unresponsive after
+        ~40-60 leaked sessions.
+
+        Uses a thread-level timeout to prevent hangs when the .NET daemon
+        is unresponsive (e.g., stuck in pathfinding or GC pause).
+
+        Idempotent: safe to call multiple times (guarded by _closed flag).
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+
         if self._multi_session:
             try:
-                self._bridge.destroy_session()
-            except Exception:
-                pass
-            # Don't close bridge — shared channel is managed by the caller
+                self._destroy_session_with_timeout(timeout_s=15.0)
+            except Exception as e:
+                logger.warning("Failed to destroy session on close: %s", e)
+            # Close the bridge channel unless it's a shared channel
+            # managed by the caller.
+            if self._shared_channel is None:
+                try:
+                    self._bridge.close()
+                except Exception:
+                    pass
         else:
             try:
                 self._bridge.close()
