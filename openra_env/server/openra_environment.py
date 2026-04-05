@@ -2559,7 +2559,7 @@ class OpenRAEnvironment(MCPEnvironment):
                 (u for u in obs.get("units", []) if u.get("actor_id") == transport_id),
                 None,
             )
-            if transport is None or transport.get("passenger_count", -1) < 0:
+            if transport is None:
                 return []
             resolved = [uid for uid in unit_ids if uid != transport_id]
             return [CommandModel(action=ActionType.ENTER_TRANSPORT, actor_id=uid,
@@ -2571,7 +2571,10 @@ class OpenRAEnvironment(MCPEnvironment):
                 (u for u in obs.get("units", []) if u.get("actor_id") == transport_id),
                 None,
             )
-            if transport is None or transport.get("passenger_count", -1) <= 0:
+            if transport is None:
+                return []
+            pc = transport.get("passenger_count")
+            if pc is not None and pc <= 0:
                 return []
             return [CommandModel(action=ActionType.UNLOAD, actor_id=transport_id)]
         elif tool == "cancel_production":
