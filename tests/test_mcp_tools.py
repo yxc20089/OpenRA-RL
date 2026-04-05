@@ -283,7 +283,7 @@ class TestMCPToolRegistration:
         _, mcp = env
         from tests.conftest import get_tool_count
         count = get_tool_count(mcp)
-        # 2 read + 1 exploration + 1 terrain + 4 knowledge + 3 bulk + 4 planning + 29 action + 1 replay = 45
+        # 2 read + 1 exploration + 1 terrain + 4 knowledge + 3 bulk + 4 planning + 30 action + 1 replay = 46
         # (5 redundant read tools disabled by default: get_economy/units/buildings/enemies/production)
         assert count == 46, f"Expected 46 tools, got {count}"
 
