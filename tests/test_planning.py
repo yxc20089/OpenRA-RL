@@ -258,7 +258,7 @@ class TestPlanningTools:
         _, mcp = env_with_obs
         from tests.conftest import get_tool_count
         count = get_tool_count(mcp)
-        # 2 read + 1 exploration + 1 terrain + 4 knowledge + 3 bulk + 4 planning + 27 action + 1 replay = 43
+        # 2 read + 1 exploration + 1 terrain + 4 knowledge + 3 bulk + 4 planning + 30 action + 1 replay = 46
         assert count == 46, f"Expected 46 tools, got {count}"
 
     def test_get_opponent_intel(self, env_with_obs):
@@ -540,7 +540,7 @@ class TestBulkKnowledgeTools:
         _, mcp = env_with_obs
         from tests.conftest import get_tool_count
         count = get_tool_count(mcp)
-        # 2 read + 1 exploration + 1 terrain + 4 knowledge + 3 bulk + 4 planning + 27 action + 1 replay = 43
+        # 2 read + 1 exploration + 1 terrain + 4 knowledge + 3 bulk + 4 planning + 30 action + 1 replay = 46
         assert count == 46, f"Expected 46 tools, got {count}"
 
     # ── get_faction_briefing ──
