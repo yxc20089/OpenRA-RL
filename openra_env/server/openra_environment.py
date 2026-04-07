@@ -2656,8 +2656,16 @@ class OpenRAEnvironment(MCPEnvironment):
         so the game stays paused during the planning phase and while the
         LLM processes its first prompt.
         """
-        # No streaming session — just do a 1-tick advance to unpause
-        pass
+        # Do a 1-tick advance to populate _last_obs with real units.
+        # Without this, _last_obs.units is empty after reset() and all
+        # move_units/attack_unit calls return "No matching units".
+        if not self._last_obs or not self._last_obs.get("units"):
+            try:
+                obs_dict = self.bridge.fast_advance_unary(ticks=1)
+                if obs_dict:
+                    self._last_obs = obs_dict
+            except Exception:
+                pass  # will be populated on first advance() call
 
     def _refresh_obs(self) -> None:
         """Process pending placements using cached observation.
