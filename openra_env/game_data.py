@@ -211,7 +211,9 @@ RA_UNITS: dict[str, dict] = {
         "armor": "light",
         "side": "allied",
         "prerequisites": ["weap"],
-        "description": "Fast scout vehicle with machine gun. Allied only.",
+        "cargo_max_weight": 1,
+        "cargo_types": ["infantry"],
+        "description": "Fast scout vehicle with machine gun. Can carry 1 infantry. Allied only.",
     },
     "apc": {
         "name": "APC",
@@ -222,6 +224,8 @@ RA_UNITS: dict[str, dict] = {
         "armor": "heavy",
         "side": "soviet",
         "prerequisites": ["weap"],
+        "cargo_max_weight": 5,
+        "cargo_types": ["infantry"],
         "description": "Armored troop transport. Carries 5 infantry. Soviet only.",
     },
     "arty": {
@@ -310,7 +314,9 @@ RA_UNITS: dict[str, dict] = {
         "armor": "light",
         "side": "allied",
         "prerequisites": ["weap", "atek"],
-        "description": "Cloaked APC. Invisible when not firing. Allied only.",
+        "cargo_max_weight": 5,
+        "cargo_types": ["infantry"],
+        "description": "Cloaked APC. Carries 5 infantry. Invisible when not firing. Allied only.",
     },
     "qtnk": {
         "name": "MAD Tank",
@@ -400,7 +406,7 @@ RA_UNITS: dict[str, dict] = {
         "armor": "light",
         "side": "allied",
         "prerequisites": ["hpad"],
-        "description": "Transport/attack helicopter. Allied only.",
+        "description": "Attack helicopter. Allied only.",
     },
     "tran": {
         "name": "Chinook",
@@ -411,7 +417,9 @@ RA_UNITS: dict[str, dict] = {
         "armor": "light",
         "side": "both",
         "prerequisites": ["hpad|afld"],
-        "description": "Transport helicopter. Carries 5 infantry.",
+        "cargo_max_weight": 8,
+        "cargo_types": ["infantry"],
+        "description": "Transport helicopter. Carries 8 infantry.",
     },
     "yak": {
         "name": "Yak",
@@ -490,7 +498,9 @@ RA_UNITS: dict[str, dict] = {
         "armor": "heavy",
         "side": "both",
         "prerequisites": ["syrd|spen"],
-        "description": "Naval transport. Carries vehicles and infantry.",
+        "cargo_max_weight": 5,
+        "cargo_types": ["infantry", "vehicle"],
+        "description": "Naval transport. Carries up to 5 infantry or vehicles.",
     },
     "msub": {
         "name": "Missile Submarine",
