@@ -3057,23 +3057,31 @@ class OpenRAEnvironment(MCPEnvironment):
         # Clear broken flag on reset — give the environment a fresh chance.
         self._broken = False
         # Clean up previous episode's .NET session (prevents session leak).
-        # Use _destroy_session_with_timeout to avoid blocking if the .NET
-        # daemon is slow (busy with concurrent sessions, pathfinding, etc.).
-        # A bare destroy_session() with no timeout was the main leak source.
+        # Track the old session_id so we can force-destroy it if the
+        # graceful path fails or times out.
+        _old_session_id = self._bridge.session_id if self._multi_session else ""
         if self._multi_session:
             try:
-                self._destroy_session_with_timeout(timeout_s=10.0)
+                self._destroy_session_with_timeout(timeout_s=5.0)
             except Exception as e:
                 logger.warning("Failed to destroy previous session during reset: %s", e)
+            # Force-clear session_id even if destroy timed out, so we don't
+            # try to use a dead session in subsequent calls.
+            if self._bridge.session_id and self._bridge.session_id == _old_session_id:
+                logger.warning("Session %s still set after destroy — force-clearing", _old_session_id[:8])
+                self._bridge.session_id = ""
             # Close and re-create bridge channel for a clean slate.
             # If destroy_session failed, the channel may be in a bad state
             # (half-closed, deadline exceeded, etc.). A fresh channel ensures
             # create_session won't inherit stale connection state.
             if self._shared_channel is None:
                 try:
-                    self._bridge.close()
+                    self._bridge.force_close()
                 except Exception:
-                    pass
+                    try:
+                        self._bridge.close()
+                    except Exception:
+                        pass
         else:
             self._bridge.close()
             self._process.kill()
@@ -3164,7 +3172,17 @@ class OpenRAEnvironment(MCPEnvironment):
             # With 20+ concurrent sessions, world creation is serialized by
             # WorldCreateLock (~2-3s per session). Last session can take 60s+.
             # Use 120s timeout (240 retries * 0.5s) for safety margin.
-            ready = self._bridge.wait_for_ready(max_retries=240, retry_interval=0.5)
+            try:
+                ready = self._bridge.wait_for_ready(max_retries=240, retry_interval=0.5)
+            except Exception as e:
+                # Session was created on .NET side but wait failed — destroy it
+                # so we don't leak a .NET session slot.
+                logger.warning("wait_for_ready failed after create_session — destroying leaked session %s", session_id)
+                self._bridge.destroy_session_with_timeout(timeout_s=5.0)
+                self._broken = True
+                raise RuntimeError(
+                    f"wait_for_ready failed (session={session_id}): {e}"
+                ) from e
         else:
             # Single-session mode: launch a new OpenRA process.
             # Serialized via semaphore to prevent CPU starvation from JIT.
@@ -3195,12 +3213,19 @@ class OpenRAEnvironment(MCPEnvironment):
             self._player_faction = game_state.player_faction or ""
             self._enemy_faction = game_state.enemy_faction or ""
         except Exception as e:
+            # Health check failed — destroy the .NET session to free the slot
+            logger.warning("get_state() failed — destroying leaked session")
+            self._bridge.destroy_session_with_timeout(timeout_s=5.0)
+            self._broken = True
             raise RuntimeError(
                 f"Session health check failed: get_state() error: {e}. "
                 f"The .NET session likely failed to initialize."
             ) from e
 
         if game_state is None or not hasattr(game_state, 'tick'):
+            logger.warning("get_state() returned None — destroying leaked session")
+            self._bridge.destroy_session_with_timeout(timeout_s=5.0)
+            self._broken = True
             raise RuntimeError(
                 "Session health check failed: get_state() returned None. "
                 "The .NET session is in a degenerate state."
@@ -3265,46 +3290,55 @@ class OpenRAEnvironment(MCPEnvironment):
             reward_vector=reward_vec,
         )
 
-    def _destroy_session_with_timeout(self, timeout_s: float = 15.0) -> None:
+    def _destroy_session_with_timeout(self, timeout_s: float = 5.0) -> None:
         """Destroy the .NET game session with a hard timeout.
 
-        Runs bridge.destroy_session() in a daemon thread so that if the gRPC
-        call hangs (unresponsive .NET daemon, network issue), we don't block
-        the caller indefinitely.  The daemon thread is abandoned after timeout
-        (shutdown(wait=False)) — the session reaper or /clear-sessions can
-        clean it up later.
+        Delegates to bridge.destroy_session_with_timeout() which handles
+        the thread pool, timeout, and force-close logic.
         """
-        import concurrent.futures
+        self._bridge.destroy_session_with_timeout(timeout_s=timeout_s)
+
+    def _destroy_session_fire_and_forget(self) -> None:
+        """Destroy the .NET game session without blocking.
+
+        Spawns a daemon thread to call bridge.destroy_session() and returns
+        immediately. Used by close() to avoid blocking the framework's session
+        cleanup — the framework already freed the session slot, we just need to
+        tell .NET to clean up (best-effort).
+        """
+        import threading
 
         sid = self._bridge.session_id
         if not sid:
             return
 
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        future = pool.submit(self._bridge.destroy_session)
-        try:
-            future.result(timeout=timeout_s)
-        except concurrent.futures.TimeoutError:
-            logger.warning(
-                "destroy_session(%s) timed out after %.0fs — session may leak on .NET side",
-                sid, timeout_s,
-            )
-        except Exception as e:
-            logger.warning("destroy_session(%s) failed: %s", sid, e)
-        finally:
-            # Don't wait for the thread — it may be stuck in a gRPC call
-            pool.shutdown(wait=False)
+        # Snapshot bridge reference — close() may clear self._bridge after we return
+        bridge = self._bridge
+
+        def _bg_destroy():
+            try:
+                bridge.destroy_session()
+            except Exception as e:
+                logger.warning("Background destroy_session(%s) failed: %s", sid, e)
+            finally:
+                try:
+                    bridge.force_close()
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=_bg_destroy, daemon=True)
+        t.start()
+        logger.info("Spawned background destroy for session %s", sid)
 
     def close(self) -> None:
         """Clean up resources.
 
-        In multi-session mode, explicitly destroys the .NET game session
-        via gRPC before closing the bridge channel.  Without this,
-        sessions leak in the daemon and it becomes unresponsive after
-        ~40-60 leaked sessions.
+        In multi-session mode, destroys the .NET session with a 5s timeout.
+        This ensures the .NET daemon frees the session slot before we return,
+        preventing session leaks that cause "Server at capacity" errors.
 
-        Uses a thread-level timeout to prevent hangs when the .NET daemon
-        is unresponsive (e.g., stuck in pathfinding or GC pause).
+        If destroy times out, force-closes the bridge (the .NET daemon's own
+        reaper will eventually clean up the orphan).
 
         Idempotent: safe to call multiple times (guarded by _closed flag).
         """
@@ -3313,17 +3347,19 @@ class OpenRAEnvironment(MCPEnvironment):
         self._closed = True
 
         if self._multi_session:
+            # Synchronous destroy with timeout — blocks up to 5s to ensure
+            # the .NET session slot is freed. This is critical for preventing
+            # session leaks between training rounds.
             try:
-                self._destroy_session_with_timeout(timeout_s=15.0)
+                self._bridge.destroy_session_with_timeout(timeout_s=5.0)
             except Exception as e:
-                logger.warning("Failed to destroy session on close: %s", e)
-            # Close the bridge channel unless it's a shared channel
-            # managed by the caller.
-            if self._shared_channel is None:
-                try:
-                    self._bridge.close()
-                except Exception:
-                    pass
+                logger.warning("destroy_session_with_timeout failed in close(): %s", e)
+            # Always force-close the bridge after destroy (success or failure)
+            # to free Python-side resources and ensure a clean state.
+            try:
+                self._bridge.force_close()
+            except Exception:
+                pass
         else:
             try:
                 self._bridge.close()

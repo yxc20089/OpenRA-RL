@@ -121,25 +121,29 @@ def session_count():
 
 
 # ── Session reaper: catches leaked sessions the normal cleanup path missed ──
-_SESSION_MAX_AGE_S = float(os.getenv("SESSION_MAX_AGE_S", "600"))  # 10 min default
+_SESSION_MAX_AGE_S = float(os.getenv("SESSION_MAX_AGE_S", "15"))  # 10 min default
 
 
 async def _session_reaper():
     """Background task that destroys sessions older than SESSION_MAX_AGE_S.
 
-    Runs every 30s. Catches sessions leaked by:
+    Runs every 5s. Catches sessions leaked by:
     - WebSocket disconnects where env.close() timed out
     - Crashed episodes that never called close()
     - Training restarts that left server-side sessions orphaned
+
+    Uses asyncio.wait_for with a 5s timeout per session. If _destroy_session
+    hangs (e.g., env.close() blocks on gRPC), force-removes the session from
+    the framework's tracking dicts so the capacity slot is freed immediately.
     """
     server = app.state.env_server
     while True:
-        await asyncio.sleep(30)
+        await asyncio.sleep(5)
         try:
             now = time.time()
             stale_ids = []
             async with server._session_lock:
-                for sid, info in server._session_info.items():
+                for sid, info in list(server._session_info.items()):
                     age = now - info.last_activity_at
                     if age > _SESSION_MAX_AGE_S:
                         stale_ids.append((sid, age))
@@ -149,15 +153,47 @@ async def _session_reaper():
                       f"(>{_SESSION_MAX_AGE_S:.0f}s old), destroying...")
                 for sid, age in stale_ids:
                     try:
-                        await server._destroy_session(sid)
+                        # Give _destroy_session 5s to complete gracefully.
+                        # If it hangs (env.close() stuck on gRPC), we force-clear below.
+                        await asyncio.wait_for(server._destroy_session(sid), timeout=5.0)
                         print(f"  Reaped session {sid[:8]}... (age={age:.0f}s)")
+                    except asyncio.TimeoutError:
+                        print(f"  _destroy_session({sid[:8]}...) timed out — force-clearing")
+                        # Force-remove from all tracking dicts so the slot is freed
+                        async with server._session_lock:
+                            env = server._sessions.pop(sid, None)
+                            server._session_executors.pop(sid, None)
+                            server._session_info.pop(sid, None)
+                            if hasattr(server, "_session_stacks"):
+                                server._session_stacks.pop(sid, None)
+                        # Best-effort: destroy .NET session directly via bridge
+                        if env is not None:
+                            try:
+                                if hasattr(env, '_bridge') and env._bridge.session_id:
+                                    env._bridge.destroy_session_with_timeout(timeout_s=3.0)
+                                else:
+                                    env.close()
+                            except Exception:
+                                try:
+                                    if hasattr(env, '_bridge'):
+                                        env._bridge.force_close()
+                                except Exception:
+                                    pass
+                        print(f"  Force-cleared session {sid[:8]}...")
                     except Exception as e:
                         print(f"  Failed to reap {sid[:8]}...: {e}")
-                # Force-clear any that _destroy_session couldn't handle
+                        # Also force-clear on any other error
+                        async with server._session_lock:
+                            server._sessions.pop(sid, None)
+                            server._session_executors.pop(sid, None)
+                            server._session_info.pop(sid, None)
+                            if hasattr(server, "_session_stacks"):
+                                server._session_stacks.pop(sid, None)
+
                 async with server._session_lock:
                     remaining = len(server._sessions)
-                    if remaining > 0:
-                        print(f"  {remaining} sessions remain after reap")
+                if remaining > 0:
+                    print(f"  {remaining} sessions remain after reap")
         except Exception as e:
             print(f"Session reaper error: {e}")
 
@@ -222,6 +258,63 @@ def shutdown_server():
         os._exit(0)
     threading.Thread(target=_do_shutdown, daemon=True).start()
     return {"status": "shutting_down", "daemon_pid": _daemon.pid}
+
+
+@app.post("/clear-dotnet-sessions")
+async def clear_dotnet_sessions():
+    """Force-destroy all .NET sessions via gRPC, bypassing the framework.
+
+    Use when framework sessions are already cleared but .NET sessions
+    remain (e.g., after reaper timeout). Sends DestroySession for each
+    known session_id in the .NET daemon.
+
+    Also force-clears the framework's session tracking dicts.
+    """
+    import grpc as _grpc
+    from openra_env.generated import rl_bridge_pb2, rl_bridge_pb2_grpc
+
+    server = app.state.env_server
+    # First, get all env objects to extract their bridge session IDs
+    dotnet_sids = []
+    async with server._session_lock:
+        for sid, env in list(server._sessions.items()):
+            if env is not None and hasattr(env, '_bridge') and env._bridge.session_id:
+                dotnet_sids.append(env._bridge.session_id)
+        # Force-clear all framework tracking
+        cleared = len(server._sessions)
+        server._sessions.clear()
+        server._session_executors.clear()
+        server._session_info.clear()
+        if hasattr(server, "_session_stacks"):
+            server._session_stacks.clear()
+
+    # Now destroy .NET sessions directly
+    destroyed = 0
+    failed = 0
+    if dotnet_sids:
+        try:
+            ch = _grpc.insecure_channel(
+                f"localhost:{_base_grpc_port}",
+                options=[("grpc.max_receive_message_length", 64 * 1024 * 1024)],
+            )
+            stub = rl_bridge_pb2_grpc.RLBridgeStub(ch)
+            for dsid in dotnet_sids:
+                try:
+                    req = rl_bridge_pb2.DestroySessionRequest(session_id=dsid)
+                    stub.DestroySession(req, timeout=5.0)
+                    destroyed += 1
+                except Exception as e:
+                    failed += 1
+                    print(f"Failed to destroy .NET session {dsid[:8]}: {e}")
+            ch.close()
+        except Exception as e:
+            print(f"Failed to connect to .NET daemon: {e}")
+
+    return {
+        "framework_cleared": cleared,
+        "dotnet_destroyed": destroyed,
+        "dotnet_failed": failed,
+    }
 
 
 @app.post("/clear-sessions")

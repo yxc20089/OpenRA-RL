@@ -200,6 +200,60 @@ class BridgeClient:
         self._connected = False
         logger.info("Bridge connection closed")
 
+    def destroy_session_with_timeout(self, timeout_s: float = 5.0) -> bool:
+        """Destroy the .NET session with a hard timeout.
+
+        Returns True if destroyed successfully, False if timed out or failed.
+        On failure, force-closes the channel to free Python resources.
+        The .NET daemon's own reaper will eventually clean the orphan.
+        """
+        import concurrent.futures
+
+        sid = self.session_id
+        if not sid:
+            return True
+
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(self.destroy_session)
+            future.result(timeout=timeout_s)
+            return True
+        except concurrent.futures.TimeoutError:
+            logger.warning(
+                "destroy_session(%s) timed out after %.0fs — force-closing",
+                sid, timeout_s,
+            )
+            self.force_close()
+            return False
+        except Exception as e:
+            logger.warning("destroy_session(%s) failed: %s — force-closing", sid, e)
+            self.force_close()
+            return False
+        finally:
+            pool.shutdown(wait=False)
+
+    def force_close(self) -> None:
+        """Force-close the gRPC channel without waiting for DestroySession.
+
+        Use when destroy_session() hangs or times out. This abandons the
+        .NET session (it will be cleaned up by the .NET daemon's own
+        session reaper), but immediately frees the Python-side resources.
+        """
+        sid = self.session_id
+        self.session_id = ""
+        if self._channel is not None and self._shared_channel is None:
+            try:
+                self._channel.close()
+            except Exception:
+                pass
+            self._channel = None
+        self._stub = None
+        self._connected = False
+        if sid:
+            logger.warning("Force-closed bridge (abandoned .NET session %s)", sid)
+        else:
+            logger.info("Force-closed bridge (no active session)")
+
     @property
     def is_connected(self) -> bool:
         return self._connected
