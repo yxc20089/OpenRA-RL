@@ -1544,30 +1544,6 @@ class OpenRAEnvironment(MCPEnvironment):
             return env._add_unit_feedback(result, resolved, target_x=target_x, target_y=target_y)
 
         @configurable_tool
-        def attack_move(
-            unit_ids: Annotated[str, Field(description="Comma-separated unit IDs, 'all_combat', 'all_idle', 'type:e1', 'all_infantry', 'all_vehicles', or a group name")],
-            target_x: Annotated[int, Field(description="Target X coordinate on the map")],
-            target_y: Annotated[int, Field(description="Target Y coordinate on the map")],
-            queued: Annotated[bool, Field(description="If true, queue this command after the unit's current action")] = False,
-        ) -> dict:
-            """Move units toward a cell, attacking enemies encountered along the way.
-            unit_ids: comma-separated IDs, "all_combat", "all_idle", "type:e1", "all_infantry", "all_vehicles", or a group name."""
-            env._refresh_obs()
-            resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
-            if not resolved:
-                return {"error": "No matching units found"}
-            commands = [
-                CommandModel(action=ActionType.ATTACK_MOVE, actor_id=uid, target_x=target_x, target_y=target_y, queued=queued)
-                for uid in resolved
-            ]
-            result = env._execute_commands(commands)
-            targets = getattr(env, "_move_targets", None)
-            if targets is not None:
-                for uid in resolved:
-                    targets[uid] = (target_x, target_y)
-            return env._add_unit_feedback(result, resolved, target_x=target_x, target_y=target_y)
-
-        @configurable_tool
         def attack_unit(
             unit_ids: Annotated[str, Field(description="Comma-separated unit IDs, 'all_combat', 'all_idle', 'type:e1', 'all_infantry', 'all_vehicles', or a group name")],
             target_x: Annotated[int, Field(description="Target X coordinate on the map")],
