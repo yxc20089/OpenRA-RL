@@ -2199,17 +2199,28 @@ class OpenRAEnvironment(MCPEnvironment):
 
             all_commands = []
             action_names = []
+            action_resolved_ids: list[list[int]] = []  # per-action resolved unit IDs
+            action_targets: list[tuple[int|None, int|None]] = []  # per-action (tx, ty)
             for action in actions:
                 tool = action.get("tool", "?")
                 if tool in _BATCH_UNSUPPORTED:
                     action_names.append(f"{tool}:SKIPPED (use standalone)")
+                    action_resolved_ids.append([])
+                    action_targets.append((None, None))
                     continue
+                # Resolve unit IDs before converting to commands
+                uid_selector = action.get("unit_ids", [])
+                resolved = env._resolve_unit_ids(uid_selector, obs) if uid_selector else []
                 cmds = env._action_to_commands(action, obs)
                 if cmds:
                     all_commands.extend(cmds)
                     action_names.append(tool)
+                    action_resolved_ids.append(resolved)
+                    action_targets.append((action.get("target_x"), action.get("target_y")))
                 else:
                     action_names.append(f"{tool}:FAILED")
+                    action_resolved_ids.append([])
+                    action_targets.append((None, None))
 
             if not all_commands:
                 return {"error": "No valid commands generated", "actions": action_names}
@@ -2217,6 +2228,18 @@ class OpenRAEnvironment(MCPEnvironment):
             try:
                 result = env._execute_commands(all_commands)
                 result["actions"] = action_names
+                # Build per-action results with commanded_units feedback
+                per_action_results = []
+                for i, name in enumerate(action_names):
+                    if name.endswith(":SKIPPED") or name.endswith(":FAILED"):
+                        per_action_results.append({"error": name})
+                    else:
+                        action_result = dict(result)  # copy base result
+                        ids = action_resolved_ids[i] if i < len(action_resolved_ids) else []
+                        tx, ty = action_targets[i] if i < len(action_targets) else (None, None)
+                        action_result = env._add_unit_feedback(action_result, ids, target_x=tx, target_y=ty)
+                        per_action_results.append(action_result)
+                result["results"] = per_action_results
                 return result
             except Exception as e:
                 return {"error": f"Command execution failed: {e}"}
