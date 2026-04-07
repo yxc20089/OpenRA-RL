@@ -3023,6 +3023,8 @@ class OpenRAEnvironment(MCPEnvironment):
         **kwargs: Any,
     ) -> OpenRAObservation:
         """Reset the environment for a new episode."""
+        # Clear broken flag on reset — give the environment a fresh chance.
+        self._broken = False
         # Clean up previous episode's .NET session (prevents session leak).
         # Use _destroy_session_with_timeout to avoid blocking if the .NET
         # daemon is slow (busy with concurrent sessions, pathfinding, etc.).
@@ -3047,6 +3049,7 @@ class OpenRAEnvironment(MCPEnvironment):
 
         # Mark as open (close() guard)
         self._closed = False
+        self._broken = False
 
         # Initialize new episode state
         ep_id = episode_id or str(uuid.uuid4())
@@ -3112,11 +3115,18 @@ class OpenRAEnvironment(MCPEnvironment):
             if not actual_bot_type:
                 actual_bot_type = "dummy"
             bots = f"Multi1:rl-agent,{self._config.ai_slot}:{actual_bot_type}"
-            session_id = self._bridge.create_session(
-                map_name=self._config.map_name,
-                bots=bots,
-                seed=self._config.seed or 0,
-            )
+            try:
+                session_id = self._bridge.create_session(
+                    map_name=self._config.map_name,
+                    bots=bots,
+                    seed=self._config.seed or 0,
+                )
+            except Exception as e:
+                self._broken = True
+                raise RuntimeError(
+                    f"create_session failed (map={self._config.map_name}): {e}. "
+                    f"Environment marked as broken — subsequent calls will fail fast."
+                ) from e
             logger.info(f"Session created: {session_id}")
 
             # Wait for session to be ready (game world created and paused).

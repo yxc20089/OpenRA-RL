@@ -112,6 +112,8 @@ class BridgeClient:
             check_events_every: Check interrupt signals every N ticks (0=disabled).
             enabled_interrupts: Signal names to check (e.g. ["enemy_spotted"]).
         """
+        if not self.session_id:
+            raise RuntimeError("No active session — cannot call advance without session_id")
         if not self._connected:
             self.connect()
 
@@ -130,6 +132,8 @@ class BridgeClient:
 
     def get_state(self) -> rl_bridge_pb2.GameState:
         """Query current game state via unary RPC."""
+        if not self.session_id:
+            raise RuntimeError("No active session — cannot call get_state without session_id")
         if not self._connected or self._stub is None:
             raise RuntimeError("Not connected. Call connect() first.")
         request = rl_bridge_pb2.StateRequest(session_id=self.session_id)
@@ -179,9 +183,11 @@ class BridgeClient:
             logger.info(f"Destroyed session {sid}")
         except grpc.RpcError as e:
             logger.warning(f"Failed to destroy session {sid}: {e.code()}")
-
-        if sid == self.session_id:
-            self.session_id = ""
+        finally:
+            # Clear session_id after gRPC call completes (success or error),
+            # never before — prevents empty-session-id ghost requests.
+            if sid == self.session_id:
+                self.session_id = ""
 
     def close(self) -> None:
         """Close the gRPC channel."""
