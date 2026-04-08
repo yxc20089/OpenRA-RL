@@ -4515,6 +4515,73 @@ class TestActorValidation:
         assert "error" not in result
 
 
+# ─── list_transports (mcp_server.py module-level tool) ───────────────────────
+
+_TRANSPORT_UNITS = [
+    {"actor_id": 10, "type": "mcv",  "cell_x": 10, "cell_y": 20, "passenger_count": -1},
+    {"actor_id": 20, "type": "harv", "cell_x": 20, "cell_y": 30, "passenger_count": -1},
+    {"actor_id": 30, "type": "apc",  "cell_x": 11, "cell_y": 21, "passenger_count":  0},
+    {"actor_id": 31, "type": "e1",   "cell_x": 10, "cell_y": 20, "passenger_count": -1},
+]
+
+
+class TestListTransports:
+    """Tests for the list_transports MCP tool (lives in mcp_server.py)."""
+
+    def _run(self, units):
+        """Invoke list_transports with _call patched to return the given unit list."""
+        import asyncio
+        import json
+        import openra_env.mcp_server as srv
+
+        async def _fake_call(tool_name, **kwargs):
+            return {"units": units}
+
+        with patch.object(srv, "_call", side_effect=_fake_call):
+            raw = asyncio.run(srv.list_transports())
+        return json.loads(raw)
+
+    def test_returns_only_transports(self):
+        result = self._run(_TRANSPORT_UNITS)
+        types = [t["type"] for t in result["transports"]]
+        assert "apc" in types
+        assert "mcv" not in types
+        assert "e1" not in types
+
+    def test_count_matches_list_length(self):
+        result = self._run(_TRANSPORT_UNITS)
+        assert result["count"] == len(result["transports"])
+
+    def test_remaining_capacity(self):
+        result = self._run(_TRANSPORT_UNITS)
+        apc = next(t for t in result["transports"] if t["type"] == "apc")
+        # apc: cargo_max_weight=5 (from RA_UNITS), passenger_count=0 → remaining=5
+        assert apc["cargo_max_weight"] == 5
+        assert apc["passenger_count"] == 0
+        assert apc["remaining_capacity"] == 5
+
+    def test_cargo_types(self):
+        result = self._run(_TRANSPORT_UNITS)
+        apc = next(t for t in result["transports"] if t["type"] == "apc")
+        assert apc["cargo_types"] == ["infantry"]
+
+    def test_empty_when_no_transports(self):
+        units = [u for u in _TRANSPORT_UNITS if u["type"] != "apc"]
+        result = self._run(units)
+        assert result["transports"] == []
+        assert result["count"] == 0
+
+    def test_partial_capacity(self):
+        units = [
+            dict(u, passenger_count=3) if u["type"] == "apc" else u
+            for u in _TRANSPORT_UNITS
+        ]
+        result = self._run(units)
+        apc = next(t for t in result["transports"] if t["type"] == "apc")
+        assert apc["passenger_count"] == 3
+        assert apc["remaining_capacity"] == 2
+
+
 class TestEmptyProductionValidation:
     """Test that production tools reject commands when no production buildings exist."""
 
