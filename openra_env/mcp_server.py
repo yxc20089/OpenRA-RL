@@ -297,6 +297,45 @@ async def stop_units(
     return _format(await _call("stop_units", unit_ids=unit_ids))
 
 
+# ── Transport ──────────────────────────────────────────────────────
+
+@mcp.tool()
+async def list_transports() -> str:
+    """List all friendly transport units with current passenger count and remaining capacity.
+
+    Returns each transport's actor_id, type, name, position, passenger_count,
+    cargo_max_weight, remaining_capacity, and cargo_types.
+    Use this before load_transport to find available transports and check space."""
+    from openra_env.game_data import RA_UNITS
+    units = await _call("get_units")
+    if isinstance(units, str):
+        try:
+            units = json.loads(units)
+        except Exception:
+            return units
+    unit_list = units if isinstance(units, list) else units.get("units", [])
+    transports = []
+    for u in unit_list:
+        if u.get("passenger_count", -1) < 0:
+            continue
+        utype = u.get("type", "")
+        static = RA_UNITS.get(utype, {})
+        cargo_max = static.get("cargo_max_weight", 0)
+        passenger_count = u.get("passenger_count", 0)
+        transports.append({
+            "actor_id": u.get("actor_id"),
+            "type": utype,
+            "name": static.get("name", utype),
+            "cell_x": u.get("cell_x", 0),
+            "cell_y": u.get("cell_y", 0),
+            "passenger_count": passenger_count,
+            "cargo_max_weight": cargo_max,
+            "remaining_capacity": max(0, cargo_max - passenger_count),
+            "cargo_types": static.get("cargo_types", []),
+        })
+    return _format({"transports": transports, "count": len(transports)})
+
+
 # ── Production ─────────────────────────────────────────────────────
 
 @mcp.tool()
