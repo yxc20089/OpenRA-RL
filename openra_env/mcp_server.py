@@ -336,6 +336,26 @@ async def list_transports() -> str:
     return _format({"transports": transports, "count": len(transports)})
 
 
+@mcp.tool()
+async def load_transport(
+    unit_ids: Annotated[str, Field(description="Comma-separated unit IDs or selectors (e.g. 'all_infantry', 'type:e1') to board the transport")],
+    transport_id: Annotated[int, Field(description="Actor ID of the transport to load into (from list_transports)")],
+) -> str:
+    """Order units to board a transport (APC, Chinook, LST, Phase Transport, Ranger).
+    Units must be nearby. Use list_transports() first to find available transports and check space."""
+    return _format(await _call("load_transport", unit_ids=unit_ids, transport_id=transport_id))
+
+
+@mcp.tool()
+async def unload_transport(
+    transport_id: Annotated[int, Field(description="Actor ID of the transport to unload (from list_transports)")],
+) -> str:
+    """Unload all passengers from a transport at its current location.
+    Move the transport to the target cell first, then call this.
+    Note: unload position cannot be specified — passengers disembark at the transport's current cell."""
+    return _format(await _call("unload_transport", transport_id=transport_id))
+
+
 # ── Production ─────────────────────────────────────────────────────
 
 @mcp.tool()
