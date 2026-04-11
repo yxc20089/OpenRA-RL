@@ -289,6 +289,13 @@ class OpenRAEnvironment(MCPEnvironment):
         self._unit_groups: dict[str, list[int]] = {}  # named groups of unit IDs
         self._pending_placements: dict[str, dict] = {}  # building_type → {cell_x, cell_y}
         self._move_targets: dict[int, tuple[int, int]] = {}  # unit_id → (target_x, target_y)
+        # Stuck-unit detection: per-unit_id, track the last (target, observed_pos, attempt_count)
+        # so that _add_unit_feedback can detect when a unit hasn't moved between repeated
+        # attempts to the same target — almost always means pathfinding silently failed
+        # (water/cliff/blocked terrain). The previous behavior was to silently report the
+        # unit's current position with an ETA, which the LLM interpreted as success and
+        # repeated indefinitely (observed: 32% of episodes affected, worst case 84 retries).
+        self._stuck_attempts: dict[int, dict] = {}  # uid → {target, last_pos, count}
         self._attempted_placements: dict[str, int] = {}  # building_type → attempt_count (for failure detection)
         self._placement_results: list[str] = []  # alerts from auto-placement attempts
         self._player_faction: str = ""
@@ -1531,7 +1538,7 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return env._unit_resolution_error(unit_ids, env._last_obs or {})
             commands = [
                 CommandModel(action=ActionType.MOVE, actor_id=uid, target_x=target_x, target_y=target_y, queued=queued)
                 for uid in resolved
@@ -1555,7 +1562,7 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return env._unit_resolution_error(unit_ids, env._last_obs or {})
             commands = [
                 CommandModel(action=ActionType.ATTACK_MOVE, actor_id=uid, target_x=target_x, target_y=target_y, queued=queued)
                 for uid in resolved
@@ -1578,7 +1585,7 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return env._unit_resolution_error(unit_ids, env._last_obs or {})
             commands = [
                 CommandModel(action=ActionType.ATTACK, actor_id=uid, target_actor_id=target_actor_id, queued=queued)
                 for uid in resolved
@@ -1595,7 +1602,7 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return env._unit_resolution_error(unit_ids, env._last_obs or {})
             commands = [CommandModel(action=ActionType.STOP, actor_id=uid) for uid in resolved]
             result = env._execute_commands(commands)
             return env._add_unit_feedback(result, resolved)
@@ -1903,7 +1910,7 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return env._unit_resolution_error(unit_ids, env._last_obs or {})
             commands = [
                 CommandModel(action=ActionType.GUARD, actor_id=uid, target_actor_id=target_actor_id, queued=queued)
                 for uid in resolved
@@ -1923,7 +1930,7 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return env._unit_resolution_error(unit_ids, env._last_obs or {})
             commands = [
                 CommandModel(action=ActionType.PATROL, actor_id=uid, target_x=target_x, target_y=target_y, queued=queued)
                 for uid in resolved
@@ -1942,7 +1949,7 @@ class OpenRAEnvironment(MCPEnvironment):
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
-                return {"error": "No matching units found"}
+                return env._unit_resolution_error(unit_ids, env._last_obs or {})
             stance_map = {"hold_fire": 0, "return_fire": 1, "defend": 2, "attack_anything": 3}
             stance_val = stance_map.get(stance.lower(), 3)
             commands = [
@@ -2218,7 +2225,13 @@ class OpenRAEnvironment(MCPEnvironment):
                     action_resolved_ids.append(resolved)
                     action_targets.append((action.get("target_x"), action.get("target_y")))
                 else:
-                    action_names.append(f"{tool}:FAILED")
+                    # Diagnose: tell the model WHY it failed and what units it CAN use,
+                    # so retries can pivot instead of looping on the same dead unit IDs.
+                    reason = ""
+                    if uid_selector and not resolved:
+                        err = env._unit_resolution_error(uid_selector, obs)
+                        reason = f" — {err.get('error', '')}"
+                    action_names.append(f"{tool}:FAILED{reason}")
                     action_resolved_ids.append([])
                     action_targets.append((None, None))
 
@@ -2463,6 +2476,48 @@ class OpenRAEnvironment(MCPEnvironment):
             )
         return alive
 
+    def _unit_resolution_error(self, uid_selector, obs: dict) -> dict:
+        """Build a detailed error dict explaining why a unit selector resolved to 0.
+
+        Used by all unit-action tools so the model can immediately see WHICH IDs
+        were dead/invalid and WHICH units it can actually use, instead of looping
+        on the same failing batch with no feedback.
+        """
+        units = obs.get("units", [])
+        living_ids = sorted({u["actor_id"] for u in units})
+        # Parse what was requested
+        try:
+            if isinstance(uid_selector, list):
+                requested = [int(x) for x in uid_selector]
+            elif isinstance(uid_selector, str):
+                cleaned = uid_selector.strip("[] ").strip()
+                requested = [int(x.strip()) for x in cleaned.split(",")
+                             if x.strip().lstrip("-").isdigit()]
+            else:
+                requested = []
+        except (ValueError, TypeError):
+            requested = []
+        living_set = set(living_ids)
+        dead = [uid for uid in requested if uid not in living_set]
+        your_units = [{"id": u["actor_id"], "type": u["type"]} for u in units[:30]]
+        if dead:
+            return {
+                "error": (
+                    f"unit_ids {dead} not alive (destroyed or invalid). "
+                    f"Use one of your living units instead."
+                ),
+                "dead_unit_ids": dead,
+                "your_units": your_units,
+            }
+        return {
+            "error": (
+                f"selector '{uid_selector}' resolved to 0 units. "
+                f"Use a living unit ID or a valid selector "
+                f"(all_combat, all_idle, type:e1, etc.)."
+            ),
+            "your_units": your_units,
+        }
+
     def _add_unit_feedback(self, result: dict, commanded_ids: list[int],
                            target_x: int | None = None, target_y: int | None = None) -> dict:
         """Append commanded_units feedback to a tool result.
@@ -2471,27 +2526,76 @@ class OpenRAEnvironment(MCPEnvironment):
         their current position and activity so the agent can verify commands
         were received and see where units are.  When target coordinates are
         provided, also computes an estimated arrival time per unit.
+
+        Stuck-unit detection: if the same unit is commanded to the same target
+        twice in a row without having moved between calls, raises RuntimeError
+        with UNREACHABLE_TARGET — the OpenRA pathfinder silently failed
+        (water/cliff/blocked terrain), and the previous behavior was to report
+        the unit's current position with an ETA, which the LLM interpreted as
+        success and repeated indefinitely (observed: 32% of episodes affected,
+        worst case 84 retries). Raising propagates up to the batch handler in
+        agent_rollout which erases the turn and retries with a corrective hint.
         """
         if not self._last_obs or not commanded_ids:
             return result
         units_by_id = {u["actor_id"]: u for u in self._last_obs.get("units", [])}
+        stuck_units: list[tuple[int, int, int, int, int, int]] = []
         entries = []
         for uid in commanded_ids:
             if uid not in units_by_id:
                 continue
             u = units_by_id[uid]
+            cx, cy = u["cell_x"], u["cell_y"]
+
+            # Stuck detection: belt-and-suspenders safety net for any future
+            # silent-failure path. The actual root cause (tier-2 micro-turn
+            # silently dropping move_units calls) was fixed in agent_rollout.py.
+            # Conservative threshold (5 consecutive identical attempts before
+            # raising) to avoid false positives on legitimate slow movement
+            # where the unit has not yet reached its destination between calls.
+            if target_x is not None and target_y is not None:
+                prev = self._stuck_attempts.get(uid)
+                if prev and prev["target"] == (target_x, target_y) and prev["last_pos"] == (cx, cy):
+                    prev["count"] += 1
+                    if prev["count"] >= 4:
+                        stuck_units.append((uid, cx, cy, target_x, target_y, prev["count"] + 1))
+                else:
+                    # New target OR unit moved (= making progress) → reset.
+                    self._stuck_attempts[uid] = {
+                        "target": (target_x, target_y),
+                        "last_pos": (cx, cy),
+                        "count": 0,
+                    }
+
             entry = {
                 "id": uid,
                 "type": u["type"],
-                "cell_x": u["cell_x"],
-                "cell_y": u["cell_y"],
+                "cell_x": cx,
+                "cell_y": cy,
                 "activity": u.get("current_activity", "Unknown"),
             }
             if target_x is not None and target_y is not None and u.get("speed", 0) > 0:
-                eta = _estimate_move_ticks(u["speed"], u["cell_x"], u["cell_y"], target_x, target_y)
+                eta = _estimate_move_ticks(u["speed"], cx, cy, target_x, target_y)
                 entry["eta_ticks"] = eta
                 entry["eta_seconds"] = round(eta / 25, 1)
             entries.append(entry)
+
+        if stuck_units:
+            # Raise so the training-side batch handler erases the turn and
+            # gives the model a corrective hint. This trains it to vary
+            # targets when pathfinding silently fails.
+            details = "; ".join(
+                f"unit {uid} at ({x},{y}) cannot reach ({tx},{ty}) "
+                f"after {n} attempts (no movement between attempts)"
+                for uid, x, y, tx, ty, n in stuck_units
+            )
+            raise RuntimeError(
+                f"UNREACHABLE_TARGET: {details}. The OpenRA pathfinder "
+                f"could not find a path — the cell is likely blocked by water, "
+                f"cliffs, or impassable terrain. Pick a DIFFERENT target "
+                f"coordinate (e.g. nearby road or open ground)."
+            )
+
         result["commanded_units"] = entries
         # Group-level ETA note for movement commands
         if target_x is not None and entries:
@@ -3097,6 +3201,7 @@ class OpenRAEnvironment(MCPEnvironment):
         self._unit_groups.clear()
         self._pending_placements.clear()
         self._move_targets.clear()
+        self._stuck_attempts.clear()
         self._attempted_placements.clear()
         self._placement_results.clear()
         self._planning_active = False
