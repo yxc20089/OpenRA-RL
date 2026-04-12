@@ -121,7 +121,15 @@ def session_count():
 
 
 # ── Session reaper: catches leaked sessions the normal cleanup path missed ──
-_SESSION_MAX_AGE_S = float(os.getenv("SESSION_MAX_AGE_S", "15"))  # 10 min default
+# Default raised from 15s → 600s (10 min). The previous 15s default was reaping
+# ACTIVE sessions during normal mid-game play: an LLM call (3-5s) + game advance
+# (5-15s) + minimap render + briefing build can easily exceed 15s, so the reaper
+# would destroy a session that was still in active use → next call gets
+# "No active session — cannot call advance without session_id" → batch retry
+# exhaustion → episode death. Observed killing ~4 episodes simultaneously every
+# few minutes mid-rollout. The 600s timeout matches the C# RLSessionManager
+# 600s reaper that was bumped earlier (see CLAUDE.md "C# 600s reaper fix").
+_SESSION_MAX_AGE_S = float(os.getenv("SESSION_MAX_AGE_S", "600"))
 
 
 async def _session_reaper():

@@ -91,6 +91,29 @@ class OpenRAMCPClient:
 
         return self
 
+    async def destroy_session(self, timeout_s: float = 10.0):
+        """Send a close message to the server, then close the WebSocket.
+
+        The server's ``{"type": "close"}`` handler breaks out of its message
+        loop and triggers ``_destroy_session`` in the ``finally`` block, which
+        calls ``env.close()`` → ``bridge.destroy_session()`` on the .NET side.
+        This is much faster than relying on the 30-60 s session reaper.
+
+        Falls back to a plain ``close()`` if the close message fails (e.g.
+        WebSocket already dead).
+        """
+        if self._ws:
+            try:
+                await self._ws.send(json.dumps({"type": "close"}))
+                # Wait briefly for the server to acknowledge the close
+                try:
+                    await asyncio.wait_for(self._ws.recv(), timeout=timeout_s)
+                except (asyncio.TimeoutError, Exception):
+                    pass  # Server may just close the connection without a reply
+            except Exception:
+                pass  # WebSocket already dead — fall through to close()
+        await self.close()
+
     async def close(self):
         """Close the WebSocket connection."""
         if self._ws:
@@ -104,6 +127,13 @@ class OpenRAMCPClient:
         return await self.connect()
 
     async def __aexit__(self, *args):
+        # NOTE: was changed to destroy_session() in a WIP commit, but this
+        # caused training failures because agent_rollout uses env via
+        # short-lived context managers — every tool-call exit destroyed the
+        # .NET session, leaving the next call with "No active session". Until
+        # session lifecycle is reworked to be per-episode, keep this as a
+        # plain WebSocket close (sessions are then destroyed via explicit
+        # reset()/destroy_session() calls from the training side).
         await self.close()
 
     async def _send_recv(self, message: dict) -> dict:

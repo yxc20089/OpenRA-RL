@@ -162,13 +162,22 @@ def _render_minimap(obs: dict, max_cols: int = 28) -> str:
     _overlay(obs.get("visible_enemy_buildings", []), "X")
     _overlay(obs.get("visible_enemies", []), "!")
 
+    # Returns the ASCII grid string without a text legend.
+    #
+    # The text legend was removed because the model never sees the ASCII grid
+    # (only the inline header lines like "Map (28x14...)" make it into the
+    # briefing — the agent_rollout layer formats the briefing using the
+    # structured fields like units_summary, NOT the raw ASCII grid). The
+    # legend explained glyphs the model never sees, wasting ~30 prompt tokens
+    # per turn × ~50 turns × 64 episodes ≈ 96K tokens per step rollout, and
+    # confused the model into looking for ASCII glyphs that don't exist.
+    #
+    # The training side renders a real PNG minimap separately (via
+    # OpenRA-RL-Training/openra_rl_training/training/minimap_renderer.py) and
+    # the legend for THAT image is documented once in the system prompt.
     lines = ["".join(row) for row in grid]
     header = f"Map ({grid_w}x{grid_h}, 1cell={scale}x{scale}):"
-    legend = (
-        "YOUR: B=building @=unit | ENEMY: X=building !=unit | "
-        "terrain: .=land ~=water $=ore #=unexplored"
-    )
-    return header + "\n" + "\n".join(lines) + "\n" + legend
+    return header + "\n" + "\n".join(lines)
 
 
 class OpenRAEnvironment(MCPEnvironment):
@@ -296,6 +305,11 @@ class OpenRAEnvironment(MCPEnvironment):
         # unit's current position with an ETA, which the LLM interpreted as success and
         # repeated indefinitely (observed: 32% of episodes affected, worst case 84 retries).
         self._stuck_attempts: dict[int, dict] = {}  # uid → {target, last_pos, count}
+        # Units that have been auto-halted due to repeated unreachable targets.
+        # Briefing builder annotates these so the model sees them clearly on
+        # the minimap and in the text briefing. Cleared on reset() and on
+        # any successful move (unit position change).
+        self._halted_unreachable: set[int] = set()
         self._attempted_placements: dict[str, int] = {}  # building_type → attempt_count (for failure detection)
         self._placement_results: list[str] = []  # alerts from auto-placement attempts
         self._player_faction: str = ""
@@ -511,12 +525,22 @@ class OpenRAEnvironment(MCPEnvironment):
 
             # Compact summaries with actor IDs for planning
             units_summary = []
+            # Clean up _halted_unreachable for units that have moved or no longer exist
+            _live_uids = {u["actor_id"] for u in obs["units"]}
+            env._halted_unreachable &= _live_uids  # drop dead units
             for u in obs["units"]:
                 uid = u["actor_id"]
                 entry = {"id": uid, "type": u["type"], "idle": u["is_idle"],
                          "can_attack": u["can_attack"], "stance": u["stance"],
                          "cell_x": u["cell_x"], "cell_y": u["cell_y"],
                          "activity": u["current_activity"]}
+                # Halted-unreachable flag: surfaced to the briefing builder and
+                # the minimap renderer so the model gets a visual indicator of
+                # units stuck on bad targets. Cleared automatically below when
+                # the unit's tracked move target changes (= model issued a
+                # different command).
+                if uid in env._halted_unreachable:
+                    entry["halted_unreachable"] = True
                 # Clear stale move targets for idle units
                 move_targets = getattr(env, "_move_targets", {})
                 if u["is_idle"] and uid in move_targets:
@@ -1528,13 +1552,22 @@ class OpenRAEnvironment(MCPEnvironment):
 
         @configurable_tool
         def move_units(
-            unit_ids: Annotated[str, Field(description="Comma-separated unit IDs, 'all_combat', 'all_idle', 'type:e1', 'all_infantry', 'all_vehicles', or a group name")],
-            target_x: Annotated[int, Field(description="Target X coordinate on the map")],
-            target_y: Annotated[int, Field(description="Target Y coordinate on the map")],
-            queued: Annotated[bool, Field(description="If true, queue this command after the unit's current action")] = False,
+            unit_ids: Annotated[str, Field(description="Comma-separated unit IDs (e.g. '119' or '119,120'), or a selector: 'all_combat', 'all_idle', 'type:e1', 'all_infantry', 'all_vehicles', or a named group")],
+            target_x: Annotated[int, Field(description="Destination X cell on the map (must be a WALKABLE empty cell — not water, cliff, or occupied by any unit/building)")],
+            target_y: Annotated[int, Field(description="Destination Y cell on the map (must be a WALKABLE empty cell)")],
+            queued: Annotated[bool, Field(description="If true, queue this command after the unit's current action instead of replacing it")] = False,
         ) -> dict:
-            """Move units to a map cell position. Units pathfind automatically.
-            unit_ids: comma-separated IDs, "all_combat", "all_idle", "type:e1", "all_infantry", "all_vehicles", or a group name."""
+            """Move units to an empty walkable cell on the map. Units pathfind automatically.
+
+            CONSTRAINTS — the target cell must be:
+              - DIFFERENT from the unit's current position (you cannot 'move to where you are')
+              - EMPTY (not occupied by any enemy unit, enemy building, friendly unit, or friendly building)
+              - WALKABLE terrain (not water, cliff, or shroud) — read the minimap for terrain
+              - INSIDE map bounds (x: 0..map_width, y: 0..map_height)
+
+            To attack an enemy at (X,Y): use attack_target by enemy actor_id, OR target an
+            ADJACENT empty cell (e.g. (X+1,Y) or (X,Y-1)) — your unit will engage enemies in range.
+            """
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
@@ -1552,13 +1585,22 @@ class OpenRAEnvironment(MCPEnvironment):
 
         @configurable_tool
         def attack_unit(
-            unit_ids: Annotated[str, Field(description="Comma-separated unit IDs, 'all_combat', 'all_idle', 'type:e1', 'all_infantry', 'all_vehicles', or a group name")],
-            target_x: Annotated[int, Field(description="Target X coordinate on the map")],
-            target_y: Annotated[int, Field(description="Target Y coordinate on the map")],
+            unit_ids: Annotated[str, Field(description="Comma-separated unit IDs, or a selector: 'all_combat', 'all_idle', 'type:e1', 'all_infantry', 'all_vehicles', or a named group")],
+            target_x: Annotated[int, Field(description="Destination X cell (must be a WALKABLE empty cell — same constraints as move_units)")],
+            target_y: Annotated[int, Field(description="Destination Y cell (must be a WALKABLE empty cell)")],
             queued: Annotated[bool, Field(description="If true, queue this command after the unit's current action")] = False,
         ) -> dict:
-            """Attack-move units to a map cell, engaging enemies along the way.
-            unit_ids: comma-separated IDs, "all_combat", "all_idle", "type:e1", "all_infantry", "all_vehicles", or a group name."""
+            """Attack-move units toward a destination, engaging enemies in vision range along the way.
+
+            Use this for AGGRESSIVE movement where you want units to fight whatever
+            they encounter while moving (vs move_units which avoids combat).
+
+            CONSTRAINTS — same as move_units: target cell must be a WALKABLE empty
+            cell (not water, cliff, occupied by any unit/building, or current pos).
+
+            To attack a SPECIFIC enemy unit/building, prefer attack_target by actor_id —
+            it handles engagement range automatically without needing a walkable target cell.
+            """
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
@@ -1576,12 +1618,22 @@ class OpenRAEnvironment(MCPEnvironment):
 
         @configurable_tool
         def attack_target(
-            unit_ids: Annotated[str, Field(description="Comma-separated unit IDs, 'all_combat', 'all_idle', 'type:e1', 'all_infantry', 'all_vehicles', or a group name")],
-            target_actor_id: Annotated[int, Field(description="Actor ID of the enemy unit or building to attack")],
+            unit_ids: Annotated[str, Field(description="Comma-separated unit IDs, or a selector: 'all_combat', 'all_idle', 'type:e1', 'all_infantry', 'all_vehicles', or a named group")],
+            target_actor_id: Annotated[int, Field(description="The numeric actor ID of a visible enemy unit or building (find this in enemy_summary or visible_enemy_buildings — NOT a coordinate)")],
             queued: Annotated[bool, Field(description="If true, queue this command after the unit's current action")] = False,
         ) -> dict:
-            """Order units to attack a specific enemy actor by ID.
-            unit_ids: comma-separated IDs, "all_combat", "all_idle", "type:e1", "all_infantry", "all_vehicles", or a group name."""
+            """Attack a SPECIFIC visible enemy unit or building by its actor ID.
+
+            This is the PREFERRED tool for engaging a known enemy — it handles
+            range and pathfinding automatically (the unit moves into firing range
+            then attacks). Unlike attack_unit/move_units, you don't need a
+            walkable destination cell because the engine computes the engagement
+            position itself.
+
+            Get target_actor_id from the briefing's enemy_summary
+            (e.g. `1xe1[123@(20,22)]` → target_actor_id=123) or
+            visible_enemy_buildings list.
+            """
             env._refresh_obs()
             resolved = env._resolve_unit_ids(unit_ids, env._last_obs or {})
             if not resolved:
@@ -2518,6 +2570,91 @@ class OpenRAEnvironment(MCPEnvironment):
             "your_units": your_units,
         }
 
+    def _classify_stuck_target(self, cx: int, cy: int, tx: int, ty: int) -> dict:
+        """Classify why a unit at (cx,cy) might be stuck on target (tx,ty).
+
+        Returns a dict with diagnostic fields:
+            distance: Manhattan distance current → target
+            terrain: 'land' / 'water' / 'unexplored' / 'unknown'
+            occupancy: 'empty' / 'enemy_unit' / 'enemy_building' / 'friendly_unit' / 'friendly_building'
+            in_fog: bool
+            category: one of:
+                'model_target_eq_current'   — target equals current position
+                'model_target_in_fog'        — target is in unexplored fog
+                'model_target_on_enemy_unit' — target cell occupied by enemy unit
+                'model_target_on_enemy_bldg' — target cell occupied by enemy building
+                'system_friendly_block'      — target cell occupied by friendly unit/building
+                'system_terrain_water'       — target cell is water (impassable for ground units)
+                'system_terrain_impassable'  — target cell is non-walkable terrain (cliff)
+                'system_pathfinder_failure'  — target is reachable land but pathfinder failed
+        """
+        out = {
+            "distance": abs(tx - cx) + abs(ty - cy),
+            "terrain": "unknown",
+            "occupancy": "empty",
+            "in_fog": False,
+            "category": "system_pathfinder_failure",
+        }
+        # Distance-0 hallucination check
+        if tx == cx and ty == cy:
+            out["category"] = "model_target_eq_current"
+            return out
+
+        obs = self._last_obs or {}
+
+        # Occupancy check
+        for u in obs.get("units", []):
+            if u.get("cell_x") == tx and u.get("cell_y") == ty:
+                out["occupancy"] = "friendly_unit"
+                out["category"] = "system_friendly_block"
+                return out
+        for b in obs.get("buildings", []):
+            if b.get("cell_x") == tx and b.get("cell_y") == ty:
+                out["occupancy"] = "friendly_building"
+                out["category"] = "system_friendly_block"
+                return out
+        for e in obs.get("visible_enemies", []):
+            if e.get("cell_x") == tx and e.get("cell_y") == ty:
+                out["occupancy"] = "enemy_unit"
+                out["category"] = "model_target_on_enemy_unit"
+                return out
+        for eb in obs.get("visible_enemy_buildings", []):
+            if eb.get("cell_x") == tx and eb.get("cell_y") == ty:
+                out["occupancy"] = "enemy_building"
+                out["category"] = "model_target_on_enemy_bldg"
+                return out
+
+        # Terrain check from spatial map (channel 3 = passability, channel 4 = fog)
+        try:
+            import base64 as _b64
+            import struct as _st
+            spatial = obs.get("spatial_map", "")
+            channels = obs.get("spatial_channels", 0)
+            mi = obs.get("map_info", {})
+            mw = mi.get("width", 0)
+            mh = mi.get("height", 0)
+            if spatial and channels > 0 and mw > 0 and 0 <= tx < mw and 0 <= ty < mh:
+                raw = _b64.b64decode(spatial)
+                base_idx = (ty * mw + tx) * channels
+                fog = _st.unpack_from("f", raw, (base_idx + 4) * 4)[0]
+                passability = _st.unpack_from("f", raw, (base_idx + 3) * 4)[0]
+                out["in_fog"] = fog <= 0.25
+                if fog <= 0.25:
+                    out["terrain"] = "unexplored"
+                    out["category"] = "model_target_in_fog"
+                    return out
+                if passability < 0.5:
+                    out["terrain"] = "water"
+                    out["category"] = "system_terrain_water"
+                    return out
+                out["terrain"] = "land"
+                # Empty land cell, no occupant, but pathfinder still failed
+                out["category"] = "system_pathfinder_failure"
+                return out
+        except Exception:
+            pass
+        return out
+
     def _add_unit_feedback(self, result: dict, commanded_ids: list[int],
                            target_x: int | None = None, target_y: int | None = None) -> dict:
         """Append commanded_units feedback to a tool result.
@@ -2547,17 +2684,20 @@ class OpenRAEnvironment(MCPEnvironment):
             u = units_by_id[uid]
             cx, cy = u["cell_x"], u["cell_y"]
 
-            # Stuck detection: belt-and-suspenders safety net for any future
-            # silent-failure path. The actual root cause (tier-2 micro-turn
-            # silently dropping move_units calls) was fixed in agent_rollout.py.
-            # Conservative threshold (5 consecutive identical attempts before
-            # raising) to avoid false positives on legitimate slow movement
-            # where the unit has not yet reached its destination between calls.
+            # Stuck detection: triggers after 10 consecutive identical
+            # (target, observed_pos) attempts. Higher threshold than initial
+            # 5 because the model genuinely needs several attempts to learn
+            # via RL feedback. When triggered, raises a GENERIC error so the
+            # training-side batch handler retries 3 times silently, then
+            # fails the episode via BATCH_RETRY_EXHAUSTED. The model never
+            # sees the word "stuck" — stuck-units are a system-level issue
+            # (pathfinding limits, attack-cell semantics) not a model issue
+            # the model can fix by reasoning about it.
             if target_x is not None and target_y is not None:
                 prev = self._stuck_attempts.get(uid)
                 if prev and prev["target"] == (target_x, target_y) and prev["last_pos"] == (cx, cy):
                     prev["count"] += 1
-                    if prev["count"] >= 4:
+                    if prev["count"] >= 9:  # 10th consecutive identical attempt
                         stuck_units.append((uid, cx, cy, target_x, target_y, prev["count"] + 1))
                 else:
                     # New target OR unit moved (= making progress) → reset.
@@ -2566,6 +2706,9 @@ class OpenRAEnvironment(MCPEnvironment):
                         "last_pos": (cx, cy),
                         "count": 0,
                     }
+                    # Also clear the halted-unreachable flag — the model is
+                    # trying something new, give it a fresh chance.
+                    self._halted_unreachable.discard(uid)
 
             entry = {
                 "id": uid,
@@ -2581,20 +2724,21 @@ class OpenRAEnvironment(MCPEnvironment):
             entries.append(entry)
 
         if stuck_units:
-            # Raise so the training-side batch handler erases the turn and
-            # gives the model a corrective hint. This trains it to vary
-            # targets when pathfinding silently fails.
-            details = "; ".join(
-                f"unit {uid} at ({x},{y}) cannot reach ({tx},{ty}) "
-                f"after {n} attempts (no movement between attempts)"
-                for uid, x, y, tx, ty, n in stuck_units
-            )
-            raise RuntimeError(
-                f"UNREACHABLE_TARGET: {details}. The OpenRA pathfinder "
-                f"could not find a path — the cell is likely blocked by water, "
-                f"cliffs, or impassable terrain. Pick a DIFFERENT target "
-                f"coordinate (e.g. nearby road or open ground)."
-            )
+            # Classify each stuck unit so we can diagnose: is it model bug
+            # (target=current, target on enemy cell, target in fog) or system
+            # issue (water/cliff terrain, friendly blocking, pathfinder fail)?
+            # Mark units in self._halted_unreachable so the briefing builder
+            # can propagate a halted flag to the model.
+            classified_details = []
+            for uid, x, y, tx, ty, n in stuck_units:
+                diag = self._classify_stuck_target(x, y, tx, ty)
+                classified_details.append(
+                    f"unit {uid}@({x},{y})→({tx},{ty}) "
+                    f"d={diag['distance']} terrain={diag['terrain']} occ={diag['occupancy']} "
+                    f"fog={diag['in_fog']} category={diag['category']} attempts={n}"
+                )
+                self._halted_unreachable.add(uid)
+            logger.warning("STUCK_UNIT_DIAG: %s", " | ".join(classified_details))
 
         result["commanded_units"] = entries
         # Group-level ETA note for movement commands
@@ -3202,6 +3346,7 @@ class OpenRAEnvironment(MCPEnvironment):
         self._pending_placements.clear()
         self._move_targets.clear()
         self._stuck_attempts.clear()
+        self._halted_unreachable.clear()
         self._attempted_placements.clear()
         self._placement_results.clear()
         self._planning_active = False
