@@ -13,10 +13,11 @@ import os
 import socket as _socket
 import sys as _sys
 import time
+from pathlib import Path
 
 import grpc
-from fastapi import Query
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import HTTPException, Query
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from openenv.core.env_server import create_app
 
 from openra_env.models import OpenRAAction, OpenRAObservation
@@ -30,6 +31,14 @@ from openra_env.server.openra_process import OpenRAConfig, OpenRAProcessManager
 _multi_session = True
 _base_grpc_port = int(os.getenv("GRPC_BASE_PORT", "9999"))
 _max_concurrent = int(os.getenv("MAX_CONCURRENT_GAMES", "64"))
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 # Resolve OpenRA path from CLI arg or env var.
 # CLI: python -m openra_env.server.app --openra-path /workspace/openra-build
@@ -46,6 +55,7 @@ _daemon = OpenRAProcessManager(OpenRAConfig(
     grpc_port=_base_grpc_port,
     multi_session=True,
     openra_path=_openra_path,
+    record_replays=_env_flag("RECORD_REPLAYS", False),
 ))
 
 # Per-session gRPC channels: each environment creates its own channel.
@@ -137,6 +147,46 @@ def health_check():
         "grpc_ok": grpc_ok,
         "grpc_port": _base_grpc_port,
     }
+
+
+def _latest_replay_file() -> Path | None:
+    replay_roots = [
+        Path(_openra_path) / "Support" / "Replays",
+        Path.home() / ".config" / "openra" / "Replays",
+        Path.home() / ".openra" / "Replays",
+    ]
+
+    replays: list[Path] = []
+    for root in replay_roots:
+        if root.exists():
+            replays.extend(root.rglob("*.orarep"))
+
+    if not replays:
+        return None
+
+    return max(replays, key=lambda p: p.stat().st_mtime)
+
+
+@app.get("/replays/latest")
+def latest_replay(download: bool = Query(True, description="Return the latest replay file when true, otherwise return metadata only.")):
+    replay = _latest_replay_file()
+    if replay is None:
+        raise HTTPException(status_code=404, detail="No replay files found")
+
+    if not download:
+        stat = replay.stat()
+        return {
+            "path": str(replay),
+            "filename": replay.name,
+            "size_bytes": stat.st_size,
+            "modified_time": stat.st_mtime,
+        }
+
+    return FileResponse(
+        path=replay,
+        filename=replay.name,
+        media_type="application/octet-stream",
+    )
 
 
 @app.post("/shutdown")
