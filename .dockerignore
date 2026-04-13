@@ -17,9 +17,5 @@ tests/
 docs/
 *.pdf
 .claude/
-# Keep the local OpenRA checkout in the Docker context for patched builds.
-OpenRA/.git
-OpenRA/bin
-OpenRA/obj
-OpenRA/**/bin
-OpenRA/**/obj
+# OpenRA submodule (cloned from GitHub during Docker build)
+OpenRA/
