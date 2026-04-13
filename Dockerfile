@@ -13,13 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone OpenRA source from GitHub. The generated RL bridge stubs now live
-# upstream, so GH200 can stay on the remote bleed branch and use SKIP_PROTOC.
-ARG OPENRA_REPO=https://github.com/yxc20089/OpenRA.git
-ARG OPENRA_BRANCH=bleed
-ARG OPENRA_CACHE_BUST=0
-RUN echo "OpenRA cache bust: $OPENRA_CACHE_BUST" && \
-    git clone --depth=1 --branch "$OPENRA_BRANCH" "$OPENRA_REPO" /src/openra
+# Use the local OpenRA checkout from this repository so Docker builds include
+# the current RL bridge implementation and local engine patches.
+COPY OpenRA/ /src/openra/
 WORKDIR /src/openra
 
 # Fix Windows CRLF line endings in shell scripts (git autocrlf on Windows adds \r)
@@ -27,9 +23,7 @@ RUN find . -name '*.sh' -exec sed -i 's/\r$//' {} + && \
     find . -name '*.sh' -exec chmod +x {} +
 
 # Build with system libraries (unix-generic avoids bundled native binaries).
-# GH200 uses linux_arm64, where Grpc.Tools' bundled protoc currently crashes.
-# Use the checked-in generated RL bridge stubs from the upstream OpenRA repo.
-ENV SKIP_PROTOC=true
+# Use protoc so the generated RL bridge stubs stay in sync with the local proto.
 RUN make TARGETPLATFORM=unix-generic CONFIGURATION=Release
 
 # Verify critical output (includes Null platform for headless RL operation)
