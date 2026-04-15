@@ -575,6 +575,8 @@ class OpenRAEnvironment(MCPEnvironment):
                 if obs.get("done"):
                     game_phase = "game_over"
 
+            env_config = getattr(env, "_config", None)
+
             result = {
                 "tick": obs["tick"],
                 "done": obs["done"],
@@ -582,8 +584,8 @@ class OpenRAEnvironment(MCPEnvironment):
                 "phase": game_phase,
                 "winner": game_winner,
                 "player_count": game_player_count,
-                "self_slot": getattr(env._config, "rl_slot", ""),
-                "enemy_slot": getattr(env._config, "ai_slot", ""),
+                "self_slot": getattr(env_config, "rl_slot", ""),
+                "enemy_slot": getattr(env_config, "ai_slot", ""),
                 "faction": getattr(env, "_player_faction", ""),
                 "economy": obs["economy"],
                 "power_balance": power_balance,
