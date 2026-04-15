@@ -561,10 +561,31 @@ class OpenRAEnvironment(MCPEnvironment):
             if explored_pct == 0.0:
                 explored_pct = obs.get("explored_percent", 0.0)
 
+            game_phase = ""
+            game_winner = ""
+            game_player_count = 0
+            try:
+                bridge_state = asyncio.run_coroutine_threadsafe(
+                    env._bridge.get_state(), env._loop
+                ).result(timeout=5)
+                game_phase = getattr(bridge_state, "phase", "") or ""
+                game_winner = getattr(bridge_state, "winner", "") or ""
+                game_player_count = getattr(bridge_state, "player_count", 0) or 0
+            except Exception:
+                if obs.get("done"):
+                    game_phase = "game_over"
+
+            env_config = getattr(env, "_config", None)
+
             result = {
                 "tick": obs["tick"],
                 "done": obs["done"],
                 "result": obs.get("result", ""),
+                "phase": game_phase,
+                "winner": game_winner,
+                "player_count": game_player_count,
+                "self_slot": getattr(env_config, "rl_slot", ""),
+                "enemy_slot": getattr(env_config, "ai_slot", ""),
                 "faction": getattr(env, "_player_faction", ""),
                 "economy": obs["economy"],
                 "power_balance": power_balance,
