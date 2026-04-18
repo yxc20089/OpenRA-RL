@@ -76,9 +76,17 @@ message RlKillEvent {
   int32 tick = 1;
   uint32 victim_actor_id = 2;
   string victim_type = 3;        // e.g. "e1", "1tnk"
-  int32 victim_cell_x = 4;       // CPos X (grid) at time of death
-  int32 victim_cell_y = 5;       // CPos Y (grid) at time of death
-  uint32 attacker_actor_id = 6;  // 0 if environmental / self-damage
+  // Victim CPos (grid cell) at the tick INotifyKilled fired. If the unit was
+  // mid-move between cells, this is the "from" cell (CPos truncates sub-cell
+  // position). Sufficient for reward attribution; not a precise world coord.
+  int32 victim_cell_x = 4;
+  int32 victim_cell_y = 5;
+  // 0 when attacker is unknown — covers both "environmental" damage (lava,
+  // map-scripted explosions, etc.) AND self-damage (unit's own AttackInfo
+  // has Attacker==self). These cases are currently indistinguishable on the
+  // wire; consumers should treat attacker_actor_id=0 as "no attributable
+  // agent". attacker_type is "" in this case.
+  uint32 attacker_actor_id = 6;
   string attacker_type = 7;
   int32 attacker_cell_x = 8;     // CPos X (grid) at time of kill
   int32 attacker_cell_y = 9;
