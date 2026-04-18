@@ -63,6 +63,28 @@ message GameObservation {
   bool interrupted = 18;           // true if advance ended early due to interrupt
   string interrupt_reason = 19;    // signal name (e.g. "enemy_spotted")
   int32 actual_ticks_advanced = 20; // ticks actually advanced (may be < requested)
+
+  // Kill events that fired during this advance (authoritative — sourced from
+  // INotifyKilled hook with AttackInfo.Attacker). Drained each FastAdvance.
+  repeated RlKillEvent kill_events = 21;
+}
+
+// Kill event: one per INotifyKilled firing inside the engine. The same
+// event is delivered to both the victim's bridge (as a death) and the
+// attacker's bridge (as a kill) — disambiguated by victim_is_own/attacker_is_own.
+message RlKillEvent {
+  int32 tick = 1;
+  uint32 victim_actor_id = 2;
+  string victim_type = 3;        // e.g. "e1", "1tnk"
+  int32 victim_cell_x = 4;       // CPos X (grid) at time of death
+  int32 victim_cell_y = 5;       // CPos Y (grid) at time of death
+  uint32 attacker_actor_id = 6;  // 0 if environmental / self-damage
+  string attacker_type = 7;
+  int32 attacker_cell_x = 8;     // CPos X (grid) at time of kill
+  int32 attacker_cell_y = 9;
+  bool victim_is_own = 10;       // victim belongs to this bridge's player
+  bool attacker_is_own = 11;     // attacker belongs to this bridge's player
+  bool victim_is_building = 12;
 }
 
 message RlEconomy {

@@ -403,6 +403,24 @@ def observation_to_dict(obs: rl_bridge_pb2.GameObservation) -> dict:
         "interrupted": obs.interrupted,
         "interrupt_reason": obs.interrupt_reason,
         "actual_ticks_advanced": obs.actual_ticks_advanced,
+        # Authoritative kill events (INotifyKilled hook — includes attacker identity)
+        "kill_events": [
+            {
+                "tick": ev.tick,
+                "victim_actor_id": ev.victim_actor_id,
+                "victim_type": ev.victim_type,
+                "victim_cell_x": ev.victim_cell_x,
+                "victim_cell_y": ev.victim_cell_y,
+                "attacker_actor_id": ev.attacker_actor_id,
+                "attacker_type": ev.attacker_type,
+                "attacker_cell_x": ev.attacker_cell_x,
+                "attacker_cell_y": ev.attacker_cell_y,
+                "victim_is_own": ev.victim_is_own,
+                "attacker_is_own": ev.attacker_is_own,
+                "victim_is_building": ev.victim_is_building,
+            }
+            for ev in obs.kill_events
+        ],
     }
 
 

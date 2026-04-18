@@ -1545,6 +1545,9 @@ class OpenRAEnvironment(MCPEnvironment):
                 "interrupted": obs_dict.get("interrupted", False),
                 "interrupt_reason": obs_dict.get("interrupt_reason", ""),
                 "actual_ticks_advanced": obs_dict.get("actual_ticks_advanced", 0),
+                # Authoritative kill events — drained from engine's INotifyKilled
+                # hook. Includes attacker identity and victim position at death.
+                "kill_events": list(obs_dict.get("kill_events", [])),
             }
             if requested > 500:
                 result["note"] = f"Clamped from {requested} to 500 ticks (max per call)."

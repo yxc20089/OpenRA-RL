@@ -3,9 +3,9 @@
 import grpc
 import warnings
 
-from openra_env.generated import rl_bridge_pb2 as rl__bridge__pb2
+import rl_bridge_pb2 as rl__bridge__pb2
 
-GRPC_GENERATED_VERSION = '1.78.0'
+GRPC_GENERATED_VERSION = '1.75.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in rl_bridge_pb2_grpc.py depends on'
+        + f' but the generated code in rl_bridge_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -61,11 +61,6 @@ class RLBridgeStub(object):
                 '/openra.rl.RLBridge/DestroySession',
                 request_serializer=rl__bridge__pb2.DestroySessionRequest.SerializeToString,
                 response_deserializer=rl__bridge__pb2.DestroySessionResponse.FromString,
-                _registered_method=True)
-        self.ListSessions = channel.unary_unary(
-                '/openra.rl.RLBridge/ListSessions',
-                request_serializer=rl__bridge__pb2.ListSessionsRequest.SerializeToString,
-                response_deserializer=rl__bridge__pb2.ListSessionsResponse.FromString,
                 _registered_method=True)
 
 
@@ -111,12 +106,6 @@ class RLBridgeServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def ListSessions(self, request, context):
-        """Missing associated documentation comment in .proto file."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
 
 def add_RLBridgeServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -144,11 +133,6 @@ def add_RLBridgeServicer_to_server(servicer, server):
                     servicer.DestroySession,
                     request_deserializer=rl__bridge__pb2.DestroySessionRequest.FromString,
                     response_serializer=rl__bridge__pb2.DestroySessionResponse.SerializeToString,
-            ),
-            'ListSessions': grpc.unary_unary_rpc_method_handler(
-                    servicer.ListSessions,
-                    request_deserializer=rl__bridge__pb2.ListSessionsRequest.FromString,
-                    response_serializer=rl__bridge__pb2.ListSessionsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -289,33 +273,6 @@ class RLBridge(object):
             '/openra.rl.RLBridge/DestroySession',
             rl__bridge__pb2.DestroySessionRequest.SerializeToString,
             rl__bridge__pb2.DestroySessionResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def ListSessions(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/openra.rl.RLBridge/ListSessions',
-            rl__bridge__pb2.ListSessionsRequest.SerializeToString,
-            rl__bridge__pb2.ListSessionsResponse.FromString,
             options,
             channel_credentials,
             insecure,
