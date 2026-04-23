@@ -196,6 +196,11 @@ class OpenRAObservation(Observation):
         description="8-dimensional reward: combat, economy, infrastructure, intelligence, composition, tempo, disruption, outcome",
     )
 
+    reward_components: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Breakdown of scalar reward components (survival, economic_efficiency, aggression, defense, victory, defeat)",
+    )
+
     # Inherited from Observation:
     # done: bool = False
     # reward: float | None = None
