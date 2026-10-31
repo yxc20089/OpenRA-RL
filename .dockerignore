@@ -1,21 +1,7 @@
-.git
-.github
-.pytest_cache
-__pycache__
-*.pyc
-*.pyo
-*.egg-info
-.eggs
-dist
-build
-.mypy_cache
-.ruff_cache
-.venv
-venv
-documents/
-tests/
-docs/
-*.pdf
-.claude/
-# OpenRA submodule (cloned from GitHub during Docker build)
-OpenRA/
+# Only OpenRA/ is needed in the build context.
+*
+!OpenRA/
+OpenRA/.git
+OpenRA/bin/
+OpenRA/**/obj/
+OpenRA/**/*.user

@@ -1,19 +1,24 @@
 __pycache__/
 *.py[cod]
-*$py.class
 *.egg-info/
 dist/
 build/
-.eggs/
-*.egg
 .venv/
 venv/
 .env
 *.log
 .pytest_cache/
 .ruff_cache/
-.mypy_cache/
 .DS_Store
-replays/
-documents/
 *.orarep
+
+# Training artifacts
+runs/
+ckpts/
+*.pt
+*.pth
+*.onnx
+wandb/
+
+# Recorded imitation data
+data/

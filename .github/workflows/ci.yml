@@ -2,31 +2,30 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, v3]
   pull_request:
     branches: [main]
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11", "3.12"]
-
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install
         run: pip install -e ".[dev]"
 
-      - name: Run tests
-        run: pytest tests/ -v
+      - name: Proto stubs up to date
+        run: |
+          python scripts/gen_proto.py
+          git diff --exit-code ra_env/_proto
+
+      - name: Unit tests
+        run: pytest
 
       - name: Lint
-        run: ruff check openra_env/
+        run: ruff check ra_env ra_rl tests scripts

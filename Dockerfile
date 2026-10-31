@@ -1,154 +1,68 @@
-# ==============================================================================
-# Stage 1: Build OpenRA from source (C#/.NET 8.0)
-# ==============================================================================
-FROM mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim AS openra-build
+# OpenRA RL daemon: the forked engine (OpenRA/ submodule) running headless in
+# multi-session mode. The container is C# only; Python talks gRPC on :9999.
+#
+#   git submodule update --init OpenRA
+#   docker compose up -d --build
+
+# ------------------------------------------------------------------------------
+# Build the engine from the local submodule
+# ------------------------------------------------------------------------------
+FROM mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    make \
-    git \
-    libsdl2-dev \
-    libopenal-dev \
-    libfreetype-dev \
-    liblua5.1-0-dev \
-    ca-certificates \
+    make git ca-certificates \
+    libsdl2-dev libopenal-dev libfreetype-dev liblua5.1-0-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone OpenRA source from GitHub. The generated RL bridge stubs now live
-# upstream, so GH200 can stay on the remote bleed branch and use SKIP_PROTOC.
-ARG OPENRA_REPO=https://github.com/yxc20089/OpenRA.git
-ARG OPENRA_BRANCH=bleed
-ARG OPENRA_CACHE_BUST=0
-RUN echo "OpenRA cache bust: $OPENRA_CACHE_BUST" && \
-    git clone --depth=1 --branch "$OPENRA_BRANCH" "$OPENRA_REPO" /src/openra
+COPY OpenRA/ /src/openra/
 WORKDIR /src/openra
 
-# Fix Windows CRLF line endings in shell scripts (git autocrlf on Windows adds \r)
-RUN find . -name '*.sh' -exec sed -i 's/\r$//' {} + && \
+# A Windows checkout leaves CRLF in Makefile/.cs/.yaml, which breaks make and MiniYaml.
+RUN find . -type f \( \
+        -name '*.sh' -o -name 'Makefile' -o -name '*.mk' \
+        -o -name '*.cs' -o -name '*.csproj' -o -name '*.props' -o -name '*.targets' \
+        -o -name '*.sln' -o -name '*.yaml' -o -name '*.yml' -o -name '*.json' \
+        -o -name '*.lua' -o -name '*.proto' -o -name '*.frag' -o -name '*.vert' \) \
+        -exec sed -i 's/\r$//' {} + && \
     find . -name '*.sh' -exec chmod +x {} +
 
-# Build with system libraries (unix-generic avoids bundled native binaries).
-# GH200 uses linux_arm64, where Grpc.Tools' bundled protoc currently crashes.
-# Use the checked-in generated RL bridge stubs from the upstream OpenRA repo.
-ENV SKIP_PROTOC=true
-RUN make TARGETPLATFORM=unix-generic CONFIGURATION=Release
+# SKIP_PROTOC stays unset: Grpc.Tools regenerates the C# stubs from the proto.
+RUN make TARGETPLATFORM=unix-generic CONFIGURATION=Release && \
+    test -f bin/OpenRA.dll && test -f bin/OpenRA.Platforms.Null.dll
 
-# Verify critical output (includes Null platform for headless RL operation)
-RUN test -f bin/OpenRA.dll && \
-    test -f bin/OpenRA.Game.dll && \
-    test -f bin/OpenRA.Mods.Common.dll && \
-    test -f bin/OpenRA.Platforms.Null.dll
-
-# ==============================================================================
-# Stage 2: Install Python dependencies
-# ==============================================================================
-FROM python:3.11-slim-bookworm AS python-build
+# ------------------------------------------------------------------------------
+# Runtime: ASP.NET Core (the gRPC server is Kestrel) + native libs OpenRA loads
+# ------------------------------------------------------------------------------
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+    libsdl2-2.0-0 libopenal1 libfreetype6 liblua5.1-0 \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-COPY pyproject.toml /app/
-COPY openra_env/ /app/openra_env/
-COPY proto/ /app/proto/
-COPY README.md /app/
+COPY --from=build /src/openra/bin /opt/openra/bin
+COPY --from=build /src/openra/mods /opt/openra/mods
+COPY --from=build /src/openra/glsl /opt/openra/glsl
+COPY --from=build ["/src/openra/global mix database.dat", "/opt/openra/global mix database.dat"]
 
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir .
-
-# ==============================================================================
-# Stage 3: Runtime image
-# ==============================================================================
-FROM mcr.microsoft.com/dotnet/aspnet:8.0-bookworm-slim AS dotnet-runtime
-
-FROM python:3.11-slim-bookworm
-
-LABEL maintainer="OpenRA-RL"
-LABEL description="OpenRA RL Environment - headless game engine with gRPC bridge + OpenEnv API"
-
-# Copy ASP.NET Core runtime from official Microsoft image
-COPY --from=dotnet-runtime /usr/share/dotnet /usr/share/dotnet
-RUN ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet
-
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    xvfb \
-    libgl1-mesa-dri \
-    libgl1-mesa-glx \
-    libegl-mesa0 \
-    mesa-vulkan-drivers \
-    libvulkan1 \
-    libsdl2-2.0-0 \
-    libopenal1 \
-    libfreetype6 \
-    liblua5.1-0 \
-    libicu72 \
-    curl procps \
-    x11vnc novnc websockify \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy Python packages from builder
-COPY --from=python-build /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=python-build /usr/local/bin /usr/local/bin
-
-# Copy built OpenRA (bin, mods, glsl shaders, and global mix database for content resolution)
-COPY --from=openra-build /src/openra/bin /opt/openra/bin
-COPY --from=openra-build /src/openra/mods /opt/openra/mods
-COPY --from=openra-build /src/openra/glsl /opt/openra/glsl
-COPY --from=openra-build ["/src/openra/global mix database.dat", "/opt/openra/global mix database.dat"]
-
-# Create native library symlinks that OpenRA expects
-# (configure-system-libraries.sh points these to system lib paths)
-RUN LIBDIR=$( [ "$(dpkg --print-architecture)" = "arm64" ] && echo "/usr/lib/aarch64-linux-gnu" || echo "/usr/lib/x86_64-linux-gnu" ) && \
+RUN LIBDIR=/usr/lib/$(uname -m)-linux-gnu && \
     ln -sf "$LIBDIR/libSDL2-2.0.so.0" /opt/openra/bin/SDL2.so && \
     ln -sf "$LIBDIR/libopenal.so.1" /opt/openra/bin/soft_oal.so && \
     ln -sf "$LIBDIR/libfreetype.so.6" /opt/openra/bin/freetype6.so && \
     ln -sf "$LIBDIR/liblua5.1.so.0" /opt/openra/bin/lua51.so
 
-# Copy Python application code
-COPY openra_env/ /app/openra_env/
-COPY proto/ /app/proto/
-COPY pyproject.toml /app/
+# OPENRA_RL_DETERMINISTIC: seed bot LocalRandom from the game seed (reproducible episodes).
+# OPENRA_RL_AUTOSTART=0: never spawn the v2 in-game Python sidecar.
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    DOTNET_ROLL_FORWARD=LatestMajor \
+    OPENRA_RL_DETERMINISTIC=1 \
+    OPENRA_RL_AUTOSTART=0 \
+    OPENRA_RL_FAST_ADVANCE_DEADLINE_S=90
 
-# Create OpenRA support directory and pre-install RA game content (best-effort).
-# Only needed for the replay viewer (Game.Platform=Default with full UI).
-# The RL environment works without this content (headless mode).
-RUN mkdir -p /root/.config/openra/Content/ra/v2/expand /root/.config/openra/Content/ra/v2/cnc && \
-    ( curl -sfL --max-time 30 -o /tmp/ra-quickinstall.zip \
-        https://openra.baxxster.no/openra/ra-quickinstall.zip && \
-    apt-get update && apt-get install -y --no-install-recommends unzip && \
-    unzip -o /tmp/ra-quickinstall.zip -d /tmp/ra-content && \
-    cp /tmp/ra-content/*.mix /root/.config/openra/Content/ra/v2/ && \
-    cp /tmp/ra-content/expand/* /root/.config/openra/Content/ra/v2/expand/ && \
-    cp /tmp/ra-content/cnc/* /root/.config/openra/Content/ra/v2/cnc/ && \
-    rm -rf /tmp/ra-quickinstall.zip /tmp/ra-content && \
-    apt-get purge -y unzip && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* \
-    ) || echo "WARNING: RA content download failed (replay viewer will be unavailable)"
+WORKDIR /opt/openra
+EXPOSE 9999
 
-# Copy entrypoints (fix Windows CRLF line endings)
-COPY docker/entrypoint.sh /entrypoint.sh
-COPY docker/replay-viewer.sh /replay-viewer.sh
-RUN sed -i 's/\r$//' /entrypoint.sh /replay-viewer.sh && \
-    chmod +x /entrypoint.sh /replay-viewer.sh
+HEALTHCHECK --interval=15s --timeout=3s --start-period=30s --retries=3 \
+    CMD bash -c '</dev/tcp/127.0.0.1/9999' || exit 1
 
-# Environment
-ENV OPENRA_PATH=/opt/openra
-ENV PYTHONPATH=/app
-ENV PYTHONUNBUFFERED=1
-ENV DISPLAY=:99
-ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
-ENV DOTNET_ROLL_FORWARD=LatestMajor
-ENV LIBGL_ALWAYS_SOFTWARE=1
-ENV MESA_GL_VERSION_OVERRIDE=3.3
-# Game configuration (override at runtime with -e)
-ENV AI_SLOT=Multi0
-ENV BOT_TYPE=beginner
-ENV RECORD_REPLAYS=true
-
-EXPOSE 8000
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
-
-ENTRYPOINT ["/entrypoint.sh"]
-CMD ["python", "-m", "openra_env.server.app"]
+ENTRYPOINT ["dotnet", "/opt/openra/bin/OpenRA.dll", "Engine.EngineDir=/opt/openra", "Game.Mod=ra", \
+            "Game.Platform=Null", "Launch.MultiSession=9999"]

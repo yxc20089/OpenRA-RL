@@ -17,10 +17,18 @@ service RLBridge {
 
   // Unary: advance N ticks with optional commands, return observation.
   // Bypasses streaming — works reliably on all platforms.
+  // Server hard-deadline (default 90s, OPENRA_RL_FAST_ADVANCE_DEADLINE_S):
+  // on DEADLINE_EXCEEDED the session_id is POISONED/DESTROYED — never reuse;
+  // next episode MUST CreateSession for a fresh id.
   rpc FastAdvance(FastAdvanceRequest) returns (GameObservation);
+
+  // Unary: snapshot observation for a specific player slot (RL-vs-RL peer).
+  // Call after FastAdvance; world must be idle. Empty player_slot = primary (Multi1).
+  rpc GetObservation(ObservationRequest) returns (GameObservation);
 
   // Session management (multi-session mode)
   rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  // Mandatory GC after DEADLINE / client gone: purge zombies; logs active_sessions.
   rpc DestroySession(DestroySessionRequest) returns (DestroySessionResponse);
 }
 
@@ -61,9 +69,75 @@ message GameObservation {
 
   // Server-side interrupt detection results
   bool interrupted = 18;           // true if advance ended early due to interrupt
-  string interrupt_reason = 19;    // signal name (e.g. "enemy_spotted")
-  int32 actual_ticks_advanced = 20; // ticks actually advanced (may be < requested)
+    string interrupt_reason = 19;    // signal name (e.g. "enemy_spotted")
+    int32 actual_ticks_advanced = 20; // ticks actually advanced (may be < requested)
+
+    // Resumen modo espectador por bando (evaluacion / metricas). NO debe
+    // usarse para decidir: el agente sigue con su obs con niebla.
+    RlGlobalSummary global_summary = 21;
+
+    // Player slot this observation belongs to (e.g. "Multi1"). Empty = legacy primary.
+    string player_slot = 22;
+    // SupportPowerManager keys that are Ready (Chronoshift, NukePowerOrder, ...).
+    repeated string ready_support_powers = 23;
+
+    // v3 commander: decisions the agent must answer in the next FastAdvance
+    // (brain "external"). Unanswered requests count as "wait".
+    repeated DecisionRequest pending_decisions = 24;
+    // Decisions taken by the built-in bot logic since the last observation
+    // (brain "builtin"): the teacher signal for imitation.
+    repeated TeacherDecision teacher_decisions = 25;
+  }
+
+// ─── v3 commander decisions ─────────────────────────────────────────────────
+
+enum DecisionKind {
+  DECISION_NONE = 0;
+  DECIDE_BUILD = 1;   // a structure queue (Building / Defense) is free
+  DECIDE_TRAIN = 2;   // a unit queue (Infantry / Vehicle / ...) is free
+  DECIDE_ARMY = 3;    // periodic: where the main army goes
 }
+
+message TargetCandidate {
+  int32 cell_x = 1;
+  int32 cell_y = 2;
+  string kind = 3;   // "enemy_spawn" | "enemy_building"
+  string type = 4;   // actor type for enemy_building
+}
+
+message DecisionRequest {
+  uint32 id = 1;
+  DecisionKind kind = 2;
+  string queue = 3;                      // BUILD/TRAIN: production queue type
+  repeated string options = 4;           // BUILD/TRAIN: items buildable right now
+  repeated TargetCandidate targets = 5;  // ARMY: attack candidates
+  int32 tick = 6;
+}
+
+message Decision {
+  uint32 request_id = 1;
+  string choice = 2;        // BUILD/TRAIN: one of options; "" = wait
+  // ARMY: -1 = hold (call off the attack, back home), k = attack targets[k].
+  // Leaving an ARMY request unanswered keeps the current orders.
+  int32 target_index = 3;
+}
+
+message TeacherDecision {
+  DecisionRequest request = 1;
+  Decision decision = 2;
+}
+
+  message RlGlobalSummary {
+        message Side {
+          int32 cash = 1;
+          int32 unit_value = 2;
+          int32 building_value = 3;
+          int32 n_buildings = 4;   // conteo de edificios vivos del bando (para raze)
+          int32 earned = 5;        // mineral extraido acumulado (PlayerResources.Earned)
+        }
+        Side own = 1;
+        Side enemy = 2;
+      }
 
 message RlEconomy {
   int32 cash = 1;
@@ -191,6 +265,8 @@ enum ActionType {
   SURRENDER = 20;       // Surrender / resign — ends the game as a loss
   FAST_ADVANCE = 21;
   PATROL = 22;          // Patrol between current position and target
+  ARMY_ATTACK_MOVE = 23;
+  SUPPORT_POWER = 24;   // Fire a ready support power (item_type = OrderName)
 }
 
 // ─── State Query ─────────────────────────────────────────────────────────────
@@ -209,6 +285,11 @@ message StateRequest {
   string session_id = 1;  // Route to specific session (multi-session mode)
 }
 
+message ObservationRequest {
+  string session_id = 1;
+  string player_slot = 2;  // e.g. "Multi0" / "Multi1"; empty = primary
+}
+
 // ─── Fast Advance (Unary) ───────────────────────────────────────────────────
 
 message FastAdvanceRequest {
@@ -221,6 +302,15 @@ message FastAdvanceRequest {
   // 0 = disabled (legacy behavior: advance full ticks, no interrupt checks).
   int32 check_events_every = 4;
   repeated string enabled_interrupts = 5;  // Signal names: "enemy_spotted", "building_discovered", etc.
+
+  // RL-vs-RL: inject these commands into peer_slot's ExternalBotBridge before
+  // ticking (no second FastAdvance). Empty peer_commands = bot/scripted Multi0.
+  repeated Command peer_commands = 6;
+  string peer_slot = 7;  // default "Multi0" when peer_commands non-empty
+
+  // v3 commander: answers to the previous observation's pending_decisions.
+  // With brain "external" the advance also stops early when new decisions arise.
+  repeated Decision decisions = 8;
 }
 
 // ─── Session Management (Multi-Session Mode) ────────────────────────────────
@@ -229,6 +319,14 @@ message CreateSessionRequest {
   string map_name = 1;    // Map filename or UID
   string bots = 2;        // Bot config: "Multi1:rl-agent,Multi0:beginner"
   int32 seed = 3;         // Random seed (0 = random)
+  // Empty → C# default RandomAllies on the rl-agent slot (doc 24).
+  // Valid: RandomAllies, england, france, germany (not Random: rewritten).
+  string player_faction = 4;
+  // Empty → Random for scripted/other slots.
+  string enemy_faction = 5;
+  // v3 commander brain for the rl-agent slot: "external" (agent decides,
+  // default) or "builtin" (the normal bot logic decides and reports teacher_decisions).
+  string agent_brain = 6;
 }
 
 message CreateSessionResponse {

@@ -1,40 +1,30 @@
 [project]
 name = "openra-rl"
-version = "0.4.1"
-description = "Play Red Alert with AI agents — LLMs, scripted bots, or RL"
+version = "3.0.0.dev0"
+description = "Reinforcement learning agent for OpenRA Red Alert (Allies), v3"
 readme = "README.md"
 license = {text = "GPL-3.0"}
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "openenv-core>=0.2.0",
-    "openra-rl-util>=0.1.0",
-    "grpcio>=1.60.0",
-    "grpcio-tools>=1.60.0",
-    "protobuf>=4.25.0",
-    "pydantic>=2.0.0",
-    "fastapi>=0.100.0",
-    "uvicorn>=0.20.0",
+    # Must be >= the versions that generated ra_env/_proto (scripts/gen_proto.py).
+    "grpcio>=1.85.0",
+    "protobuf>=7.35.0",
+    "numpy>=2.0",
     "pyyaml>=6.0",
-    "mcp>=1.2.0",
-    "httpx>=0.24.0",
-    "python-dotenv>=1.0.0",
-    "websockets>=12.0",
 ]
-
-[project.scripts]
-openra-rl = "openra_env.cli.main:main"
-openra-rl-mcp = "openra_env.mcp_server:main"
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0",
-    "pytest-asyncio>=0.21",
-    "ruff>=0.1.0",
+    # Pinned: CI regenerates ra_env/_proto and fails on any diff.
+    "grpcio-tools==1.85.0",
+    "pytest>=8.0",
+    "ruff>=0.6",
 ]
-training = [
-    "trl>=0.7.0",
-    "torch>=2.0.0",
-    "transformers>=4.30.0",
+# Training and network policies. For CUDA wheels:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu126
+train = [
+    "torch>=2.4",
+    "tensorboard>=2.17",
 ]
 
 [build-system]
@@ -42,12 +32,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["openra_env"]
+packages = ["ra_env", "ra_rl"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"
+markers = ["daemon: needs a running OpenRA daemon (docker compose up -d)"]
+addopts = "-m 'not daemon'"
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
+extend-exclude = ["ra_env/_proto", "OpenRA"]
